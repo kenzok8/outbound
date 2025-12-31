@@ -17,6 +17,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
 	"github.com/daeuniverse/outbound/transport/meek"
+	"github.com/daeuniverse/outbound/transport/mkcp"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
 	jsoniter "github.com/json-iterator/go"
@@ -230,6 +231,19 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			}.Encode(),
 		}
 		d, err = httpupgrade.NewDialer(u.String(), d)
+		if err != nil {
+			return nil, nil, err
+		}
+	case "kcp", "mkcp":
+		// mKCP transport
+		u := url.URL{
+			Scheme: "mkcp",
+			Host:   net.JoinHostPort(s.Add, s.Port),
+			RawQuery: url.Values{
+				"seed": []string{s.Path},
+			}.Encode(),
+		}
+		d, _, err = mkcp.NewMkcp(option, d, u.String())
 		if err != nil {
 			return nil, nil, err
 		}
