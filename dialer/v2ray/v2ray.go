@@ -215,6 +215,28 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if err != nil {
 			return nil, nil, err
 		}
+	case "mekya":
+		if strings.HasPrefix(s.Path, "https://") && s.TLS != "tls" && s.TLS != "utls" {
+			return nil, nil, fmt.Errorf("%w: mekya: tls should be enabled", dialer.InvalidParameterErr)
+		}
+
+		u := url.URL{
+			Scheme: "meek",
+			Host:   net.JoinHostPort(s.Add, s.Port),
+			RawQuery: url.Values{
+				"url":           []string{s.Path},
+				"alpn":          []string{s.Alpn},
+				"serverName":    []string{s.SNI},
+				"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+			}.Encode(),
+		}
+
+		meekDialer, err := meek.NewDialer(u.String(), d)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Wrap with mKCP
+		d = meek.NewMekyaDialer(meekDialer, mkcp.DefaultConfig())
 	case "httpupgrade":
 		scheme := "http"
 		if s.TLS == "tls" {
