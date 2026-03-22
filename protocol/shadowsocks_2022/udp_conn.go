@@ -73,11 +73,14 @@ func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) 
 }
 
 // NewUdpConnWithContext creates a new UDP connection with the given context.
+// For UDP, the context is only used to check for cancellation during the initial setup,
+// not for ongoing I/O operations. UDP connections are long-lived and should not be
+// bound to the dial context's timeout.
 func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	u := &UdpConn{
 		SS2022Core: core,
 		Conn:       conn,
-		ctx:        ctx,
+		ctx:        context.Background(), // Use Background for long-lived UDP connections
 		bloom:      bloom,
 	}
 
