@@ -92,7 +92,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		if err != nil {
 			return nil, err
 		}
-		return NewTCPConn(conn.(net.Conn), d.core, d.sg, addrInfo, nil), nil
+		return NewTCPConnWithContext(ctx, conn.(net.Conn), d.core, d.sg, addrInfo, nil), nil
 	case "udp":
 		conn, err := d.ListenPacket(ctx, network, d.proxyAddress)
 		if err != nil {
@@ -120,5 +120,5 @@ func (d *Dialer) ListenPacket(ctx context.Context, network string, addr string) 
 	if err != nil {
 		return nil, err
 	}
-	return NewUdpConn(conn.(net.Conn), d.core, nil)
+	return NewUdpConnWithContext(ctx, conn.(net.Conn), d.core, nil)
 }

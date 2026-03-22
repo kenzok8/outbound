@@ -2,6 +2,7 @@ package shadowsocks_2022
 
 import (
 	"bytes"
+	"context"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
@@ -31,6 +32,8 @@ type UdpConn struct {
 
 	sessionID [8]byte
 	packetID  atomic.Uint64
+	ctx       context.Context
+	ctxMu     sync.RWMutex
 
 	// cipher is derived from the local session ID and reused for outbound
 	// packets. Inbound packets must decrypt against the remote session ID
@@ -66,15 +69,68 @@ type udpSessionReplayState struct {
 
 // NewUdpConn creates a new UDP connection bound to a shared SS2022 profile.
 func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
+	return NewUdpConnWithContext(context.Background(), conn, core, bloom)
+}
+
+// NewUdpConnWithContext creates a new UDP connection with the given context.
+func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	u := &UdpConn{
 		SS2022Core: core,
 		Conn:       conn,
+		ctx:        ctx,
 		bloom:      bloom,
 	}
 
 	// Generate session ID
 	fastrand.Read(u.sessionID[:])
 	return u, nil
+}
+
+// getContext returns the current context, defaulting to background if not set.
+func (c *UdpConn) getContext() context.Context {
+	c.ctxMu.RLock()
+	defer c.ctxMu.RUnlock()
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
+
+// setContext updates the connection's context.
+func (c *UdpConn) setContext(ctx context.Context) {
+	c.ctxMu.Lock()
+	defer c.ctxMu.Unlock()
+	c.ctx = ctx
+}
+
+// checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
+// Returns true if the operation should proceed, false if it should be aborted.
+func (c *UdpConn) checkContextAndSetReadDeadline() bool {
+	ctx := c.getContext()
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		dl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	}
+	return true
+}
+
+// checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
+// Returns true if the operation should proceed, false if it should be aborted.
+func (c *UdpConn) checkContextAndSetWriteDeadline() bool {
+	ctx := c.getContext()
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		dl.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	}
+	return true
 }
 
 func (c *UdpConn) ensureCipher() error {
@@ -247,6 +303,9 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	// Use session-level cipher (no cache lookup needed)
 	packet = c.cipher.Seal(packet[:messageOffset], separateHeader[4:16], message, nil)
 
+	if !c.checkContextAndSetWriteDeadline() {
+		return 0, io.EOF
+	}
 	_, err = c.Conn.Write(packet)
 	return len(b), err
 }
@@ -310,6 +369,9 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 
 	// Seal the entire message (EIH is included as part of plaintext)
 	packet = c.cipher.Seal(packet[:udpPacketNonceSize], nonce, packet[eihOffset:messageOffset+messageLen], nil)
+	if !c.checkContextAndSetWriteDeadline() {
+		return 0, io.EOF
+	}
 	_, err = c.Conn.Write(packet)
 	return len(b), err
 }
@@ -321,9 +383,18 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 
 	buf := pool.Get(len(b) + 16 + c.CipherConf().TagLen)
 	defer pool.Put(buf)
+	if !c.checkContextAndSetReadDeadline() {
+		return 0, netip.AddrPort{}, io.EOF
+	}
 	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
+	}
+	// Check context after read
+	select {
+	case <-c.getContext().Done():
+		return 0, netip.AddrPort{}, c.getContext().Err()
+	default:
 	}
 	if n < 16 {
 		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
@@ -404,9 +475,18 @@ func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err erro
 	buf := pool.Get(len(b) + udpPacketNonceSize + c.CipherConf().TagLen + 320)
 	defer pool.Put(buf)
 
+	if !c.checkContextAndSetReadDeadline() {
+		return 0, netip.AddrPort{}, io.EOF
+	}
 	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
+	}
+	// Check context after read
+	select {
+	case <-c.getContext().Done():
+		return 0, netip.AddrPort{}, c.getContext().Err()
+	default:
 	}
 	if n < udpPacketNonceSize+c.CipherConf().TagLen+16 {
 		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")

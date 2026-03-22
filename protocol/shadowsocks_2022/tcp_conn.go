@@ -1,6 +1,7 @@
 package shadowsocks_2022
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
@@ -38,8 +39,10 @@ type TCPConn struct {
 	*SS2022Core // Embedded core for shared logic
 
 	net.Conn
-	addr *socks5.AddressInfo
-	sg   shadowsocks.SaltGenerator
+	addr    *socks5.AddressInfo
+	sg      shadowsocks.SaltGenerator
+	ctx     context.Context
+	ctxMu   sync.RWMutex
 
 	cipherRead  cipher.AEAD
 	cipherWrite cipher.AEAD
@@ -65,16 +68,38 @@ type Key struct {
 }
 
 func NewTCPConn(conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
+	return NewTCPConnWithContext(context.Background(), conn, core, sg, addr, bloom)
+}
+
+func NewTCPConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
 	tcpConn := &TCPConn{
 		SS2022Core: core,
 		Conn:       conn,
 		addr:       addr,
 		sg:         sg,
+		ctx:        ctx,
 		nonceRead:  make([]byte, core.CipherConf().NonceLen),
 		nonceWrite: make([]byte, core.CipherConf().NonceLen),
 		bloom:      bloom,
 	}
 	return tcpConn
+}
+
+// getContext returns the current context, defaulting to background if not set
+func (c *TCPConn) getContext() context.Context {
+	c.ctxMu.RLock()
+	defer c.ctxMu.RUnlock()
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
+
+// setContext updates the connection's context
+func (c *TCPConn) setContext(ctx context.Context) {
+	c.ctxMu.Lock()
+	defer c.ctxMu.Unlock()
+	c.ctx = ctx
 }
 
 func (c *TCPConn) Close() error {
@@ -88,6 +113,43 @@ func (c *TCPConn) Close() error {
 	c.writeFrame = nil
 	c.writeMutex.Unlock()
 	return c.Conn.Close()
+}
+
+// checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
+// Returns true if the operation should proceed, false if it should be aborted.
+// Sets a short deadline to allow interruption via context cancellation.
+func (c *TCPConn) checkContextAndSetReadDeadline() bool {
+	ctx := c.getContext()
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	// Set a short deadline to allow the read to be interrupted
+	// If the connection supports SetReadDeadline, use 5 seconds
+	// This ensures that even if we don't detect context cancellation immediately,
+	// the read will eventually return and we can check again
+	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		// Use a relatively short deadline to allow responsive shutdown
+		// Long enough for normal I/O, short enough to not block shutdown
+		dl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	}
+	return true
+}
+
+// checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
+// Returns true if the operation should proceed, false if it should be aborted.
+func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
+	ctx := c.getContext()
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+	if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		dl.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	}
+	return true
 }
 
 func encryptedPayloadLen(payloadLen, tagLen int) int {
@@ -264,21 +326,39 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	var payloadLength uint16
 
 	if !c.onceRead {
+		if !c.checkContextAndSetReadDeadline() {
+			return 0, io.EOF
+		}
 		var saltBuf [32]byte
 		salt := saltBuf[:c.CipherConf().SaltLen]
 		n, err = io.ReadFull(c.Conn, salt)
 		if err != nil {
 			return 0, err
 		}
+		// Check context after read
+		select {
+		case <-c.getContext().Done():
+			return 0, c.getContext().Err()
+		default:
+		}
 		c.cipherRead, err = CreateCipher(c.UPSK(), salt, c.CipherConf())
 		if err != nil {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
 
+		if !c.checkContextAndSetReadDeadline() {
+			return 0, io.EOF
+		}
 		var headerBuf [11 + 32 + 16]byte
 		header := headerBuf[:11+c.CipherConf().SaltLen+c.CipherConf().TagLen]
 		if _, err := io.ReadFull(c.Conn, header); err != nil {
 			return 0, err
+		}
+		// Check context after read
+		select {
+		case <-c.getContext().Done():
+			return 0, c.getContext().Err()
+		default:
 		}
 		header, err := c.cipherRead.Open(header[:0], c.nonceRead, header, nil)
 		if err != nil {
@@ -313,10 +393,19 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 		c.onceRead = true
 	} else {
+		if !c.checkContextAndSetReadDeadline() {
+			return 0, io.EOF
+		}
 		var payloadLengthBuf [2 + 16]byte
 		payloadLengthRaw := payloadLengthBuf[:2+c.CipherConf().TagLen]
 		if _, err := io.ReadFull(c.Conn, payloadLengthRaw); err != nil {
 			return 0, err
+		}
+		// Check context after read
+		select {
+		case <-c.getContext().Done():
+			return 0, c.getContext().Err()
+		default:
 		}
 		payloadLengthPlain, err := c.cipherRead.Open(payloadLengthRaw[:0], c.nonceRead, payloadLengthRaw, nil)
 		if err != nil {
@@ -331,9 +420,18 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
 
+	if !c.checkContextAndSetReadDeadline() {
+		return 0, io.EOF
+	}
 	payload := c.ensureReadCipherBuf(int(payloadLength) + c.CipherConf().TagLen)
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return 0, err
+	}
+	// Check context after read
+	select {
+	case <-c.getContext().Done():
+		return 0, c.getContext().Err()
+	default:
 	}
 	payload, err = c.cipherRead.Open(payload[:0], c.nonceRead, payload, nil)
 	if err != nil {
@@ -417,6 +515,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 
 		offset += c.sealPayload(frame[offset:], remainingPayload)
 		c.onceWrite = true
+		if !c.checkContextAndSetWriteDeadline() {
+			return 0, io.EOF
+		}
 		_, err = c.Conn.Write(frame[:offset])
 		return n, err
 	}
@@ -426,6 +527,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	frameSize := encryptedPayloadLen(len(b), c.CipherConf().TagLen)
 	frame := c.borrowWriteFrame(frameSize)
 	offset := c.sealPayload(frame, b)
+	if !c.checkContextAndSetWriteDeadline() {
+		return 0, io.EOF
+	}
 	_, err = c.Conn.Write(frame[:offset])
 	return n, err
 }
