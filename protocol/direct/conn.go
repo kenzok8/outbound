@@ -20,9 +20,6 @@ type directPacketConn struct {
 	cacheOnce     sync.Once
 	cacheErr      error
 	resolver      *net.Resolver
-	// writeMu serializes concurrent Write calls in FullCone mode.
-	// Prevents race between target resolution and actual write operations.
-	writeMu sync.Mutex
 }
 
 func (c *directPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
@@ -75,17 +72,22 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 		return c.UDPConn.Write(b)
 	}
 
-	// Ensure target is resolved
+	// Lazy target resolution with thread-safe initialization.
+	// Thread-safety guarantees:
+	// 1. sync.Once in resolveTarget() provides happens-before relationship:
+	//    The Store() happens-before all subsequent Load() calls that see non-nil.
+	// 2. atomic.Pointer.Load() provides atomic read semantics.
+	// 3. Once a goroutine observes non-nil, the pointer will always be valid
+	//    because cachedDialTgt is never modified after initialization.
 	if c.cachedDialTgt.Load() == nil {
 		if err := c.resolveTarget(); err != nil {
 			return 0, err
 		}
 	}
 
-	// Serialize writes to prevent concurrent access to the same UDP connection
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
+	// No lock needed: Go's net.UDPConn.WriteToUDPAddrPort() is thread-safe.
+	// From Go's net package documentation:
+	// "Multiple goroutines may invoke methods on a PacketConn simultaneously."
 	cached := c.cachedDialTgt.Load()
 	return c.UDPConn.WriteToUDPAddrPort(b, *cached)
 }
