@@ -117,8 +117,7 @@ func (c *TCPConn) Close() error {
 
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
 // Returns true if the operation should proceed, false if it should be aborted.
-// Uses the context's deadline if available, otherwise falls back to a reasonable default
-// to detect dead connections while allowing sufficient time for high-latency networks.
+// Uses a rolling deadline for TCP I/O to avoid issues with the dial context's absolute deadline.
 func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -127,22 +126,19 @@ func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 	default:
 	}
 	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-		if deadline, ok := ctx.Deadline(); ok {
-			// Use the context's deadline
-			dl.SetReadDeadline(deadline)
-		} else {
-			// No deadline in context: use a reasonable default for TCP.
-			// 30 seconds allows for high-latency networks while still detecting
-			// dead connections within a reasonable time.
-			dl.SetReadDeadline(time.Now().Add(30 * time.Second))
-		}
+		// Use a rolling deadline for TCP I/O operations.
+		// This ensures each read operation has sufficient time to complete,
+		// regardless of when the dial context was created.
+		// 30 seconds allows for high-latency networks while still detecting
+		// dead connections within a reasonable time.
+		dl.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
 	return true
 }
 
 // checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
 // Returns true if the operation should proceed, false if it should be aborted.
-// Uses the context's deadline if available, otherwise falls back to a reasonable default.
+// Uses a rolling deadline for TCP I/O to avoid issues with the dial context's absolute deadline.
 func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -151,15 +147,12 @@ func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
 	default:
 	}
 	if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		if deadline, ok := ctx.Deadline(); ok {
-			// Use the context's deadline
-			dl.SetWriteDeadline(deadline)
-		} else {
-			// No deadline in context: use a reasonable default for TCP.
-			// 30 seconds allows for high-latency networks while still detecting
-			// dead connections within a reasonable time.
-			dl.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		}
+		// Use a rolling deadline for TCP I/O operations.
+		// This ensures each write operation has sufficient time to complete,
+		// regardless of when the dial context was created.
+		// 30 seconds allows for high-latency networks while still detecting
+		// dead connections within a reasonable time.
+		dl.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	}
 	return true
 }
