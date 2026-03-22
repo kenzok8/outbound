@@ -105,6 +105,8 @@ func (c *UdpConn) setContext(ctx context.Context) {
 
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
 // Returns true if the operation should proceed, false if it should be aborted.
+// For UDP, we respect the context's deadline if set, but don't impose arbitrary short timeouts
+// that could break legitimate long-lived connections over high-latency networks.
 func (c *UdpConn) checkContextAndSetReadDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -112,14 +114,22 @@ func (c *UdpConn) checkContextAndSetReadDeadline() bool {
 		return false
 	default:
 	}
-	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-		dl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Only set a deadline if the context has one.
+	// This preserves the original behavior (no timeout) while still supporting
+	// context cancellation for graceful shutdown.
+	if deadline, ok := ctx.Deadline(); ok {
+		// Use the context's deadline, not a fixed 5-second timeout
+		if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			dl.SetReadDeadline(deadline)
+		}
 	}
 	return true
 }
 
 // checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
 // Returns true if the operation should proceed, false if it should be aborted.
+// For UDP, we respect the context's deadline if set, but don't impose arbitrary short timeouts
+// that could break legitimate long-lived connections over high-latency networks.
 func (c *UdpConn) checkContextAndSetWriteDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -127,8 +137,14 @@ func (c *UdpConn) checkContextAndSetWriteDeadline() bool {
 		return false
 	default:
 	}
-	if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		dl.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	// Only set a deadline if the context has one.
+	// This preserves the original behavior (no timeout) while still supporting
+	// context cancellation for graceful shutdown.
+	if deadline, ok := ctx.Deadline(); ok {
+		// Use the context's deadline, not a fixed 5-second timeout
+		if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			dl.SetWriteDeadline(deadline)
+		}
 	}
 	return true
 }

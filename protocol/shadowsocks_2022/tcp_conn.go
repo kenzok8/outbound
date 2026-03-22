@@ -117,7 +117,8 @@ func (c *TCPConn) Close() error {
 
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
 // Returns true if the operation should proceed, false if it should be aborted.
-// Sets a short deadline to allow interruption via context cancellation.
+// Uses the context's deadline if available, otherwise falls back to a reasonable default
+// to detect dead connections while allowing sufficient time for high-latency networks.
 func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -125,20 +126,23 @@ func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 		return false
 	default:
 	}
-	// Set a short deadline to allow the read to be interrupted
-	// If the connection supports SetReadDeadline, use 5 seconds
-	// This ensures that even if we don't detect context cancellation immediately,
-	// the read will eventually return and we can check again
 	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-		// Use a relatively short deadline to allow responsive shutdown
-		// Long enough for normal I/O, short enough to not block shutdown
-		dl.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if deadline, ok := ctx.Deadline(); ok {
+			// Use the context's deadline
+			dl.SetReadDeadline(deadline)
+		} else {
+			// No deadline in context: use a reasonable default for TCP.
+			// 30 seconds allows for high-latency networks while still detecting
+			// dead connections within a reasonable time.
+			dl.SetReadDeadline(time.Now().Add(30 * time.Second))
+		}
 	}
 	return true
 }
 
 // checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
 // Returns true if the operation should proceed, false if it should be aborted.
+// Uses the context's deadline if available, otherwise falls back to a reasonable default.
 func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -147,7 +151,15 @@ func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
 	default:
 	}
 	if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		dl.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if deadline, ok := ctx.Deadline(); ok {
+			// Use the context's deadline
+			dl.SetWriteDeadline(deadline)
+		} else {
+			// No deadline in context: use a reasonable default for TCP.
+			// 30 seconds allows for high-latency networks while still detecting
+			// dead connections within a reasonable time.
+			dl.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		}
 	}
 	return true
 }
