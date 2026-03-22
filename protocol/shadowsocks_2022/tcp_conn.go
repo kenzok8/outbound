@@ -77,7 +77,7 @@ func NewTCPConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core,
 		Conn:       conn,
 		addr:       addr,
 		sg:         sg,
-		ctx:        ctx,
+		ctx:        context.Background(), // Use Background for TCP connections to avoid dial context expiry
 		nonceRead:  make([]byte, core.CipherConf().NonceLen),
 		nonceWrite: make([]byte, core.CipherConf().NonceLen),
 		bloom:      bloom,
