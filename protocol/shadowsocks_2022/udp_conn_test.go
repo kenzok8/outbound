@@ -12,6 +12,7 @@ import (
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/socks5"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type udpReadBufferConn struct {
@@ -76,6 +77,46 @@ func buildServerPacket(t *testing.T, core *SS2022Core, serverSessionID, clientSe
 		t.Fatalf("CreateCipher: %v", err)
 	}
 	return sessionCipher.Seal(separateHeaderEncrypted[:], separateHeader[4:16], message, nil)
+}
+
+func buildServerPacketChacha(t *testing.T, core *SS2022Core, serverSessionID, clientSessionID [8]byte, packetID uint64, addr string, payload []byte) []byte {
+	t.Helper()
+
+	addrInfo, err := socks5.AddressFromString(addr)
+	if err != nil {
+		t.Fatalf("AddressFromString: %v", err)
+	}
+	addrLen, err := addrInfoEncodedLen(addrInfo)
+	if err != nil {
+		t.Fatalf("addrInfoEncodedLen: %v", err)
+	}
+
+	messageLen := 16 + 1 + 8 + 8 + 2 + addrLen + len(payload)
+	message := make([]byte, messageLen)
+	copy(message[:8], serverSessionID[:])
+	binary.BigEndian.PutUint64(message[8:16], packetID)
+	message[16] = HeaderTypeServerStream
+	binary.BigEndian.PutUint64(message[17:25], uint64(time.Now().Unix()))
+	copy(message[25:33], clientSessionID[:])
+	addrWritten, err := writeAddrInfoTo(message[35:], addrInfo)
+	if err != nil {
+		t.Fatalf("writeAddrInfoTo: %v", err)
+	}
+	copy(message[35+addrWritten:], payload)
+
+	udpCipher, err := chacha20poly1305.NewX(core.UPSK())
+	if err != nil {
+		t.Fatalf("NewX: %v", err)
+	}
+
+	nonce := make([]byte, udpPacketNonceSize)
+	for i := range nonce {
+		nonce[i] = byte(i + 1)
+	}
+
+	packet := make([]byte, udpPacketNonceSize, udpPacketNonceSize+messageLen+core.CipherConf().TagLen)
+	copy(packet, nonce)
+	return udpCipher.Seal(packet, nonce, message, nil)
 }
 
 func TestValidateTimestamp(t *testing.T) {
@@ -196,6 +237,46 @@ func TestUdpConn_ReadFromUsesRemoteSessionCipher(t *testing.T) {
 	wantPayload := []byte("ss2022-udp-remote-session")
 
 	packet := buildServerPacket(t, core, remoteSessionID, localSessionID, 1, wantAddr.String(), wantPayload)
+	conn, err := NewUdpConn(&udpReadBufferConn{packet: packet}, core, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.sessionID = localSessionID
+
+	buf := make([]byte, 128)
+	n, addr, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if addr != wantAddr {
+		t.Fatalf("unexpected addr: got %v want %v", addr, wantAddr)
+	}
+	if got := string(buf[:n]); got != string(wantPayload) {
+		t.Fatalf("unexpected payload: got %q want %q", got, string(wantPayload))
+	}
+}
+
+func TestUdpConn_ReadFromChacha2022(t *testing.T) {
+	conf := ciphers.Aead2022CiphersConf["2022-blake3-chacha20-poly1305"]
+	if conf == nil {
+		t.Fatal("missing ss2022 chacha cipher config")
+	}
+
+	psk := make([]byte, conf.KeyLen)
+	for i := range psk {
+		psk[i] = 0x31
+	}
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	localSessionID := [8]byte{1, 3, 5, 7, 9, 11, 13, 15}
+	remoteSessionID := [8]byte{2, 4, 6, 8, 10, 12, 14, 16}
+	wantAddr := netip.MustParseAddrPort("198.51.100.7:443")
+	wantPayload := []byte("ss2022-chacha-udp")
+
+	packet := buildServerPacketChacha(t, core, remoteSessionID, localSessionID, 1, wantAddr.String(), wantPayload)
 	conn, err := NewUdpConn(&udpReadBufferConn{packet: packet}, core, nil)
 	if err != nil {
 		t.Fatal(err)

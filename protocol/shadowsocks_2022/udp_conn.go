@@ -19,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // UdpConn represents a Shadowsocks 2022 UDP connection.
@@ -55,6 +56,7 @@ type UdpConn struct {
 const (
 	udpPacketReplayWindowSize = 1024
 	maxTrackedUdpSessions     = 128
+	udpPacketNonceSize        = 24
 )
 
 type udpSessionReplayState struct {
@@ -77,7 +79,11 @@ func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) 
 
 func (c *UdpConn) ensureCipher() error {
 	c.cipherOnce.Do(func() {
-		c.cipher, c.cipherErr = CreateCipher(c.UPSK(), c.sessionID[:], c.CipherConf())
+		if !c.IsUsingBlockCipher() {
+			c.cipher, c.cipherErr = chacha20poly1305.NewX(c.UPSK())
+		} else {
+			c.cipher, c.cipherErr = CreateCipher(c.UPSK(), c.sessionID[:], c.CipherConf())
+		}
 		if c.cipherErr != nil {
 			c.cipherErr = fmt.Errorf("failed to create session cipher: %w", c.cipherErr)
 		}
@@ -189,6 +195,10 @@ func (c *UdpConn) evictOldestIfNeeded() {
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
+	if !c.IsUsingBlockCipher() {
+		return c.writeToChacha(b, addr)
+	}
+
 	if err := c.ensureCipher(); err != nil {
 		return 0, err
 	}
@@ -241,7 +251,74 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	return len(b), err
 }
 
+func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
+	if err := c.ensureCipher(); err != nil {
+		return 0, err
+	}
+
+	packetID := c.nextPacketID()
+
+	addrInfo, err := socks5.AddressFromString(addr)
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to parse target address")
+	}
+	addrLen, err := addrInfoEncodedLen(addrInfo)
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to calculate address length")
+	}
+
+	// For Chacha, EIH is placed before the message content
+	// Format: nonce + EIH + (session_id + packet_id + header + timestamp + padding_len + addr + payload)
+	// The EIH is encrypted together with the message as associated data is not used here
+	eihLen := c.IdentityHeaderLen()
+	messageLen := 16 + 1 + 8 + 2 + addrLen + len(b)
+	totalPacketLen := udpPacketNonceSize + eihLen + messageLen + c.CipherConf().TagLen
+	packet := pool.Get(totalPacketLen)
+	defer pool.Put(packet)
+
+	nonce := packet[:udpPacketNonceSize]
+	fastrand.Read(nonce)
+
+	// Build packet structure: nonce + EIH + message
+	eihOffset := udpPacketNonceSize
+	messageOffset := eihOffset + eihLen
+	message := packet[messageOffset : messageOffset+messageLen]
+	copy(message[:8], c.sessionID[:])
+	binary.BigEndian.PutUint64(message[8:16], packetID)
+	message[16] = HeaderTypeClientStream
+	binary.BigEndian.PutUint64(message[17:25], uint64(time.Now().Unix()))
+	binary.BigEndian.PutUint16(message[25:27], 0)
+
+	addrWritten, err := writeAddrInfoTo(message[27:], addrInfo)
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to encode request address")
+	}
+	copy(message[27+addrWritten:], b)
+
+	// Write EIH if multi-PSK is enabled
+	if eihLen > 0 {
+		// Build separate header for EIH derivation (session_id + packet_id)
+		var separateHeader [16]byte
+		copy(separateHeader[:8], c.sessionID[:])
+		binary.BigEndian.PutUint64(separateHeader[8:], packetID)
+
+		_, err = c.WriteIdentityHeader(packet[eihOffset:], separateHeader[:])
+		if err != nil {
+			return 0, oops.Wrapf(err, "fail to write identity header")
+		}
+	}
+
+	// Seal the entire message (EIH is included as part of plaintext)
+	packet = c.cipher.Seal(packet[:udpPacketNonceSize], nonce, packet[eihOffset:messageOffset+messageLen], nil)
+	_, err = c.Conn.Write(packet)
+	return len(b), err
+}
+
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
+	if !c.IsUsingBlockCipher() {
+		return c.readFromChacha(b)
+	}
+
 	buf := pool.Get(len(b) + 16 + c.CipherConf().TagLen)
 	defer pool.Put(buf)
 	n, err = c.Conn.Read(buf)
@@ -272,6 +349,100 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 
 	reader := bytes.NewReader(payload)
+
+	var typ uint8
+	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
+	}
+
+	var timestampRaw uint64
+	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
+	}
+	timestamp := time.Unix(int64(timestampRaw), 0)
+
+	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
+	}
+
+	var paddingLength uint16
+	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
+	}
+
+	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
+	}
+
+	if typ != HeaderTypeServerStream {
+		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
+	}
+
+	if err := validateTimestamp(timestamp, now); err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	netAddr, err := socks5.ReadAddr(reader)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	if udpAddr, ok := netAddr.(*net.UDPAddr); ok {
+		ipAddr, _ := netip.AddrFromSlice(udpAddr.IP)
+		addr = netip.AddrPortFrom(ipAddr, uint16(udpAddr.Port))
+	}
+
+	n, err = reader.Read(b)
+	return
+}
+
+func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err error) {
+	if err := c.ensureCipher(); err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	buf := pool.Get(len(b) + udpPacketNonceSize + c.CipherConf().TagLen + 320)
+	defer pool.Put(buf)
+
+	n, err = c.Conn.Read(buf)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	if n < udpPacketNonceSize+c.CipherConf().TagLen+16 {
+		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+	}
+
+	nonce := buf[:udpPacketNonceSize]
+	payload := buf[udpPacketNonceSize:n]
+	payload, err = c.cipher.Open(payload[:0], nonce, payload, nil)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	reader := bytes.NewReader(payload)
+
+	// Skip EIH if present (for multi-PSK chacha)
+	eihLen := c.IdentityHeaderLen()
+	if eihLen > 0 {
+		if _, err := reader.Seek(int64(eihLen), io.SeekCurrent); err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("failed to skip EIH: %w", err)
+		}
+	}
+
+	var sessionID [8]byte
+	if _, err := io.ReadFull(reader, sessionID[:]); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to read session ID: %w", err)
+	}
+
+	var packetID uint64
+	if err := binary.Read(reader, binary.BigEndian, &packetID); err != nil {
+		return 0, netip.AddrPort{}, fmt.Errorf("failed to read packet ID: %w", err)
+	}
+
+	now := time.Now()
+	if !c.checkAndUpdateReplay(sessionID, packetID, now) {
+		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+	}
 
 	var typ uint8
 	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {

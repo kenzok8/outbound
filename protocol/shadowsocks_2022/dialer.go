@@ -39,7 +39,7 @@ func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 	if conf == nil {
 		return nil, fmt.Errorf("unsupported shadowsocks 2022 cipher: %s", header.Cipher)
 	}
-	if conf.NewCipher == nil || conf.NewBlockCipher == nil {
+	if conf.NewCipher == nil {
 		return nil, fmt.Errorf("invalid shadowsocks 2022 cipher config: %s", header.Cipher)
 	}
 	keyStrList := strings.Split(header.Password, ":")

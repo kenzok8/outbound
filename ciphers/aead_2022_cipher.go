@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type CipherConf2022 struct {
@@ -16,6 +18,10 @@ type CipherConf2022 struct {
 	TagLen         int
 	NewCipher      func(key []byte) (cipher.AEAD, error)
 	NewBlockCipher func(key []byte) (cipher.Block, error)
+	// IdentityHeaderBlockSize specifies the EIH block size for this cipher.
+	// For AES ciphers: 16 bytes (AES block size).
+	// For Chacha: 16 bytes (defined by SS2022 spec).
+	IdentityHeaderBlockSize int
 }
 
 const (
@@ -28,8 +34,9 @@ const (
 
 var (
 	Aead2022CiphersConf = map[string]*CipherConf2022{
-		"2022-blake3-aes-256-gcm": {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher},
-		"2022-blake3-aes-128-gcm": {KeyLen: 16, SaltLen: 16, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher},
+		"2022-blake3-aes-256-gcm": {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
+		"2022-blake3-aes-128-gcm": {KeyLen: 16, SaltLen: 16, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
+		"2022-blake3-chacha20-poly1305": {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: chacha20poly1305.New, IdentityHeaderBlockSize: 16},
 	}
 )
 

@@ -2,6 +2,19 @@ package ciphers
 
 import "testing"
 
+func TestAead2022CiphersConf_IncludesChacha20(t *testing.T) {
+	conf := Aead2022CiphersConf["2022-blake3-chacha20-poly1305"]
+	if conf == nil {
+		t.Fatal("missing 2022-blake3-chacha20-poly1305 cipher config")
+	}
+	if conf.KeyLen != 32 {
+		t.Fatalf("unexpected key length: got %d want 32", conf.KeyLen)
+	}
+	if conf.NewCipher == nil {
+		t.Fatal("missing AEAD constructor for chacha20 cipher config")
+	}
+}
+
 func TestSlidingWindowFilter_BasicAndDuplicate(t *testing.T) {
 	f := NewSlidingWindowFilter(64)
 

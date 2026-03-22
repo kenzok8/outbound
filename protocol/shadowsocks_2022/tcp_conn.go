@@ -175,21 +175,59 @@ func (c *TCPConn) borrowWriteFrame(size int) []byte {
 }
 
 func (c *TCPConn) writeIdentityHeaderTo(dst []byte, offset int, salt []byte) (int, error) {
+	// For AES ciphers, use the traditional block cipher EIH approach
+	if c.CipherConf().NewBlockCipher != nil {
+		for i := 0; i < len(c.PSKList())-1; i++ {
+			if offset+aes.BlockSize > len(dst) {
+				return 0, io.ErrShortBuffer
+			}
+			identitySubkey := GenerateSubKey(c.PSKList()[i], salt, Shadowsocks2022IdentityHeaderInfo)
+			b, err := c.CipherConf().NewBlockCipher(identitySubkey)
+			if err != nil {
+				PutSubKey(identitySubkey)
+				return 0, err
+			}
+			plaintext := blake3.Sum512(c.PSKList()[i+1])
+			b.Encrypt(dst[offset:offset+aes.BlockSize], plaintext[:aes.BlockSize])
+			PutSubKey(identitySubkey)
+			offset += aes.BlockSize
+		}
+		return offset, nil
+	}
+
+	// For Chacha cipher, use AEAD-based EIH
+	// The EIH is encrypted with AEAD and placed after salt
+	eihBlockSize := c.CipherConf().IdentityHeaderBlockSize
+	if eihBlockSize == 0 {
+		eihBlockSize = 16 // Default EIH block size
+	}
+
 	for i := 0; i < len(c.PSKList())-1; i++ {
-		if offset+aes.BlockSize > len(dst) {
+		if offset+eihBlockSize > len(dst) {
 			return 0, io.ErrShortBuffer
 		}
-		identitySubkey := GenerateSubKey(c.PSKList()[i], salt, Shadowsocks2022IdentityHeaderInfo)
-		b, err := c.CipherConf().NewBlockCipher(identitySubkey)
+
+		// Create AEAD cipher for EIH encryption using derived key
+		identityKey := GenerateSubKey(c.PSKList()[i], salt, Shadowsocks2022IdentityHeaderInfo)
+		aeadCipher, err := c.CipherConf().NewCipher(identityKey)
 		if err != nil {
-			PutSubKey(identitySubkey)
-			return 0, err
+			PutSubKey(identityKey)
+			return 0, fmt.Errorf("failed to create EIH AEAD cipher: %w", err)
 		}
-		plaintext := blake3.Sum512(c.PSKList()[i+1])
-		b.Encrypt(dst[offset:offset+aes.BlockSize], plaintext[:aes.BlockSize])
-		PutSubKey(identitySubkey)
-		offset += aes.BlockSize
+		PutSubKey(identityKey)
+
+		// Encrypt the next PSK's hash as EIH
+		// Use zero nonce for EIH (salt provides uniqueness)
+		eihNonce := make([]byte, c.CipherConf().NonceLen)
+		pskHash := blake3.Sum512(c.PSKList()[i+1])
+
+		// Seal the EIH block: the ciphertext includes the AEAD tag
+		_ = aeadCipher.Seal(dst[offset:offset], eihNonce, pskHash[:eihBlockSize], nil)
+
+		// Move offset by the EIH block size (not the full ciphertext length)
+		offset += eihBlockSize
 	}
+
 	return offset, nil
 }
 
