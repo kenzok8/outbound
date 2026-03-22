@@ -551,23 +551,23 @@ func logCacheHit(proxyAddr, cachedAddr, network string) {
 }
 
 func logCacheFailure(proxyAddr, cachedAddr, network string, err error) {
-	if logger.IsLevelEnabled(logrus.WarnLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"cached_ip":  cachedAddr,
 			"network":    network,
 			"error":      err.Error(),
-		}).Warn("[StickyIP] Cached IP failed - invalidating and re-resolving")
+		}).Debug("[StickyIP] Cached IP failed - invalidating and re-resolving")
 	}
 }
 
 func logResolutionError(proxyAddr, host string, err error) {
-	if logger.IsLevelEnabled(logrus.WarnLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"host":       host,
 			"error":      err.Error(),
-		}).Warn("[StickyIP] DNS resolution failed")
+		}).Debug("[StickyIP] DNS resolution failed (will use original domain)")
 	}
 }
 
@@ -622,12 +622,12 @@ func logIPSuccess(proxyAddr, targetAddr, network, ipVersion string, cycle uint64
 }
 
 func logIPFailure(proxyAddr, targetAddr string, err error) {
-	if logger.IsLevelEnabled(logrus.WarnLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"target":     targetAddr,
 			"error":      err.Error(),
-		}).Warn("[StickyIP] Failed to connect to proxy IP")
+		}).Debug("[StickyIP] Failed to connect to proxy IP (will try next)")
 	}
 }
 
