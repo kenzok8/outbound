@@ -16,8 +16,9 @@ type directPacketConn struct {
 	*net.UDPConn
 	FullCone      bool
 	dialTgt       string
-	cachedDialTgt atomic.Pointer[netip.AddrPort]
+	cachedDialTgt atomic.Value // stores netip.AddrPort
 	cacheOnce     sync.Once
+	cacheMu       sync.Mutex // protects cacheErr
 	cacheErr      error
 	resolver      *net.Resolver
 }
@@ -57,14 +58,22 @@ func (c *directPacketConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) 
 func (c *directPacketConn) resolveTarget() error {
 	c.cacheOnce.Do(func() {
 		ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
+		c.cacheMu.Lock()
 		if err != nil {
 			c.cacheErr = err
+			c.cacheMu.Unlock()
 			return
 		}
+		// Store the value directly, not a pointer to a stack variable.
+		// atomic.Value stores the value on heap, ensuring memory safety.
 		ap := ua.AddrPort()
-		c.cachedDialTgt.Store(&ap)
+		c.cachedDialTgt.Store(ap)
+		c.cacheMu.Unlock()
 	})
-	return c.cacheErr
+	c.cacheMu.Lock()
+	err := c.cacheErr
+	c.cacheMu.Unlock()
+	return err
 }
 
 func (c *directPacketConn) Write(b []byte) (int, error) {
@@ -74,11 +83,9 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 
 	// Lazy target resolution with thread-safe initialization.
 	// Thread-safety guarantees:
-	// 1. sync.Once in resolveTarget() provides happens-before relationship:
-	//    The Store() happens-before all subsequent Load() calls that see non-nil.
-	// 2. atomic.Pointer.Load() provides atomic read semantics.
-	// 3. Once a goroutine observes non-nil, the pointer will always be valid
-	//    because cachedDialTgt is never modified after initialization.
+	// 1. sync.Once in resolveTarget() provides happens-before relationship
+	// 2. atomic.Value.Load/Store provides atomic access to the cached value
+	// 3. The netip.AddrPort value is stored directly in atomic.Value (heap-allocated)
 	if c.cachedDialTgt.Load() == nil {
 		if err := c.resolveTarget(); err != nil {
 			return 0, err
@@ -88,8 +95,8 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 	// No lock needed: Go's net.UDPConn.WriteToUDPAddrPort() is thread-safe.
 	// From Go's net package documentation:
 	// "Multiple goroutines may invoke methods on a PacketConn simultaneously."
-	cached := c.cachedDialTgt.Load()
-	return c.UDPConn.WriteToUDPAddrPort(b, *cached)
+	cached := c.cachedDialTgt.Load().(netip.AddrPort)
+	return c.UDPConn.WriteToUDPAddrPort(b, cached)
 }
 
 func (c *directPacketConn) Read(b []byte) (int, error) {
@@ -103,6 +110,6 @@ func (c *directPacketConn) Read(b []byte) (int, error) {
 var _ interface {
 	SyscallConn() (syscall.RawConn, error)
 	SetReadBuffer(int) error
-	ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *net.UDPAddr, err error)
+	ReadMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error)
 	WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error)
 } = &directPacketConn{}
