@@ -110,6 +110,6 @@ func (c *directPacketConn) Read(b []byte) (int, error) {
 var _ interface {
 	SyscallConn() (syscall.RawConn, error)
 	SetReadBuffer(int) error
-	ReadMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error)
+	ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *net.UDPAddr, err error)
 	WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error)
 } = &directPacketConn{}
