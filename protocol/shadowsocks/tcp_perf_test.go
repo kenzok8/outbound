@@ -23,6 +23,14 @@ type mockConn struct {
 	writeBuf bytes.Buffer
 }
 
+func fillRandomB(b *testing.B, p []byte) {
+	b.Helper()
+	_, err := rand.Read(p)
+	if err != nil {
+		b.Fatalf("rand.Read failed: %v", err)
+	}
+}
+
 func (m *mockConn) Read(b []byte) (n int, err error) {
 	return m.readBuf.Read(b)
 }
@@ -42,7 +50,7 @@ func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 func BenchmarkTCPEncryptFirstWrite(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 
@@ -73,7 +81,7 @@ func BenchmarkTCPEncryptFirstWrite(b *testing.B) {
 func BenchmarkTCPEncryptSubsequentWrites(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 
@@ -110,7 +118,7 @@ func BenchmarkTCPEncryptSubsequentWrites(b *testing.B) {
 func BenchmarkTCPDecryptFirstRead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 
@@ -161,7 +169,7 @@ func BenchmarkTCPDecryptFirstRead(b *testing.B) {
 func BenchmarkTCPDecryptSubsequentReads(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 
@@ -227,7 +235,7 @@ func BenchmarkTCPSmallChunks_16KB(b *testing.B) { benchmarkTCPChunkSize(b, 16384
 func benchmarkTCPChunkSize(b *testing.B, size int) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, size)
 
@@ -264,7 +272,7 @@ func benchmarkTCPChunkSize(b *testing.B, size int) {
 func BenchmarkTCPLargeStream(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	// 1MB stream
 	totalSize := 1024 * 1024
@@ -302,7 +310,7 @@ func BenchmarkTCPLargeStream(b *testing.B) {
 func BenchmarkTCPMutexOverhead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 
@@ -340,7 +348,7 @@ func BenchmarkTCPMutexOverhead(b *testing.B) {
 func BenchmarkTCPPoolOverhead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandomB(b, masterKey)
 
 	plaintext := make([]byte, 1024)
 

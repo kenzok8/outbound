@@ -25,10 +25,13 @@ func BenchmarkUDPRealistic(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// 真实场景：每个 UDP 包使用不同的随机 salt
 		salt := make([]byte, 32)
-		rand.Read(salt) // 模拟 RandomSaltGenerator
+		_, err := rand.Read(salt) // 模拟 RandomSaltGenerator
+		if err != nil {
+			b.Fatal(err)
+		}
 
 		// 使用 EncryptUDPFromPool 进行完整的加密流程
-		_, err := EncryptUDPFromPool(key, data, salt, reusedInfo)
+		_, err = EncryptUDPFromPool(key, data, salt, reusedInfo)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -66,7 +69,10 @@ func BenchmarkTCPRealistic(b *testing.B) {
 	}
 	reusedInfo := []byte("ss-subkey")
 	salt := make([]byte, 32)
-	rand.Read(salt)
+	_, err := rand.Read(salt)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	// 模拟 TCP 连接建立：一次性派生 subKey 和 cipher
 	subKey := make([]byte, key.CipherConf.KeyLen)
@@ -104,7 +110,10 @@ func BenchmarkTCPOverheadIncludingInit(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// 每次都重新初始化（模拟新建连接）
 		salt := make([]byte, 32)
-		rand.Read(salt)
+		_, err := rand.Read(salt)
+		if err != nil {
+			b.Fatal(err)
+		}
 
 		subKey := make([]byte, key.CipherConf.KeyLen)
 		kdf := hkdf.New(sha1.New, key.MasterKey, salt, reusedInfo)
@@ -130,9 +139,12 @@ func BenchmarkUDPSmallPacketRealistic(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		salt := make([]byte, 16)
-		rand.Read(salt)
+		_, err := rand.Read(salt)
+		if err != nil {
+			b.Fatal(err)
+		}
 
-		_, err := EncryptUDPFromPool(key, data, salt, reusedInfo)
+		_, err = EncryptUDPFromPool(key, data, salt, reusedInfo)
 		if err != nil {
 			b.Fatal(err)
 		}

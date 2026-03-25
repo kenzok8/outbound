@@ -2,7 +2,6 @@ package shadowsocks
 
 import (
 	"bytes"
-	"crypto/rand"
 	"testing"
 
 	"github.com/daeuniverse/outbound/ciphers"
@@ -11,10 +10,10 @@ import (
 func TestEncryptDecrypt(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandom(t, masterKey)
 
 	salt := make([]byte, conf.SaltLen)
-	rand.Read(salt)
+	fillRandom(t, salt)
 
 	plaintext := []byte("Hello, World! This is a test message for Shadowsocks encryption.")
 	reusedInfo := []byte("ss-subkey")
@@ -44,7 +43,7 @@ func TestEncryptDecrypt(t *testing.T) {
 func TestMultipleSalts(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandom(t, masterKey)
 
 	plaintext := []byte("Multi-salt test")
 	reusedInfo := []byte("ss-subkey")
@@ -56,7 +55,7 @@ func TestMultipleSalts(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		salt := make([]byte, conf.SaltLen)
-		rand.Read(salt)
+		fillRandom(t, salt)
 
 		encrypted, err := EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {

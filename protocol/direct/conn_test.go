@@ -72,7 +72,8 @@ func TestDirectPacketConnConcurrentWriteInitializesCachedTargetSafely(t *testing
 	wg.Wait()
 
 	cachedValue := conn.cachedDialTgt.Load()
-	if cachedValue == nil || !cachedValue.(netip.AddrPort).IsValid() {
+	cachedAddrPort, ok := cachedValue.(netip.AddrPort)
+	if !ok || !cachedAddrPort.IsValid() {
 		t.Fatal("cachedDialTgt was not initialized")
 	}
 }

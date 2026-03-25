@@ -55,7 +55,10 @@ func BenchmarkChaCha20_128KB(b *testing.B) { benchmarkCipher(b, "chacha20-ietf-p
 func benchmarkCipher(b *testing.B, cipherName string, size int) {
 	conf := ciphers.AeadCiphersConf[cipherName]
 	key := make([]byte, conf.KeyLen)
-	rand.Read(key)
+	_, err := rand.Read(key)
+	if err != nil {
+		b.Fatalf("rand.Read(key) failed: %v", err)
+	}
 
 	ciph, _ := conf.NewCipher(key)
 	nonce := make([]byte, conf.NonceLen)
@@ -238,7 +241,10 @@ func BenchmarkThroughput_Interactive(b *testing.B) {
 func TestChunkSizeCorrectness(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	key := make([]byte, conf.KeyLen)
-	rand.Read(key)
+	_, err := rand.Read(key)
+	if err != nil {
+		t.Fatalf("rand.Read(key) failed: %v", err)
+	}
 
 	ciph, _ := conf.NewCipher(key)
 	nonce := make([]byte, conf.NonceLen)
@@ -247,13 +253,16 @@ func TestChunkSizeCorrectness(t *testing.T) {
 
 	for _, size := range sizes {
 		plaintext := make([]byte, size)
-		rand.Read(plaintext)
+		_, err = rand.Read(plaintext)
+		if err != nil {
+			t.Fatalf("rand.Read(plaintext) failed: %v", err)
+		}
 
 		ciphertext := make([]byte, len(plaintext)+conf.TagLen)
 		decrypted := make([]byte, len(plaintext))
 
 		_ = ciph.Seal(ciphertext[:0], nonce, plaintext, nil)
-		_, err := ciph.Open(decrypted[:0], nonce, ciphertext, nil)
+		_, err = ciph.Open(decrypted[:0], nonce, ciphertext, nil)
 
 		if err != nil {
 			t.Errorf("Failed for size %d: %v", size, err)

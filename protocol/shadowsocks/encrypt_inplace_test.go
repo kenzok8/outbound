@@ -9,6 +9,14 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 )
 
+func fillRandom(t *testing.T, b []byte) {
+	t.Helper()
+	_, err := rand.Read(b)
+	if err != nil {
+		t.Fatalf("rand.Read failed: %v", err)
+	}
+}
+
 // TestEncryptUDPInPlaceEquivalence verifies that encryptUDPInPlace produces
 // the same output as EncryptUDPFromPool when given the same inputs.
 func TestEncryptUDPInPlaceEquivalence(t *testing.T) {
@@ -32,14 +40,14 @@ func TestEncryptUDPInPlaceEquivalence(t *testing.T) {
 				t.Skipf("cipher %s not available", tc.cipher)
 			}
 
-			masterKey := make([]byte, conf.KeyLen)
-			rand.Read(masterKey)
+				masterKey := make([]byte, conf.KeyLen)
+				fillRandom(t, masterKey)
 
-			payload := make([]byte, tc.payloadSz)
-			rand.Read(payload)
+				payload := make([]byte, tc.payloadSz)
+				fillRandom(t, payload)
 
-			salt := make([]byte, conf.SaltLen)
-			rand.Read(salt)
+				salt := make([]byte, conf.SaltLen)
+				fillRandom(t, salt)
 
 			reusedInfo := []byte("ss-subkey")
 
@@ -91,11 +99,11 @@ func TestEncryptUDPInPlaceEquivalence(t *testing.T) {
 func TestEncryptUDPInPlaceDecryptRoundTrip(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandom(t, masterKey)
 
 	payload := []byte("Test message for round-trip encryption with in-place method")
 	salt := make([]byte, conf.SaltLen)
-	rand.Read(salt)
+	fillRandom(t, salt)
 
 	key := &Key{
 		CipherConf: conf,
@@ -133,7 +141,7 @@ func TestEncryptUDPInPlaceDecryptRoundTrip(t *testing.T) {
 func TestEncryptUDPInPlaceConcurrent(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
+	fillRandom(t, masterKey)
 
 	key := &Key{
 		CipherConf: conf,
@@ -147,11 +155,11 @@ func TestEncryptUDPInPlaceConcurrent(t *testing.T) {
 
 	for g := 0; g < goroutines; g++ {
 		go func() {
-			for i := 0; i < iterations; i++ {
-				payload := make([]byte, 100)
-				rand.Read(payload)
-				salt := make([]byte, conf.SaltLen)
-				rand.Read(salt)
+				for i := 0; i < iterations; i++ {
+					payload := make([]byte, 100)
+					fillRandom(t, payload)
+					salt := make([]byte, conf.SaltLen)
+					fillRandom(t, salt)
 
 				// Test in-place encryption
 				totalLen := conf.SaltLen + len(payload) + conf.TagLen
