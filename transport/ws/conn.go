@@ -29,7 +29,7 @@ func (c *conn) Read(b []byte) (n int, err error) {
 
 	for {
 		if c.currentReader == nil {
-			messageType, reader, err := c.Conn.NextReader()
+			messageType, reader, err := c.NextReader()
 			if err != nil {
 				return 0, err
 			}
@@ -58,7 +58,7 @@ func (c *conn) Write(b []byte) (n int, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	writer, err := c.Conn.NextWriter(websocket.BinaryMessage)
+	writer, err := c.NextWriter(websocket.BinaryMessage)
 	if err != nil {
 		return 0, err
 	}
@@ -74,6 +74,6 @@ func (c *conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *conn) SetDeadline(t time.Time) error {
-	_ = c.Conn.SetReadDeadline(t)
-	return c.Conn.SetWriteDeadline(t)
+	_ = c.SetReadDeadline(t)
+	return c.SetWriteDeadline(t)
 }

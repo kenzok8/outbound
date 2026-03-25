@@ -81,7 +81,7 @@ func (ho *HTTPObfs) Write(b []byte) (int, error) {
 			req.Host = fmt.Sprintf("%s:%s", ho.host, ho.port)
 		}
 		randBytes := make([]byte, 16)
-		fastrand.Read(randBytes)
+		_, _ = fastrand.Read(randBytes)
 		req.Header.Set("Sec-WebSocket-Key", base64.URLEncoding.EncodeToString(randBytes))
 		req.ContentLength = int64(len(b))
 		err := req.Write(ho.Conn)

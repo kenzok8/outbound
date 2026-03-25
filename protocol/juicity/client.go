@@ -101,8 +101,7 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	}
 	quicConn, err := transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
 	if err != nil {
-		transport.Close()
-		transport.Conn.Close()
+		_ = t.Close()
 		return nil, err
 	}
 
@@ -138,7 +137,7 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	if err != nil {
 		return err
 	}
-	defer uniStream.Close()
+	defer func() { _ = uniStream.Close() }()
 	for {
 		var auth *UnderlayAuth
 		select {
@@ -150,7 +149,7 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 		_, err = uniStream.Write(buf)
 		buf.Put()
 		if err != nil {
-			t.Close()
+			_ = t.Close()
 			return err
 		}
 	}

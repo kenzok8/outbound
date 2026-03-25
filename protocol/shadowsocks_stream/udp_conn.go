@@ -139,18 +139,18 @@ type UdpTransportConn struct {
 }
 
 func (c *UdpTransportConn) WriteTo(p []byte, to string) (n int, err error) {
-	return c.UdpConn.WriteTransport(p)
+	return c.WriteTransport(p)
 }
 
 func (c *UdpTransportConn) Write(b []byte) (n int, err error) {
-	return c.UdpConn.WriteTransport(b)
+	return c.WriteTransport(b)
 }
 
 func (c *UdpTransportConn) Read(b []byte) (n int, err error) {
-	return c.UdpConn.ReadTransport(b)
+	return c.ReadTransport(b)
 }
 
 func (c *UdpTransportConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) {
-	n, err = c.UdpConn.ReadTransport(b)
+	n, err = c.ReadTransport(b)
 	return n, netip.AddrPort{}, err
 }

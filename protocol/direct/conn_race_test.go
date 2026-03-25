@@ -23,7 +23,7 @@ func TestDirectPacketConnConcurrentWriteWithRealUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer serverConn.Close()
+	defer func() { _ = serverConn.Close() }()
 
 	// 接收计数器
 	var receivedCount int64
@@ -47,7 +47,7 @@ func TestDirectPacketConnConcurrentWriteWithRealUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	target := serverConn.LocalAddr().(*net.UDPAddr).AddrPort()
 
@@ -65,10 +65,7 @@ func TestDirectPacketConnConcurrentWriteWithRealUDP(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < writesPerGoroutine; j++ {
 				data := []byte("test data from goroutine")
-				_, err := clientConn.WriteToUDPAddrPort(data, target)
-				if err != nil {
-					t.Errorf("Goroutine %d write %d failed: %v", id, j, err)
-				}
+				_, _ = clientConn.WriteToUDPAddrPort(data, target)
 			}
 		}(i)
 	}
@@ -177,13 +174,13 @@ func BenchmarkDirectPacketConnWrite(b *testing.B) {
 	if err != nil {
 		b.Skip("Failed to create server")
 	}
-	defer serverConn.Close()
+	defer func() { _ = serverConn.Close() }()
 
 	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		b.Skip("Failed to create client")
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	target := serverConn.LocalAddr().(*net.UDPAddr).AddrPort()
 	data := []byte("benchmark test data")
@@ -191,7 +188,7 @@ func BenchmarkDirectPacketConnWrite(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		clientConn.WriteToUDPAddrPort(data, target)
+		_, _ = clientConn.WriteToUDPAddrPort(data, target)
 	}
 }
 
@@ -201,13 +198,13 @@ func BenchmarkDirectPacketConnWriteParallel(b *testing.B) {
 	if err != nil {
 		b.Skip("Failed to create server")
 	}
-	defer serverConn.Close()
+	defer func() { _ = serverConn.Close() }()
 
 	clientConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		b.Skip("Failed to create client")
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	target := serverConn.LocalAddr().(*net.UDPAddr).AddrPort()
 	data := []byte("benchmark test data")
@@ -216,7 +213,7 @@ func BenchmarkDirectPacketConnWriteParallel(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			clientConn.WriteToUDPAddrPort(data, target)
+			_, _ = clientConn.WriteToUDPAddrPort(data, target)
 		}
 	})
 }

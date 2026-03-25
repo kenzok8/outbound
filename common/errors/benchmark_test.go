@@ -129,6 +129,7 @@ func BenchmarkStream_TUIC_ClientOld(b *testing.B) {
 		// OLD CODE (from tuic/client.go):
 		if err != nil && !tempErr && !strings.Contains(err.Error(), "too many open streams") {
 			// Would close connection
+			_ = err
 		}
 	}
 }
@@ -146,6 +147,7 @@ func BenchmarkStream_TUIC_ClientNew(b *testing.B) {
 		// NEW CODE (optimized):
 		if err != nil && !tempErr && !IsStreamExhausted(err) {
 			// Would close connection
+			_ = err
 		}
 	}
 }

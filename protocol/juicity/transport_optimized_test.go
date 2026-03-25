@@ -17,7 +17,7 @@ import (
 func TestOptimizedEncryptDecryptCorrectness(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -29,7 +29,7 @@ func TestOptimizedEncryptDecryptCorrectness(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		salt := make([]byte, conf.SaltLen)
-		fastrand.Read(salt)
+		_, _ = fastrand.Read(salt)
 
 		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
@@ -56,7 +56,7 @@ func TestOptimizedEncryptDecryptCorrectness(t *testing.T) {
 func TestOptimizedCacheEffectiveness(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -64,7 +64,7 @@ func TestOptimizedCacheEffectiveness(t *testing.T) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := []byte("Cache test for juicity")
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -99,7 +99,7 @@ func TestOptimizedCacheEffectiveness(t *testing.T) {
 func TestOptimizedConcurrentAccess(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -107,7 +107,7 @@ func TestOptimizedConcurrentAccess(t *testing.T) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := []byte("Concurrent test")
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -154,7 +154,7 @@ func TestOptimizedConcurrentAccess(t *testing.T) {
 func TestOptimizedMemoryLeak(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -170,7 +170,7 @@ func TestOptimizedMemoryLeak(t *testing.T) {
 
 	for i := 0; i < 10000; i++ {
 		salt := make([]byte, conf.SaltLen)
-		fastrand.Read(salt)
+		_, _ = fastrand.Read(salt)
 
 		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
@@ -202,7 +202,7 @@ func TestOptimizedMemoryLeak(t *testing.T) {
 func TestOptimizedPoolMemoryLeak(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -210,7 +210,7 @@ func TestOptimizedPoolMemoryLeak(t *testing.T) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -250,7 +250,7 @@ func TestOptimizedPoolMemoryLeak(t *testing.T) {
 func BenchmarkJuicityEncrypt(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -258,7 +258,7 @@ func BenchmarkJuicityEncrypt(b *testing.B) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -274,7 +274,7 @@ func BenchmarkJuicityEncrypt(b *testing.B) {
 func BenchmarkJuicityDecrypt(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -282,7 +282,7 @@ func BenchmarkJuicityDecrypt(b *testing.B) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -304,7 +304,7 @@ func BenchmarkJuicityDecrypt(b *testing.B) {
 func BenchmarkJuicityEncryptDecrypt(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -312,7 +312,7 @@ func BenchmarkJuicityEncryptDecrypt(b *testing.B) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -330,7 +330,7 @@ func BenchmarkJuicityEncryptDecrypt(b *testing.B) {
 func BenchmarkJuicityVsOriginal(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -338,7 +338,7 @@ func BenchmarkJuicityVsOriginal(b *testing.B) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
@@ -369,7 +369,7 @@ func BenchmarkJuicityVsOriginal(b *testing.B) {
 func BenchmarkJuicityMultipleSalts(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -383,7 +383,7 @@ func BenchmarkJuicityMultipleSalts(b *testing.B) {
 	salts := make([][]byte, numSalts)
 	for i := range salts {
 		salts[i] = make([]byte, conf.SaltLen)
-		fastrand.Read(salts[i])
+		_, _ = fastrand.Read(salts[i])
 	}
 
 	b.Run("Original_MultiSalt", func(b *testing.B) {
@@ -408,7 +408,7 @@ func BenchmarkJuicityMultipleSalts(b *testing.B) {
 func BenchmarkJuicityRealistic(b *testing.B) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -422,11 +422,11 @@ func BenchmarkJuicityRealistic(b *testing.B) {
 		b.ReportAllocs()
 
 		salt := make([]byte, conf.SaltLen)
-		fastrand.Read(salt)
+		_, _ = fastrand.Read(salt)
 
 		for i := 0; i < b.N; i++ {
 			if i%100 == 0 {
-				fastrand.Read(salt)
+				_, _ = fastrand.Read(salt)
 			}
 			encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 			decrypted, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
@@ -439,7 +439,7 @@ func BenchmarkJuicityRealistic(b *testing.B) {
 func TestTransportPacketConnOptimizedPath(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -448,7 +448,7 @@ func TestTransportPacketConnOptimizedPath(t *testing.T) {
 
 	plaintext := []byte("TransportPacketConn test payload")
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 	reusedInfo := ciphers.JuicityReusedInfo
 
 	encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
@@ -471,7 +471,7 @@ func TestTransportPacketConnOptimizedPath(t *testing.T) {
 func TestTransportPacketConnSimulatedReadWrite(t *testing.T) {
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -480,10 +480,10 @@ func TestTransportPacketConnSimulatedReadWrite(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		plaintext := make([]byte, 100+fastrand.Intn(1300))
-		fastrand.Read(plaintext)
+		_, _ = fastrand.Read(plaintext)
 
 		salt := make([]byte, conf.SaltLen)
-		fastrand.Read(salt)
+		_, _ = fastrand.Read(salt)
 
 		reusedInfo := ciphers.JuicityReusedInfo
 
@@ -512,7 +512,7 @@ func TestTransportPacketConnTargetAddress(t *testing.T) {
 	plaintext := []byte("Test data with target address")
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -520,7 +520,7 @@ func TestTransportPacketConnTargetAddress(t *testing.T) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 	reusedInfo := ciphers.JuicityReusedInfo
 
 	encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
@@ -556,7 +556,7 @@ func TestCacheExpiration(t *testing.T) {
 
 	conf := CipherConf
 	masterKey := make([]byte, conf.KeyLen)
-	fastrand.Read(masterKey)
+	_, _ = fastrand.Read(masterKey)
 
 	key := &shadowsocks.Key{
 		CipherConf: conf,
@@ -564,7 +564,7 @@ func TestCacheExpiration(t *testing.T) {
 	}
 
 	salt := make([]byte, conf.SaltLen)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 
 	plaintext := []byte("Cache expiration test")
 	reusedInfo := ciphers.JuicityReusedInfo

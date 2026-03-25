@@ -151,7 +151,7 @@ func (c *Conn) sealFromPool(b []byte) (data []byte) {
 	c.writeChunkSizeParser.Encode(uint16(encryptedSize+paddingSize), data)
 
 	c.writeBodyCipher.Seal(data[sizeSize:sizeSize], c.writeNonceGenerator(), b, nil)
-	fastrand.Read(data[len(data)-int(paddingSize):])
+	_, _ = fastrand.Read(data[len(data)-int(paddingSize):])
 	//log.Warn("write: size: %v, padding: %v", encryptedSize+paddingSize, paddingSize)
 	return data
 }

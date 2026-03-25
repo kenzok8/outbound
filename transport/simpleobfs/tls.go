@@ -106,7 +106,7 @@ func (to *TLSObfs) write(b []byte) (int, error) {
 
 	buf := &bytes.Buffer{}
 	buf.Write([]byte{0x17, 0x03, 0x03})
-	binary.Write(buf, binary.BigEndian, uint16(len(b)))
+	_ = binary.Write(buf, binary.BigEndian, uint16(len(b)))
 	buf.Write(b)
 	_, err := to.Conn.Write(buf.Bytes())
 	return len(b), err
@@ -124,8 +124,8 @@ func NewTLSObfs(conn netproxy.Conn, server string) netproxy.Conn {
 func makeClientHelloMsg(data []byte, server string) []byte {
 	random := make([]byte, 28)
 	sessionID := make([]byte, 32)
-	fastrand.Read(random)
-	fastrand.Read(sessionID)
+	_, _ = fastrand.Read(random)
+	_, _ = fastrand.Read(sessionID)
 
 	buf := &bytes.Buffer{}
 
@@ -139,11 +139,11 @@ func makeClientHelloMsg(data []byte, server string) []byte {
 	// clientHello, length, TLS 1.2 version
 	buf.WriteByte(1)
 	buf.WriteByte(0)
-	binary.Write(buf, binary.BigEndian, uint16(208+len(data)+len(server)))
+	_ = binary.Write(buf, binary.BigEndian, uint16(208+len(data)+len(server)))
 	buf.Write([]byte{0x03, 0x03})
 
 	// random with timestamp, sid len, sid
-	binary.Write(buf, binary.BigEndian, uint32(time.Now().Unix()))
+	_ = binary.Write(buf, binary.BigEndian, uint32(time.Now().Unix()))
 	buf.Write(random)
 	buf.WriteByte(32)
 	buf.Write(sessionID)
@@ -161,19 +161,19 @@ func makeClientHelloMsg(data []byte, server string) []byte {
 	buf.Write([]byte{0x01, 0x00})
 
 	// extension length
-	binary.Write(buf, binary.BigEndian, uint16(79+len(data)+len(server)))
+	_ = binary.Write(buf, binary.BigEndian, uint16(79+len(data)+len(server)))
 
 	// session ticket
 	buf.Write([]byte{0x00, 0x23})
-	binary.Write(buf, binary.BigEndian, uint16(len(data)))
+	_ = binary.Write(buf, binary.BigEndian, uint16(len(data)))
 	buf.Write(data)
 
 	// server name
 	buf.Write([]byte{0x00, 0x00})
-	binary.Write(buf, binary.BigEndian, uint16(len(server)+5))
-	binary.Write(buf, binary.BigEndian, uint16(len(server)+3))
+	_ = binary.Write(buf, binary.BigEndian, uint16(len(server)+5))
+	_ = binary.Write(buf, binary.BigEndian, uint16(len(server)+3))
 	buf.WriteByte(0)
-	binary.Write(buf, binary.BigEndian, uint16(len(server)))
+	_ = binary.Write(buf, binary.BigEndian, uint16(len(server)))
 	buf.Write([]byte(server))
 
 	// ec_point

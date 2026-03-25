@@ -28,7 +28,7 @@ func TestReadFromNoDeadlock(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		packets.Close()
+		_ = packets.Close()
 	}()
 
 	select {
@@ -47,7 +47,7 @@ func TestReadFromReturnsNilAfterClose(t *testing.T) {
 		incomingPackets: packets,
 	}
 
-	packets.Close()
+	_ = packets.Close()
 
 	_, _, err := q.ReadFrom(make([]byte, 1024))
 	if err == nil {

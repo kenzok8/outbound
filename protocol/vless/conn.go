@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	FailAuthErr = fmt.Errorf("incorrect UUID")
+	FailAuthErr = fmt.Errorf("incorrect UUID") // nolint:staticcheck
 )
 
 type Metadata struct {

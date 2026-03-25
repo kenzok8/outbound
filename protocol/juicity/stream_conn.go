@@ -106,14 +106,14 @@ func (c *Conn) close() error {
 	// https://github.com/cloudflare/cloudflared/commit/ed2bac026db46b239699ac5ce4fcf122d7cab2cd
 	// Make sure a possible writer does not block the lock forever. We need it, so we can close the writer
 	// side of the stream safely.
-	_ = c.Stream.SetWriteDeadline(time.Now())
+	_ = c.SetWriteDeadline(time.Now())
 
 	// This lock is eventually acquired despite Write also acquiring it, because we set a deadline to writes.
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 
 	// We have to clean up the receiving stream ourselves since the Close in the bottom does not handle that.
-	c.Stream.CancelRead(0)
+	c.CancelRead(0)
 	return c.Stream.Close()
 }
 

@@ -116,7 +116,7 @@ func (u *udpConn) SetDeadline(t time.Time) error {
 		u.timer = time.AfterFunc(dur, func() {
 			u.muTimer.Lock()
 			defer u.muTimer.Unlock()
-			u.Close()
+			_ = u.Close()
 			u.timer = nil
 		})
 	}
@@ -149,7 +149,7 @@ func newUDPSessionManager(io udpIO) *udpSessionManager {
 		m:      make(map[uint32]*udpConn),
 		nextID: 1,
 	}
-	go m.run()
+	go func() { _ = m.run() }()
 	return m
 }
 

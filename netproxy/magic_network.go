@@ -11,7 +11,7 @@ import (
 const MagicNetworkType = 0
 
 var (
-	UnknownMagicNetworkEncodingError = fmt.Errorf("unknown magic network encoding")
+	UnknownMagicNetworkEncodingError = fmt.Errorf("unknown magic network encoding") // nolint:staticcheck
 )
 
 type MagicNetwork struct {

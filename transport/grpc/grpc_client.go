@@ -357,7 +357,7 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 	canceller := func() {
 		globalCCAccess.Lock()
 		defer globalCCAccess.Unlock()
-		globalCCMap[address].cc.Close()
+		_ = globalCCMap[address].cc.Close()
 		delete(globalCCMap, address)
 	}
 

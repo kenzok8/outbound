@@ -87,7 +87,7 @@ readAgain:
 		return 0, err
 	}
 	if needSendBack {
-		c.Write(nil)
+		_, _ = c.Write(nil)
 		goto readAgain
 	}
 	if len(decodedData) == 0 {

@@ -111,6 +111,6 @@ func Put(buf []byte) {
 		i = minsizePower
 	}
 	if i < num {
-		pools[i].Put(buf)
+		pools[i].Put(buf) // nolint:staticcheck
 	}
 }

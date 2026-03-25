@@ -47,7 +47,7 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 	if err != nil {
 		return
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	result, err := io.ReadAll(httpResp.Body)
 	if err != nil {

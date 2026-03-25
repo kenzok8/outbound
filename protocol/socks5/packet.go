@@ -127,7 +127,7 @@ func (pc *PktConn) Close() error {
 		pc.cancel()
 	}
 	if pc.ctrlConn != nil {
-		pc.ctrlConn.Close()
+		_ = pc.ctrlConn.Close()
 	}
 
 	return pc.PacketConn.Close()

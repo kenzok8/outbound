@@ -16,8 +16,8 @@ import (
 	"github.com/dgryski/go-idea"
 	"github.com/dgryski/go-rc2"
 	"gitlab.com/yawning/chacha20.git"
-	"golang.org/x/crypto/blowfish"
-	"golang.org/x/crypto/cast5"
+	"golang.org/x/crypto/blowfish" // nolint:staticcheck
+	"golang.org/x/crypto/cast5"    // nolint:staticcheck
 	"golang.org/x/crypto/salsa20/salsa"
 )
 
@@ -46,7 +46,7 @@ func newOFBStream(block cipher.Block, err error, key, iv []byte, doe DecOrEnc) (
 	if err != nil {
 		return nil, err
 	}
-	return cipher.NewOFB(block, iv), nil
+	return cipher.NewOFB(block, iv), nil // nolint:staticcheck
 }
 
 func newAESOFBStream(key, iv []byte, doe DecOrEnc) (cipher.Stream, error) {
@@ -59,9 +59,9 @@ func newCFBStream(block cipher.Block, err error, key, iv []byte, doe DecOrEnc) (
 		return nil, err
 	}
 	if doe == Encrypt {
-		return cipher.NewCFBEncrypter(block, iv), nil
+		return cipher.NewCFBEncrypter(block, iv), nil // nolint:staticcheck
 	} else {
-		return cipher.NewCFBDecrypter(block, iv), nil
+		return cipher.NewCFBDecrypter(block, iv), nil // nolint:staticcheck
 	}
 }
 
@@ -256,7 +256,7 @@ func (c *StreamCipher) InitEncrypt() (iv []byte, err error) {
 	}
 	if c.iv == nil {
 		iv = make([]byte, c.info.ivLen)
-		rand.Read(iv)
+		_, _ = rand.Read(iv)
 		c.iv = iv
 	} else {
 		iv = c.iv
@@ -273,7 +273,7 @@ func (c *StreamCipher) NewEncryptor(iv []byte) (enc cipher.Stream, err error) {
 		defer pool.Put(iv)
 	}
 	iv = iv[:c.info.ivLen]
-	rand.Read(iv)
+	_, _ = rand.Read(iv)
 	return c.info.newStream(c.key, iv, Encrypt)
 }
 

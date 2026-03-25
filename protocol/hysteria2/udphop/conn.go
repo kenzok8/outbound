@@ -86,7 +86,7 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 		buf := u.bufPool.Get().([]byte)
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
-			u.bufPool.Put(buf)
+			u.bufPool.Put(buf) // nolint:staticcheck
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				// Only pass through timeout errors here, not permanent errors
@@ -101,7 +101,7 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 			// Packet successfully queued
 		default:
 			// Queue is full, drop the packet
-			u.bufPool.Put(buf)
+			u.bufPool.Put(buf) // nolint:staticcheck
 		}
 	}
 }
@@ -164,7 +164,7 @@ func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) 
 			// Currently we do not check whether the packet is from
 			// the server or not due to performance reasons.
 			n := copy(b, p.Buf[:p.N])
-			u.bufPool.Put(p.Buf)
+			u.bufPool.Put(p.Buf) // nolint:staticcheck
 			return n, u.Addr, nil
 		case <-u.closeChan:
 			return 0, nil, net.ErrClosed

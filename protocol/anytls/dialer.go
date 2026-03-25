@@ -110,7 +110,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	copy(buf, d.key)
 	binary.BigEndian.PutUint16(buf[len(d.key):], uint16(0))
 	if _, err := tlsConn.Write(buf); err != nil {
-		tlsConn.Close()
+		_ = tlsConn.Close()
 		return nil, err
 	}
 
@@ -129,7 +129,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		}
 	}(s)
 
-	go s.run()
+	go func() { _ = s.run() }()
 
 	return s, nil
 }

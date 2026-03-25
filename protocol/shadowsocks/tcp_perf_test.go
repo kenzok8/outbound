@@ -65,7 +65,7 @@ func BenchmarkTCPEncryptFirstWrite(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -103,7 +103,7 @@ func BenchmarkTCPEncryptSubsequentWrites(b *testing.B) {
 		}
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // BenchmarkTCPDecryptFirstRead benchmarks the first read (with cipher creation)
@@ -152,8 +152,8 @@ func BenchmarkTCPDecryptFirstRead(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		client.Close()
-		server.Close()
+		_ = client.Close()
+		_ = server.Close()
 	}
 }
 
@@ -213,8 +213,8 @@ func BenchmarkTCPDecryptSubsequentReads(b *testing.B) {
 		}
 	}
 
-	client.Close()
-	server.Close()
+	_ = client.Close()
+	_ = server.Close()
 }
 
 // BenchmarkTCPSmallChunks benchmarks encryption of small chunks (< 16KB)
@@ -257,7 +257,7 @@ func benchmarkTCPChunkSize(b *testing.B, size int) {
 		}
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // BenchmarkTCPLargeStream benchmarks encryption of large stream
@@ -294,7 +294,7 @@ func BenchmarkTCPLargeStream(b *testing.B) {
 			}
 		}
 
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -333,7 +333,7 @@ func BenchmarkTCPMutexOverhead(b *testing.B) {
 		}
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // BenchmarkTCPPoolOverhead benchmarks the pool allocation overhead
@@ -371,7 +371,7 @@ func BenchmarkTCPPoolOverhead(b *testing.B) {
 		}
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
 // Compare first vs subsequent operations
@@ -391,7 +391,7 @@ func BenchmarkTCPFirstVsSubsequent(b *testing.B) {
 			mock := &mockConn{}
 			conn, _ := NewTCPConn(mock, metadata, masterKey, nil)
 			_, _ = conn.Write(plaintext)
-			conn.Close()
+			_ = conn.Close()
 		}
 	})
 
@@ -413,6 +413,6 @@ func BenchmarkTCPFirstVsSubsequent(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_, _ = conn.Write(plaintext)
 		}
-		conn.Close()
+		_ = conn.Close()
 	})
 }

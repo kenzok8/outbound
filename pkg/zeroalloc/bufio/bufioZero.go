@@ -655,7 +655,7 @@ func (b *Writer) Write(p []byte) (nn int, err error) {
 		} else {
 			n = copy(b.buf[b.n:], p)
 			b.n += n
-			b.Flush()
+			_ = b.Flush()
 		}
 		nn += n
 		p = p[n:]
@@ -698,7 +698,7 @@ func (b *Writer) WriteRune(r rune) (size int, err error) {
 	}
 	n := b.Available()
 	if n < utf8.UTFMax {
-		if b.Flush(); b.err != nil {
+		if _ = b.Flush(); b.err != nil {
 			return 0, b.err
 		}
 		n = b.Available()
@@ -723,7 +723,7 @@ func (b *Writer) WriteString(s string) (int, error) {
 		b.n += n
 		nn += n
 		s = s[n:]
-		b.Flush()
+		_ = b.Flush()
 	}
 	if b.err != nil {
 		return nn, b.err

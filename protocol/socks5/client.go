@@ -35,7 +35,7 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 		}
 		if _, err := s.connect(c, addr, socks.CmdConnect); err != nil {
-			c.Close()
+			_ = c.Close()
 			return nil, err
 		}
 		return c, nil
@@ -53,7 +53,7 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (netprox
 		// Get the proxy addr we should dial.
 		var uAddr socks.Addr
 		if uAddr, err = s.connect(c, addr, socks.CmdUDPAssociate); err != nil {
-			c.Close()
+			_ = c.Close()
 			return nil, err
 		}
 

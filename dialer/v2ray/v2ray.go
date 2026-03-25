@@ -42,7 +42,7 @@ type V2Ray struct {
 	Flow          string `json:"flow,omitempty"`
 	Alpn          string `json:"alpn,omitempty"`
 	AllowInsecure bool   `json:"allowInsecure"`
-	Fingerprint   string `json:"fp,omitempty`
+	Fingerprint   string `json:"fp,omitempty"`
 	PublicKey     string `json:"pbk,omitempty"`
 	ShortId       string `json:"sid,omitempty"`
 	SpiderX       string `json:"spx,omitempty"`

@@ -71,7 +71,7 @@ func BenchmarkTCPRealistic(b *testing.B) {
 	// 模拟 TCP 连接建立：一次性派生 subKey 和 cipher
 	subKey := make([]byte, key.CipherConf.KeyLen)
 	kdf := hkdf.New(sha1.New, key.MasterKey, salt, reusedInfo)
-	kdf.Read(subKey)
+	_, _ = kdf.Read(subKey)
 	ciph, _ := key.CipherConf.NewCipher(subKey)
 
 	// 模拟多个数据包使用同一个 cipher
@@ -108,7 +108,7 @@ func BenchmarkTCPOverheadIncludingInit(b *testing.B) {
 
 		subKey := make([]byte, key.CipherConf.KeyLen)
 		kdf := hkdf.New(sha1.New, key.MasterKey, salt, reusedInfo)
-		kdf.Read(subKey)
+		_, _ = kdf.Read(subKey)
 		ciph, _ := key.CipherConf.NewCipher(subKey)
 
 		_ = ciph.Seal(data[:0], nonce, data, nil)

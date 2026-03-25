@@ -60,7 +60,7 @@ func (conf *CipherConf) Verify(buf []byte, masterKey []byte, salt []byte, cipher
 			salt,
 			shadowsocksReusedInfo,
 		)
-		io.ReadFull(kdf, sk)
+		_, _ = io.ReadFull(kdf, sk)
 		if subKey != nil && cap(*subKey) >= conf.KeyLen {
 			*subKey = (*subKey)[:conf.KeyLen]
 			copy(*subKey, sk)

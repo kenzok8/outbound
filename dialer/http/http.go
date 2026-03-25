@@ -44,9 +44,10 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 	pwd, _ := u.User.Password()
 	strPort := u.Port()
 	if strPort == "" {
-		if u.Scheme == "http" {
+		switch u.Scheme {
+		case "http":
 			strPort = "80"
-		} else if u.Scheme == "https" {
+		case "https":
 			strPort = "443"
 		}
 	}

@@ -121,8 +121,8 @@ func NewAuthenticate(UUID [16]byte, TOKEN [32]byte, VER byte) *Authenticate {
 func ReadAuthenticateWithHead(head *CommandHead, reader BufferedReader) (c *Authenticate, err error) {
 	var _c Authenticate
 	_c.CommandHead = head
-	if _c.CommandHead.TYPE != AuthenticateType {
-		return nil, fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
+	if _c.TYPE != AuthenticateType {
+		return nil, fmt.Errorf("error command type: %s", _c.TYPE)
 	}
 	_, err = io.ReadFull(reader, _c.UUID[:])
 	if err != nil {
@@ -188,8 +188,8 @@ func NewConnect(ADDR *Address, VER byte) *Connect {
 func ReadConnectWithHead(head *CommandHead, reader BufferedReader) (c *Connect, err error) {
 	var _c Connect
 	_c.CommandHead = head
-	if _c.CommandHead.TYPE != ConnectType {
-		err = fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
+	if _c.TYPE != ConnectType {
+		err = fmt.Errorf("error command type: %s", _c.TYPE)
 		return nil, err
 	}
 	_c.ADDR, err = ReadAddress(reader)
@@ -256,8 +256,8 @@ func NewPacket(ASSOC_ID uint16, PKT_ID uint16, FRGA_TOTAL uint8, FRAG_ID uint8, 
 func ReadPacketWithHead(head *CommandHead, reader BufferedReader) (c *Packet, err error) {
 	var _c Packet
 	_c.CommandHead = head
-	if _c.CommandHead.TYPE != PacketType {
-		err = fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
+	if _c.TYPE != PacketType {
+		err = fmt.Errorf("error command type: %s", _c.TYPE)
 		return nil, err
 	}
 	err = binary.Read(reader, binary.BigEndian, &_c.ASSOC_ID)
@@ -357,8 +357,8 @@ func NewDissociate(ASSOC_ID uint16, VER byte) *Dissociate {
 func ReadDissociateWithHead(head *CommandHead, reader BufferedReader) (c *Dissociate, err error) {
 	var _c Dissociate
 	_c.CommandHead = head
-	if _c.CommandHead.TYPE != DissociateType {
-		err = fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
+	if _c.TYPE != DissociateType {
+		err = fmt.Errorf("error command type: %s", _c.TYPE)
 		return nil, err
 	}
 	err = binary.Read(reader, binary.BigEndian, &_c.ASSOC_ID)
@@ -405,8 +405,8 @@ func NewHeartbeat(VER byte) *Heartbeat {
 func ReadHeartbeatWithHead(head *CommandHead, reader BufferedReader) (c *Heartbeat, err error) {
 	var _c Heartbeat
 	_c.CommandHead = head
-	if _c.CommandHead.TYPE != HeartbeatType {
-		err = fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
+	if _c.TYPE != HeartbeatType {
+		err = fmt.Errorf("error command type: %s", _c.TYPE)
 		return nil, err
 	}
 	return &_c, nil

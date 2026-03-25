@@ -155,7 +155,7 @@ func TestUdpConn_NextPacketID_ConcurrentUnique(t *testing.T) {
 	close(ids)
 
 	seen := make(map[uint64]struct{}, n)
-	var minID uint64 = ^uint64(0)
+	var minID = ^uint64(0)
 	var maxID uint64
 	for id := range ids {
 		if _, ok := seen[id]; ok {

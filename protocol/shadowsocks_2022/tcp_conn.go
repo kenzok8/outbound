@@ -95,13 +95,6 @@ func (c *TCPConn) getContext() context.Context {
 	return context.Background()
 }
 
-// setContext updates the connection's context
-func (c *TCPConn) setContext(ctx context.Context) {
-	c.ctxMu.Lock()
-	defer c.ctxMu.Unlock()
-	c.ctx = ctx
-}
-
 func (c *TCPConn) Close() error {
 	c.readMutex.Lock()
 	c.leftToRead = nil
@@ -131,7 +124,7 @@ func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 		// regardless of when the dial context was created.
 		// 30 seconds allows for high-latency networks while still detecting
 		// dead connections within a reasonable time.
-		dl.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_ = dl.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
 	return true
 }
@@ -152,7 +145,7 @@ func (c *TCPConn) checkContextAndSetWriteDeadline() bool {
 		// regardless of when the dial context was created.
 		// 30 seconds allows for high-latency networks while still detecting
 		// dead connections within a reasonable time.
-		dl.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		_ = dl.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	}
 	return true
 }

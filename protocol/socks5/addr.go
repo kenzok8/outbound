@@ -78,7 +78,6 @@ func WriteAddrInfo(addr *AddressInfo, w io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported address type: %v", addr.Type)
 	}
-	return nil
 }
 
 func ReadAddr(data io.Reader) (net.Addr, error) {

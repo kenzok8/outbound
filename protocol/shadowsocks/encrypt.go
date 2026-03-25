@@ -27,6 +27,7 @@ func getSubKey(keyLen int) []byte {
 // putSubKey returns a subKey buffer to the pool.
 func putSubKey(subKey []byte) {
 	if subKey != nil && cap(subKey) >= 16 && cap(subKey) <= 32 {
+		// nolint:staticcheck
 		subKeyPool.Put(subKey[:32])
 	}
 }

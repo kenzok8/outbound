@@ -114,11 +114,11 @@ func (m *Conn) Write(b []byte) (int, error) {
 		m.otb = nil
 	}
 	m.buf.Reset()
-	binary.Write(&m.buf, binary.BigEndian, uint16(4))
+	_ = binary.Write(&m.buf, binary.BigEndian, uint16(4))
 	m.buf.Write(m.id[:])
 	m.buf.WriteByte(SessionStatusKeep)
 	m.buf.WriteByte(OptionData)
-	binary.Write(&m.buf, binary.BigEndian, uint16(len(b)))
+	_ = binary.Write(&m.buf, binary.BigEndian, uint16(len(b)))
 	m.buf.Write(b)
 
 	return m.Conn.Write(m.buf.Bytes())
@@ -149,7 +149,7 @@ func NewConn(conn net.Conn, option MuxOption) *Conn {
 	buf.WriteByte(netType)
 
 	// port
-	binary.Write(buf, binary.BigEndian, option.Port)
+	_ = binary.Write(buf, binary.BigEndian, option.Port)
 
 	// address
 	ip := net.ParseIP(option.Host)

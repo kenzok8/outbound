@@ -8,8 +8,8 @@ import (
 
 func TestBufferedConnUnderlyingConn(t *testing.T) {
 	left, right := net.Pipe()
-	defer left.Close()
-	defer right.Close()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
 
 	conn := NewBufferedConn(left)
 	if got := conn.UnderlyingConn(); got != left {
@@ -19,17 +19,17 @@ func TestBufferedConnUnderlyingConn(t *testing.T) {
 
 func TestBufferedConnTakeRelayPrefix(t *testing.T) {
 	left, right := net.Pipe()
-	defer left.Close()
-	defer right.Close()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
 
 	conn := NewBufferedConnSize(left, 64)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	payload := []byte("prefetched-body")
 	writeErr := make(chan error, 1)
 	go func() {
 		_, err := right.Write(payload)
-		_ = right.Close()
+		defer func() { _ = right.Close() }()
 		writeErr <- err
 	}()
 

@@ -118,7 +118,7 @@ func KDF(key []byte, path ...[]byte) []byte {
 
 func PutEAuthID(dst []byte, cmdKey []byte) []byte {
 	binary.BigEndian.PutUint64(dst[:8], uint64(time.Now().Unix()))
-	fastrand.Read(dst[8:12])
+	_, _ = fastrand.Read(dst[8:12])
 	binary.BigEndian.PutUint32(dst[12:], crc32.ChecksumIEEE(dst[:12]))
 	blk, _ := aes.NewCipher(KDF(cmdKey, []byte(KDFSaltConstAuthIDEncryptionKey))[:16])
 	blk.Encrypt(dst[:16], dst[:16])
@@ -155,7 +155,7 @@ func ReqInstructionDataFromPool(metadata Metadata) []byte {
 	// 1 + 16 + 16 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + metadata.AddrLen() + P + 4
 	buf := pool.Get(metadata.AddrLen() + P + 45)
 	buf[0] = 1               // version
-	fastrand.Read(buf[1:34]) // random IV(16), Key(16), V(1)
+	_, _ = fastrand.Read(buf[1:34]) // random IV(16), Key(16), V(1)
 	// https://github.com/v2fly/v2ray-core/blob/a66bb28aee661caa191b5746ba4915eb99e12c59/proxy/vmess/outbound/outbound.go#L112
 	//buf[34] = OptionChunkStream | OptionChunkLengthMasking | OptionGlobalPadding
 	buf[34] = OptionChunkStream | OptionChunkLengthMasking | OptionGlobalPadding
@@ -177,7 +177,7 @@ func EncryptReqHeaderFromPool(instruction []byte, cmdKey []byte) ([]byte, error)
 	buf := pool.Get(58 + len(instruction)) // EAuthID(16) + length(2) + tag(16) + nonce(8) + len(instruction) + tag(16)
 	eAuthID := PutEAuthID(buf, cmdKey)
 	connectionNonce := buf[34:42] // 16+2+16
-	fastrand.Read(connectionNonce)
+	_, _ = fastrand.Read(connectionNonce)
 
 	gcm, err := NewAesGcm(KDF(cmdKey, []byte(KDFSaltConstVMessHeaderPayloadLengthAEADKey), eAuthID, connectionNonce)[:16])
 	if err != nil {

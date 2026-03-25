@@ -314,13 +314,13 @@ func (c *TCPConn) ReadMetadata() (metadata Metadata, err error) {
 	metadata = *mdata
 	// complete metadata
 	if !c.metadata.IsClient {
-		c.metadata.Type = metadata.Metadata.Type
-		c.metadata.Hostname = metadata.Metadata.Hostname
-		c.metadata.Port = metadata.Metadata.Port
+		c.metadata.Type = metadata.Type
+		c.metadata.Hostname = metadata.Hostname
+		c.metadata.Port = metadata.Port
 		if metadata.Type == protocol.MetadataTypeMsg {
 			c.metadata.Cmd = protocol.MetadataCmdResponse
 		} else {
-			c.metadata.Cmd = metadata.Metadata.Cmd
+			c.metadata.Cmd = metadata.Cmd
 		}
 	}
 	return metadata, nil

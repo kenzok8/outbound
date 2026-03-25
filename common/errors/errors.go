@@ -86,7 +86,7 @@ func IsDNSTemporaryFailure(err error) bool {
 	// Check for temporary error using net.Error interface
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		if netErr.Temporary() {
+		if netErr.Temporary() { // nolint:staticcheck
 			return contains(err.Error(), "lookup")
 		}
 	}
@@ -189,7 +189,7 @@ func IsTemporaryError(err error) bool {
 
 	// Net temporary errors
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Temporary() {
+	if errors.As(err, &netErr) && netErr.Temporary() { // nolint:staticcheck
 		return true
 	}
 

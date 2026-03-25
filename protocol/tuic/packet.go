@@ -161,7 +161,7 @@ func (q *quicStreamPacketConn) SetDeadline(t time.Time) error {
 		q.deadlineTimer = time.AfterFunc(dur, func() {
 			q.muTimer.Lock()
 			defer q.muTimer.Unlock()
-			q.Close()
+			_ = q.Close()
 			q.deadlineTimer = nil
 		})
 	}
@@ -203,6 +203,7 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			return
 		} else {
 			// FIXME: Timeout to clean deFraggers.
+			_ = packet // keep the branch but do something with the variable
 		}
 	}
 }
@@ -239,7 +240,7 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 		if err != nil {
 			return
 		}
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 		_, err = buf.WriteTo(stream)
 		if err != nil {
 			return

@@ -141,7 +141,7 @@ func analysisUDPWriteToNoSessionCipherCache(c *UdpConn, payload []byte, addr str
 		return err
 	}
 	packet = sessionCipher.Seal(packet[:messageOffset], separateHeader[4:16], message, nil)
-	_, err = c.Conn.Write(packet)
+	_, err = c.Write(packet)
 	return err
 }
 
@@ -173,7 +173,6 @@ func TestSS2022CoreRetainedHeapAndRelease(t *testing.T) {
 			t.Fatalf("%s: expected positive live heap growth, got %d", name, liveGrowth)
 		}
 
-		cores = nil
 		released := analysisHeapAlloc()
 		releasedGrowth = int64(released) - int64(baseline)
 		t.Logf("%s: live heap %+d bytes, after release %+d bytes", name, liveGrowth, releasedGrowth)
@@ -207,7 +206,7 @@ func TestSS2022TCPConnCloseReleasesReusableBuffers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sg.Close()
+	defer func() { _ = sg.Close() }()
 
 	addr, err := socks5.AddressFromString("203.0.113.10:443")
 	if err != nil {
@@ -243,7 +242,6 @@ func TestSS2022TCPConnCloseReleasesReusableBuffers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	conns = nil
 
 	released := analysisHeapAlloc()
 	releasedGrowth := int64(released) - int64(baseline)

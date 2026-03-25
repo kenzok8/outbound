@@ -3,6 +3,7 @@ package direct
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -20,13 +21,13 @@ func TestDirectPacketConnConcurrentWriteInitializesCachedTargetSafely(t *testing
 	if err != nil {
 		t.Fatalf("ListenUDP(server): %v", err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("ListenUDP(client): %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	oldResolveUDPAddr := resolveUDPAddr
 	resolveUDPAddr = func(_ *net.Resolver, _ string) (*net.UDPAddr, error) {
@@ -44,7 +45,7 @@ func TestDirectPacketConnConcurrentWriteInitializesCachedTargetSafely(t *testing
 	}
 
 	const writers = 8
-	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(2 * time.Second))
 
 	var wg sync.WaitGroup
 	for i := 0; i < writers; i++ {
@@ -70,8 +71,8 @@ func TestDirectPacketConnConcurrentWriteInitializesCachedTargetSafely(t *testing
 
 	wg.Wait()
 
-	cached := conn.cachedDialTgt.Load()
-	if cached == nil || !cached.IsValid() {
+	cachedValue := conn.cachedDialTgt.Load()
+	if cachedValue == nil || !cachedValue.(netip.AddrPort).IsValid() {
 		t.Fatal("cachedDialTgt was not initialized")
 	}
 }

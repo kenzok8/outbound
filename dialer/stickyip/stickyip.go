@@ -359,7 +359,7 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 				// For UDP, verify the connection actually works by trying to read
 				if baseNetwork == "udp" {
 					if !d.verifyUDPConnectivity(ctx, conn.(netproxy.PacketConn)) {
-						conn.Close()
+						_ = conn.Close()
 						logCacheFailure(d.proxyAddr, cachedAddr, network, fmt.Errorf("UDP verification failed"))
 						d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
 						// Fall through to resolve and try other IPs
@@ -416,8 +416,8 @@ func (d *StickyIpDialer) getBaseNetwork(network string) string {
 // so this is a best-effort check. The real validation happens during protocol handshake.
 func (d *StickyIpDialer) verifyUDPConnectivity(ctx context.Context, conn netproxy.PacketConn) bool {
 	// Set a very short read deadline
-	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	// Try to read - this will tell us if the socket is properly bound
 	var buf [1]byte
@@ -504,13 +504,13 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 			if isUDP {
 				packetConn, ok := conn.(netproxy.PacketConn)
 				if !ok {
-					conn.Close()
+					_ = conn.Close()
 					lastErr = fmt.Errorf("not a packet connection")
 					logIPFailure(d.proxyAddr, targetAddr, lastErr)
 					continue
 				}
 				if !d.verifyUDPConnectivity(ctx, packetConn) {
-					conn.Close()
+					_ = conn.Close()
 					lastErr = fmt.Errorf("UDP connection verification failed")
 					logIPFailure(d.proxyAddr, targetAddr, lastErr)
 					continue

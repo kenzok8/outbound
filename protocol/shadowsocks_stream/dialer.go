@@ -58,7 +58,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 
 		if _, err := conn.Write(target); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
 		return conn, err

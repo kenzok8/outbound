@@ -65,8 +65,8 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		quicConn, err = transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
 	}
 	if err != nil {
-		transport.Close()
-		transport.Conn.Close()
+		_ = transport.Close()
+		_ = transport.Conn.Close()
 		return nil, err
 	}
 
@@ -129,13 +129,14 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 		if err != nil {
 			return err
 		}
-		go func(stream quic.ReceiveStream) (err error) {
+		go func(stream quic.ReceiveStream) {
+			var err error
 			var assocId uint16
 			defer func() {
 				t.deferQuicConn(quicConn, err)
 				if err != nil && assocId != 0 {
 					if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
-						val.(*Packets).Close()
+						_ = val.(*Packets).Close()
 					}
 				}
 				stream.CancelRead(0)
@@ -144,7 +145,7 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 			var commandHead *CommandHead
 			commandHead, err = ReadCommandHead(reader)
 			if err != nil {
-				return err
+				return
 			}
 			switch commandHead.TYPE {
 			case PacketType:
@@ -161,7 +162,6 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 					}
 				}
 			}
-			return nil
 		}(stream)
 	}
 }
@@ -180,27 +180,28 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 			}
 			return err
 		}
-		go func(message []byte) (err error) {
+		go func(message []byte) {
+			var err error
 			var assocId uint16
 			defer func() {
 				t.deferQuicConn(quicConn, err)
 				if err != nil && assocId != 0 {
 					if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
-						val.(*Packets).Close()
+						_ = val.(*Packets).Close()
 					}
 				}
 			}()
 			reader := bytes.NewReader(message)
 			commandHead, err := ReadCommandHead(reader)
 			if err != nil {
-				return err
+				return // Ignore ReadFrom errors
 			}
 			switch commandHead.TYPE {
 			case PacketType:
 				var packet *Packet
 				packet, err = ReadPacketWithHead(commandHead, reader)
 				if err != nil {
-					return err
+					return // Ignore ReadFrom errors
 				}
 				if t.udp && t.UdpRelayMode == common.NATIVE {
 					assocId = packet.ASSOC_ID
@@ -212,10 +213,10 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 			case HeartbeatType:
 				_, err = ReadHeartbeatWithHead(commandHead, reader)
 				if err != nil {
-					return err
+					return // Ignore ReadFrom errors
 				}
 			}
-			return nil
+			_ = err
 		}(message)
 	}
 }

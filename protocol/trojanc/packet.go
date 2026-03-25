@@ -18,7 +18,7 @@ type PacketConn struct {
 }
 
 func (c *PacketConn) Write(b []byte) (int, error) {
-	return c.WriteTo(b, net.JoinHostPort(c.Conn.metadata.Hostname, strconv.Itoa(int(c.Conn.metadata.Port))))
+	return c.WriteTo(b, net.JoinHostPort(c.metadata.Hostname, strconv.Itoa(int(c.metadata.Port))))
 }
 
 func (c *PacketConn) Read(b []byte) (n int, err error) {

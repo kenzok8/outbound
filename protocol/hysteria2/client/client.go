@@ -201,13 +201,13 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 		return nil, err
 	}
 	if deadline, ok := ctx.Deadline(); ok {
-		stream.SetDeadline(deadline)
-		defer stream.SetDeadline(time.Time{})
+		_ = stream.SetDeadline(deadline)
+		defer func() { _ = stream.SetDeadline(time.Time{}) }()
 	}
 	// Send request
 	err = protocol.WriteTCPRequest(stream, addr)
 	if err != nil {
-		stream.Close()
+		_ = stream.Close()
 		c.handleIfConnectionClosed(err)
 		return nil, err
 	}
@@ -276,12 +276,13 @@ func (c *clientImpl) handleIfConnectionClosed(err error) {
 		return
 	}
 	if _, ok := err.(coreErrs.ClosedError); ok {
-		c.conn.CloseWithError(closeErrCodeProtocolError, "")
-		c.pktConn.Close()
+		_ = c.conn.CloseWithError(closeErrCodeProtocolError, "")
+		_ = c.pktConn.Close()
+		return
 	}
-	if netErr, ok := err.(net.Error); !ok || !netErr.Temporary() {
-		c.conn.CloseWithError(closeErrCodeProtocolError, "")
-		c.pktConn.Close()
+	if netErr, ok := err.(net.Error); !ok || !netErr.Temporary() { // nolint:staticcheck
+		_ = c.conn.CloseWithError(closeErrCodeProtocolError, "")
+		_ = c.pktConn.Close()
 	}
 }
 

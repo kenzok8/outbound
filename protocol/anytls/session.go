@@ -104,7 +104,7 @@ func (s *session) run() error {
 			slog.Error("[Panic]", slog.String("stack", string(debug.Stack())))
 		}
 	}()
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var header rawHeader
 	for {
@@ -150,7 +150,7 @@ func (s *session) run() error {
 			stream, ok := s.streams[sid]
 			s.streamLock.RUnlock()
 			if ok {
-				stream.remoteClose()
+				_ = stream.remoteClose()
 			}
 		case cmdUpdatePaddingScheme:
 			if length > 0 {
@@ -173,7 +173,7 @@ func (s *session) run() error {
 				stream, ok := s.streams[sid]
 				s.streamLock.RUnlock()
 				if ok {
-					stream.Close()
+					_ = stream.Close()
 				}
 				pool.Put(buf)
 			}
@@ -209,10 +209,11 @@ func (s *session) Close() error {
 		s.streamLock.Lock()
 		defer s.streamLock.Unlock()
 		for i := range s.streams {
-			s.streams[i].Close()
+			_ = s.streams[i].Close()
 		}
 		s.streams = make(map[uint32]*stream)
-		return s.conn.Close()
+		_ = s.conn.Close()
+		return nil
 	}
 	return nil
 }

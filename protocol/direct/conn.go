@@ -24,7 +24,7 @@ type directPacketConn struct {
 }
 
 func (c *directPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
-	return c.UDPConn.ReadFromUDPAddrPort(p)
+	return c.ReadFromUDPAddrPort(p)
 }
 
 func (c *directPacketConn) WriteTo(b []byte, addr string) (int, error) {
@@ -96,7 +96,7 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 	// From Go's net package documentation:
 	// "Multiple goroutines may invoke methods on a PacketConn simultaneously."
 	cached := c.cachedDialTgt.Load().(netip.AddrPort)
-	return c.UDPConn.WriteToUDPAddrPort(b, cached)
+	return c.WriteToUDPAddrPort(b, cached)
 }
 
 func (c *directPacketConn) Read(b []byte) (int, error) {

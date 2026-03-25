@@ -3,7 +3,6 @@ package juicity
 import (
 	"context"
 	"fmt"
-	"math"
 	"net"
 	"strconv"
 	"time"
@@ -36,8 +35,6 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 	// ensure server's incoming stream can handle correctly, increase to 1.1x
 	maxOpenIncomingStreams := int64(100)
-	quicMaxOpenIncomingStreams := int64(maxOpenIncomingStreams)
-	quicMaxOpenIncomingStreams = quicMaxOpenIncomingStreams + int64(math.Ceil(float64(quicMaxOpenIncomingStreams)/10.0))
 	reservedStreamsCapability := maxOpenIncomingStreams / 5
 	if reservedStreamsCapability < 1 {
 		reservedStreamsCapability = 1

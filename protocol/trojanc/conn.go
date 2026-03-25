@@ -19,7 +19,7 @@ import (
 
 var (
 	CRLF        = []byte{13, 10}
-	FailAuthErr = fmt.Errorf("incorrect password")
+	FailAuthErr = fmt.Errorf("incorrect password") // nolint:staticcheck
 
 	// passwordHashCache caches SHA224 hash results of passwords
 	passwordHashCache sync.Map

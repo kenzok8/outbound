@@ -85,7 +85,7 @@ func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core,
 	}
 
 	// Generate session ID
-	fastrand.Read(u.sessionID[:])
+	_, _ = fastrand.Read(u.sessionID[:])
 	return u, nil
 }
 
@@ -97,13 +97,6 @@ func (c *UdpConn) getContext() context.Context {
 		return c.ctx
 	}
 	return context.Background()
-}
-
-// setContext updates the connection's context.
-func (c *UdpConn) setContext(ctx context.Context) {
-	c.ctxMu.Lock()
-	defer c.ctxMu.Unlock()
-	c.ctx = ctx
 }
 
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
@@ -123,7 +116,7 @@ func (c *UdpConn) checkContextAndSetReadDeadline() bool {
 	if deadline, ok := ctx.Deadline(); ok {
 		// Use the context's deadline, not a fixed 5-second timeout
 		if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-			dl.SetReadDeadline(deadline)
+			_ = dl.SetReadDeadline(deadline)
 		}
 	}
 	return true
@@ -146,7 +139,7 @@ func (c *UdpConn) checkContextAndSetWriteDeadline() bool {
 	if deadline, ok := ctx.Deadline(); ok {
 		// Use the context's deadline, not a fixed 5-second timeout
 		if dl, ok := c.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
-			dl.SetWriteDeadline(deadline)
+			_ = dl.SetWriteDeadline(deadline)
 		}
 	}
 	return true
@@ -242,7 +235,7 @@ func (c *UdpConn) evictOldestIfNeeded() {
 			found      bool
 			oldestKey  [8]byte
 			oldestVal  any
-			oldestNano int64 = ^int64(0)
+			oldestNano = ^int64(0)
 		)
 
 		c.replayWindow.Range(func(key, value interface{}) bool {
@@ -325,7 +318,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	if !c.checkContextAndSetWriteDeadline() {
 		return 0, io.EOF
 	}
-	_, err = c.Conn.Write(packet)
+	_, err = c.Write(packet)
 	return len(b), err
 }
 
@@ -355,7 +348,7 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 	defer pool.Put(packet)
 
 	nonce := packet[:udpPacketNonceSize]
-	fastrand.Read(nonce)
+	_, _ = fastrand.Read(nonce)
 
 	// Build packet structure: nonce + EIH + message
 	eihOffset := udpPacketNonceSize
@@ -391,7 +384,7 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 	if !c.checkContextAndSetWriteDeadline() {
 		return 0, io.EOF
 	}
-	_, err = c.Conn.Write(packet)
+	_, err = c.Write(packet)
 	return len(b), err
 }
 
@@ -405,7 +398,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	if !c.checkContextAndSetReadDeadline() {
 		return 0, netip.AddrPort{}, io.EOF
 	}
-	n, err = c.Conn.Read(buf)
+	n, err = c.Read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -497,7 +490,7 @@ func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err erro
 	if !c.checkContextAndSetReadDeadline() {
 		return 0, netip.AddrPort{}, io.EOF
 	}
-	n, err = c.Conn.Read(buf)
+	n, err = c.Read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}

@@ -42,6 +42,7 @@ func GenerateSubKey(psk []byte, salt []byte, context string) (subKey []byte) {
 	blake3.DeriveKey(subKey, context, keyMaterial)
 
 	// Return key material buffer to pool
+	// nolint:staticcheck
 	keyMaterialPool.Put(keyMaterial)
 
 	return
@@ -51,6 +52,7 @@ func GenerateSubKey(psk []byte, salt []byte, context string) (subKey []byte) {
 // Callers should use this after they're done with the subKey.
 func PutSubKey(subKey []byte) {
 	if subKey != nil && cap(subKey) >= 16 && cap(subKey) <= 32 {
+		// nolint:staticcheck
 		subKeyPool.Put(subKey[:32])
 	}
 }

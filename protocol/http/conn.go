@@ -56,7 +56,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 			if c.isH2 {
 				return
 			}
-			conn.SetDeadline(t)
+			_ = conn.SetDeadline(t)
 		})
 		return nil
 	}
@@ -79,7 +79,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 			if c.isH2 {
 				return
 			}
-			conn.SetReadDeadline(t)
+			_ = conn.SetReadDeadline(t)
 		})
 		return nil
 	}
@@ -102,7 +102,7 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 			if c.isH2 {
 				return
 			}
-			conn.SetWriteDeadline(t)
+			_ = conn.SetWriteDeadline(t)
 		})
 		return nil
 	}
@@ -213,11 +213,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				resp, err := http.ReadResponse(bufio.NewReader(rawConn), req)
 				if err != nil {
 					if resp != nil {
-						resp.Body.Close()
+						_ = resp.Body.Close()
+						return 0, err
 					}
-					return 0, err
 				}
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode != 200 {
 					err = fmt.Errorf("connect server using proxy error, StatusCode [%d]", resp.StatusCode)
 					return 0, err
@@ -332,12 +332,11 @@ func (h *http2Conn) Write(p []byte) (n int, err error) {
 }
 
 func (h *http2Conn) Close() error {
-	h.in.Close()
+	_ = h.in.Close()
 	return h.out.Close()
 }
 
 type h2Conn struct {
-	lastAccess time.Time
 	rawConn    netproxy.Conn
 	h2Conn     *http2.ClientConn
 }

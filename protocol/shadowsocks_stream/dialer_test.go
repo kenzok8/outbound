@@ -51,7 +51,7 @@ func TestNewSSStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(resp.Body)
-	defer resp.Body.Close()
+	_, _ = buf.ReadFrom(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
 	t.Log(buf.String())
 }

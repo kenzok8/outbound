@@ -64,7 +64,7 @@ func NewAuthChainA() IProtocol {
 }
 
 func (a *authChainA) initUser() {
-	params := strings.Split(a.ServerInfo.Param, ":")
+	params := strings.Split(a.Param, ":")
 	if len(params) >= 2 {
 		if userID, err := strconv.Atoi(params[0]); err == nil {
 			binary.LittleEndian.PutUint32(a.uid[:], uint32(userID))
@@ -73,7 +73,7 @@ func (a *authChainA) initUser() {
 		}
 	}
 	if a.userKey == nil {
-		rand.Read(a.uid[:])
+		_, _ = rand.Read(a.uid[:])
 
 		a.userKeyLen = len(a.Key)
 		a.userKey = make([]byte, len(a.Key))
@@ -150,11 +150,11 @@ func (a *authChainA) packData(outData []byte, data []byte, randLength int) {
 	{
 		if dataLength > 0 {
 			randPart1Length := getRandStartPos(&a.randomClient, randLength)
-			rand.Read(outData[2 : 2+randPart1Length])
+			_, _ = rand.Read(outData[2 : 2+randPart1Length])
 			a.cipher.Encrypt(outData[2+randPart1Length:], data)
-			rand.Read(outData[2+randPart1Length+dataLength : outLength])
+			_, _ = rand.Read(outData[2+randPart1Length+dataLength : outLength])
 		} else {
-			rand.Read(outData[2 : 2+randLength])
+			_, _ = rand.Read(outData[2 : 2+randLength])
 		}
 	}
 
@@ -165,7 +165,6 @@ func (a *authChainA) packData(outData []byte, data []byte, randLength int) {
 	binary.LittleEndian.PutUint32(key[a.userKeyLen:], a.chunkID)
 	a.lastClientHash = a.hmac(key, outData[:outLength])
 	copy(outData[outLength:], a.lastClientHash[:2])
-	return
 }
 
 const authheadLength = 4 + 8 + 4 + 16 + 4
@@ -174,10 +173,9 @@ func (a *authChainA) packAuthData(data []byte) (outData []byte) {
 	outData = make([]byte, authheadLength, authheadLength+1500)
 	a.data.connectionID++
 	if a.data.connectionID > 0xFF000000 || a.data.clientID == nil {
-		a.data.clientID = make([]byte, 4)
-		rand.Read(a.data.clientID)
+		_, _ = rand.Read(a.data.clientID)
 		b := make([]byte, 4)
-		rand.Read(b)
+		_, _ = rand.Read(b)
 		a.data.connectionID = binary.LittleEndian.Uint32(b) & 0xFFFFFF
 	}
 	var key = make([]byte, len(a.IV)+len(a.Key))
@@ -194,7 +192,7 @@ func (a *authChainA) packAuthData(data []byte) (outData []byte) {
 
 	// first 12 bytes
 	{
-		rand.Read(outData[:4])
+		_, _ = rand.Read(outData[:4])
 		a.lastClientHash = a.hmac(key, outData[:4])
 		copy(outData[4:], a.lastClientHash[:8])
 	}
@@ -255,7 +253,7 @@ func authChainAPktGetRandLen(ctx *crypto.Shift128plusContext, lastHash []byte) i
 func (a *authChainA) EncodePkt(buf *swBytes.Buffer) (err error) {
 	authData := pool.Get(3)
 	defer pool.Put(authData)
-	rand.Read(authData)
+	_, _ = rand.Read(authData)
 
 	md5Data := a.hmac(a.Key, authData)
 
@@ -269,10 +267,10 @@ func (a *authChainA) EncodePkt(buf *swBytes.Buffer) (err error) {
 	rc4Cipher.XORKeyStream(buf.Bytes(), buf.Bytes())
 
 	buf.Extend(randDataLength)
-	rand.Read(buf.Bytes()[buf.Len()-randDataLength:])
-	buf.Write(authData)
-	binary.Write(buf, binary.LittleEndian, binary.LittleEndian.Uint32(a.uid[:])^binary.LittleEndian.Uint32(md5Data[:4]))
-	buf.Write(a.hmac(a.userKey, buf.Bytes())[:1])
+	_, _ = rand.Read(buf.Bytes()[buf.Len()-randDataLength:])
+	_, _ = buf.Write(a.uid[:])
+	_ = binary.Write(buf, binary.LittleEndian, binary.LittleEndian.Uint32(a.uid[:])^binary.LittleEndian.Uint32(md5Data[:4]))
+	_, _ = buf.Write(a.hmac(a.userKey, buf.Bytes())[:1])
 	return nil
 }
 
@@ -306,7 +304,7 @@ func (a *authChainA) Encode(plainData []byte) (outData []byte, err error) {
 		if headSize > dataLength {
 			headSize = dataLength
 		}
-		a.buffer.Write(a.packAuthData(plainData[:headSize]))
+		_, _ = a.buffer.Write(a.packAuthData(plainData[:headSize]))
 		offset += headSize
 		dataLength -= headSize
 		a.hasSentHeader = true
@@ -316,7 +314,7 @@ func (a *authChainA) Encode(plainData []byte) (outData []byte, err error) {
 		dataLen, randLength := a.packedDataLen(plainData[offset : offset+unitSize])
 		b := make([]byte, dataLen)
 		a.packData(b, plainData[offset:offset+unitSize], randLength)
-		a.buffer.Write(b)
+		_, _ = a.buffer.Write(b)
 		dataLength -= unitSize
 		offset += unitSize
 	}
@@ -324,7 +322,7 @@ func (a *authChainA) Encode(plainData []byte) (outData []byte, err error) {
 		dataLen, randLength := a.packedDataLen(plainData[offset:])
 		b := make([]byte, dataLen)
 		a.packData(b, plainData[offset:], randLength)
-		a.buffer.Write(b)
+		_, _ = a.buffer.Write(b)
 	}
 	return a.buffer.Bytes(), nil
 }
@@ -359,7 +357,7 @@ func (a *authChainA) Decode(plainData []byte) (outData []byte, n int, err error)
 		}
 		b := make([]byte, dataLen)
 		a.cipher.Decrypt(b, plainData[dataPos:dataPos+dataLen])
-		a.buffer.Write(b)
+		_, _ = a.buffer.Write(b)
 		if a.recvID == 1 {
 			a.TcpMss = int(binary.LittleEndian.Uint16(a.buffer.Next(2)))
 		}

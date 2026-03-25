@@ -65,20 +65,24 @@ func (c *stream) Read(b []byte) (n int, err error) {
 
 func (c *stream) remoteClose() error {
 	if c.closed.CompareAndSwap(false, true) {
-		c.session.removeStream(c.id)
-		c.pw.Close()
-		return c.pr.Close()
+		c.removeStream(c.id)
+		if c.pw != nil {
+			_ = c.pw.Close()
+		}
+		_ = c.pr.Close()
+		return nil
 	}
 	return nil
 }
 
 func (c *stream) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
-		c.session.removeStream(c.id)
+		c.removeStream(c.id)
 		frame := newFrame(cmdFIN, c.id)
 		_, _ = writeFrame(c.session, frame)
-		c.pw.Close()
-		return c.pr.Close()
+		_ = c.pw.Close()
+		_ = c.pr.Close()
+		return nil
 	}
 	return nil
 }

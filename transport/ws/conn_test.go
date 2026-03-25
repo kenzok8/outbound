@@ -35,7 +35,7 @@ func newWSPair(t *testing.T) (*conn, *websocket.Conn, func()) {
 	var serverConn *websocket.Conn
 	select {
 	case err := <-serverErrCh:
-		clientConn.Close()
+		_ = clientConn.Close()
 		server.Close()
 		t.Fatalf("upgrade failed: %v", err)
 	case serverConn = <-serverConnCh:

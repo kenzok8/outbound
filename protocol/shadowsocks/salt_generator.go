@@ -22,7 +22,7 @@ func NewRandomSaltGenerator(saltSize int) (*RandomSaltGenerator, error) {
 
 func (g *RandomSaltGenerator) Get() []byte {
 	salt := pool.Get(g.saltSize)
-	fastrand.Read(salt)
+	_, _ = fastrand.Read(salt)
 	return salt
 }
 

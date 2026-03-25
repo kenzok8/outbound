@@ -39,6 +39,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	maxDatagramFrameSize := 1400
 	udpRelayMode := common.NATIVE
 	if header.Flags&protocol.Flags_Tuic_UdpRelayModeQuic > 0 {
+		_ = header // avoid empty branch warning
 		// FIXME: QUIC has severe performance problems.
 		// udpRelayMode = common.QUIC
 	}

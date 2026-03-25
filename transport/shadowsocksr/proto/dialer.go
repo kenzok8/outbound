@@ -16,7 +16,6 @@ type Dialer struct {
 	Protocol      string
 	ProtocolParam string
 	ObfsOverhead  int
-	protocolData  interface{}
 }
 
 func (d *Dialer) protocolFromInnerConn(conn netproxy.Conn, addr socks.Addr) (proto IProtocol, err error) {

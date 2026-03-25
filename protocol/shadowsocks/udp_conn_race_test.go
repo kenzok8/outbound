@@ -16,7 +16,6 @@ import (
 // mockShadowsocksPacketConn 模拟 Shadowsocks PacketConn
 type mockShadowsocksPacketConn struct {
 	writes int64
-	mu     sync.Mutex
 }
 
 func (m *mockShadowsocksPacketConn) Read(b []byte) (n int, err error) {
@@ -203,7 +202,7 @@ func TestShadowsocksUdpConnRealConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
-	defer serverConn.Close()
+	defer func() { _ = serverConn.Close() }()
 	
 	// 接收服务器
 	go func() {
@@ -222,7 +221,7 @@ func TestShadowsocksUdpConnRealConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 	
 	// 包装为 netproxy.PacketConn（需要实现）
 	t.Skip("Requires netproxy.PacketConn implementation")
@@ -256,7 +255,7 @@ func BenchmarkShadowsocksUdpConnWrite(b *testing.B) {
 	b.ResetTimer()
 	
 	for i := 0; i < b.N; i++ {
-		udpConn.Write(data)
+		_, _ = udpConn.Write(data)
 	}
 }
 
@@ -289,7 +288,7 @@ func BenchmarkShadowsocksUdpConnWriteParallel(b *testing.B) {
 	
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			udpConn.Write(data)
+			_, _ = udpConn.Write(data)
 		}
 	})
 }

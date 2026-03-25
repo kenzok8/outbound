@@ -206,7 +206,7 @@ func TestWriteTCPRequest(t *testing.T) {
 				t.Errorf("WriteTCPRequest() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if gotW := w.String(); !(strings.HasPrefix(gotW, tt.wantW) && len(gotW) > len(tt.wantW)) {
+			if gotW := w.String(); !strings.HasPrefix(gotW, tt.wantW) || len(gotW) <= len(tt.wantW) {
 				t.Errorf("WriteTCPRequest() gotW = %v, want %v", gotW, tt.wantW)
 			}
 		})
@@ -309,7 +309,7 @@ func TestWriteTCPResponse(t *testing.T) {
 				t.Errorf("WriteTCPResponse() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if gotW := w.String(); !(strings.HasPrefix(gotW, tt.wantW) && len(gotW) > len(tt.wantW)) {
+			if gotW := w.String(); !strings.HasPrefix(gotW, tt.wantW) || len(gotW) <= len(tt.wantW) {
 				t.Errorf("WriteTCPResponse() gotW = %v, want %v", gotW, tt.wantW)
 			}
 		})

@@ -86,7 +86,6 @@ func (c *UdpConn) Write(b []byte) (n int, err error) {
 
 // maxMetadataLen returns the maximum possible metadata length for pre-allocation.
 // IPv6 (1 + 16 + 2) = 19 bytes is the maximum.
-const maxMetadataLen = 19
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	metadata := Metadata{

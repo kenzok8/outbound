@@ -333,7 +333,7 @@ func (b *Buffer) WriteByte(c byte) error {
 func (b *Buffer) WriteRune(r rune) (n int, err error) {
 	// Compare as uint32 to correctly handle negative runes.
 	if uint32(r) < utf8.RuneSelf {
-		b.WriteByte(byte(r))
+		_ = b.WriteByte(byte(r))
 		return 1, nil
 	}
 	b.lastRead = opInvalid

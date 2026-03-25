@@ -84,7 +84,7 @@ var base62table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345678
 func (t *httpSimplePost) boundary() (ret string) {
 	b := pool.Get(32)
 	defer pool.Put(b)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	for i := 0; i < 32; i++ {
 		b[i] = base62table[b[i]%62]
 	}
@@ -146,7 +146,7 @@ func (t *httpSimplePost) Encode(data []byte) (encodedData []byte, err error) {
 		host,
 		t.Port)
 	if len(customHead) > 0 {
-		httpBuf = httpBuf + strings.Replace(customHead, "\\n", "\r\n", -1) + "\r\n\r\n"
+		httpBuf = httpBuf + strings.ReplaceAll(customHead, "\\n", "\r\n") + "\r\n\r\n"
 	} else {
 		var contentType string
 		if !t.methodGet {

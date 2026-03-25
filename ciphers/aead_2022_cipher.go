@@ -121,12 +121,6 @@ func (f *SlidingWindowFilter) setBit(index uint64) {
 	f.window[wordIndex] |= uint64(1) << bitIndex
 }
 
-func (f *SlidingWindowFilter) setBitInWindow(window []uint64, index uint64) {
-	wordIndex := index / 64
-	bitIndex := index % 64
-	window[wordIndex] |= uint64(1) << bitIndex
-}
-
 func (f *SlidingWindowFilter) shiftWindow(shift uint64) {
 	if shift >= f.windowSize {
 		// Clear all bits in-place
