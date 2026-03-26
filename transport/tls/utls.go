@@ -8,10 +8,38 @@ import (
 )
 
 func uTLSConfigFromTLSConfig(config *tls.Config) *utls.Config {
-	return &utls.Config{
-		ServerName:         config.ServerName,
-		InsecureSkipVerify: config.InsecureSkipVerify,
+	if config == nil {
+		return nil
 	}
+	uConfig := &utls.Config{
+		Rand:                   config.Rand,
+		Time:                   config.Time,
+		ServerName:             config.ServerName,
+		InsecureSkipVerify:     config.InsecureSkipVerify,
+		RootCAs:                config.RootCAs,
+		VerifyPeerCertificate:  config.VerifyPeerCertificate,
+		KeyLogWriter:           config.KeyLogWriter,
+		MinVersion:             config.MinVersion,
+		MaxVersion:             config.MaxVersion,
+		SessionTicketsDisabled: config.SessionTicketsDisabled,
+		Renegotiation:          utls.RenegotiationSupport(config.Renegotiation),
+	}
+	if len(config.NextProtos) > 0 {
+		uConfig.NextProtos = append([]string(nil), config.NextProtos...)
+	}
+	if len(config.CipherSuites) > 0 {
+		uConfig.CipherSuites = append([]uint16(nil), config.CipherSuites...)
+	}
+	if len(config.CurvePreferences) > 0 {
+		uConfig.CurvePreferences = make([]utls.CurveID, len(config.CurvePreferences))
+		for i, curveID := range config.CurvePreferences {
+			uConfig.CurvePreferences[i] = utls.CurveID(curveID)
+		}
+	}
+	if clientSessionCache, ok := any(config.ClientSessionCache).(utls.ClientSessionCache); ok {
+		uConfig.ClientSessionCache = clientSessionCache
+	}
+	return uConfig
 }
 
 var clientHelloIDMap = map[string]*utls.ClientHelloID{

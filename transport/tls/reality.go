@@ -56,10 +56,54 @@ type RealityUConn struct {
 	Verified   bool
 }
 
-var p, _ = reflect.TypeOf((*utls.Conn)(nil)).Elem().FieldByName("peerCertificates")
+var (
+	realityPeerCertificatesFieldOnce sync.Once
+	realityPeerCertificatesField     reflect.StructField
+	realityPeerCertificatesFieldErr  error
+)
+
+func realityPeerCertificatesFieldInfo() (reflect.StructField, error) {
+	realityPeerCertificatesFieldOnce.Do(func() {
+		field, ok := reflect.TypeOf((*utls.Conn)(nil)).Elem().FieldByName("peerCertificates")
+		if !ok {
+			realityPeerCertificatesFieldErr = errors.New("REALITY: utls.Conn peerCertificates field unavailable")
+			return
+		}
+		if field.Type != reflect.TypeOf([]*x509.Certificate{}) {
+			realityPeerCertificatesFieldErr = fmt.Errorf(
+				"REALITY: unexpected utls.Conn peerCertificates type: %v",
+				field.Type,
+			)
+			return
+		}
+		realityPeerCertificatesField = field
+	})
+	return realityPeerCertificatesField, realityPeerCertificatesFieldErr
+}
+
+func realityPeerCertificates(conn *utls.Conn) ([]*x509.Certificate, error) {
+	if conn == nil {
+		return nil, errors.New("REALITY: nil uTLS connection")
+	}
+	field, err := realityPeerCertificatesFieldInfo()
+	if err != nil {
+		return nil, err
+	}
+	certs := *(*[]*x509.Certificate)(unsafe.Add(unsafe.Pointer(conn), field.Offset))
+	if len(certs) == 0 {
+		return nil, errors.New("REALITY: missing peer certificates")
+	}
+	return certs, nil
+}
 
 func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-	certs := *(*[]*x509.Certificate)(unsafe.Add(unsafe.Pointer(c.Conn), p.Offset))
+	if c == nil || c.UConn == nil {
+		return errors.New("REALITY: nil uTLS connection")
+	}
+	certs, err := realityPeerCertificates(c.Conn)
+	if err != nil {
+		return err
+	}
 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.AuthKey)
 		h.Write(pub)

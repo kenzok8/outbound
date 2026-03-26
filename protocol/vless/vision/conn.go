@@ -106,13 +106,26 @@ func getUnderlayTCPConnUnixConn(conn any) (any, bool) {
 	// log.Printf("Type: %T", conn)
 	val := reflect.ValueOf(conn)
 	for {
-		if isTCPConnUnixConn(val.Interface()) {
+		if !val.IsValid() {
+			return conn, false
+		}
+		if val.CanInterface() && isTCPConnUnixConn(val.Interface()) {
 			// log.Printf("Type: %T", val.Interface())
 			return val.Interface(), true
 		}
-		val = reflect.Indirect(val)
-		if val = val.FieldByName("Conn"); val.IsZero() {
-			// log.Printf("Unexpected type: %T", val.Interface())
+		switch val.Kind() {
+		case reflect.Interface, reflect.Pointer:
+			if val.IsNil() {
+				return conn, false
+			}
+			val = val.Elem()
+		case reflect.Struct:
+			field := val.FieldByName("Conn")
+			if !field.IsValid() {
+				return conn, false
+			}
+			val = field
+		default:
 			return conn, false
 		}
 	}
