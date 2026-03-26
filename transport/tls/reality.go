@@ -93,6 +93,24 @@ type Reality struct {
 	spiderY     []int64
 }
 
+// realityECDHEKey returns the TLS 1.3 ECDHE private key used by REALITY.
+// Newer uTLS versions populate KeyShareKeys and may leave the deprecated
+// EcdheKey field unset, so keep compatibility with both layouts.
+func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
+	if state == nil {
+		return nil
+	}
+	if keyShareKeys := state.State13.KeyShareKeys; keyShareKeys != nil {
+		if keyShareKeys.Ecdhe != nil {
+			return keyShareKeys.Ecdhe
+		}
+		if keyShareKeys.MlkemEcdhe != nil {
+			return keyShareKeys.MlkemEcdhe
+		}
+	}
+	return state.State13.EcdheKey // nolint:staticcheck
+}
+
 func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -213,7 +231,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 			// if config.Show {
 			// logrus.Printf("REALITY hello.SessionId[:16]: %v\n", hello.SessionId[:16])
 			// }
-				ecdheKey := uConn.HandshakeState.State13.EcdheKey // nolint:staticcheck
+			ecdheKey := realityECDHEKey(&uConn.HandshakeState)
 			if ecdheKey == nil {
 				// logrus.Println("wtf", retry, addr)
 				if retry > 2 {
