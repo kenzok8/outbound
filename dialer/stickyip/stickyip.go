@@ -474,8 +474,21 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 		return d.dialer.DialContext(ctx, network, addr)
 	}
 
-	// Resolve to get all IPs
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	// Resolve to get all IPs using the base dialer to avoid circular dependency
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := d.dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			if c, ok := conn.(net.Conn); ok {
+				return c, nil
+			}
+			return &netproxy.FakeNetConn{Conn: conn}, nil
+		},
+	}
+	ips, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil || len(ips) == 0 {
 		// Resolution failed, try original address
 		logResolutionError(d.proxyAddr, host, err)
