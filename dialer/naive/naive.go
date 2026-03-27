@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -205,6 +207,7 @@ func (d *naiveDialer) dialTCP(ctx context.Context, magicNetwork string, target s
 		dialer:        d,
 		h2Conn:        h2Conn,
 		rawConn:       rawConn,
+		magicNetwork:  magicNetwork,
 		target:        target,
 		handshakeDone: make(chan struct{}),
 	}, nil
@@ -256,6 +259,15 @@ func (d *naiveDialer) newClientConn(ctx context.Context, magicNetwork string) (n
 	return rawConn, h2Conn, nil
 }
 
+func (d *naiveDialer) newPooledClientConn(ctx context.Context, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
+	rawConn, h2Conn, err := d.newClientConn(ctx, magicNetwork)
+	if err != nil {
+		return nil, nil, err
+	}
+	d.pool.registerConn(magicNetwork, rawConn, h2Conn)
+	return rawConn, h2Conn, nil
+}
+
 func (d *naiveDialer) newConnectRequest(target string) (*http.Request, *io.PipeWriter, error) {
 	reqURL := (&url.URL{
 		Scheme: "http",
@@ -283,8 +295,9 @@ type naiveConn struct {
 	dialer *naiveDialer
 	h2Conn *http2.ClientConn
 
-	rawConn netproxy.Conn
-	target  string
+	rawConn      netproxy.Conn
+	magicNetwork string
+	target       string
 
 	stateMu          sync.Mutex
 	handshakeStarted bool
@@ -296,40 +309,80 @@ type naiveConn struct {
 }
 
 func (c *naiveConn) handshake(firstWrite []byte) (conn *naiveH2Stream, n int, err error) {
-	req, pw, err := c.dialer.newConnectRequest(c.target)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	resp, err := c.h2Conn.RoundTrip(req)
-	if err != nil {
-		_ = pw.CloseWithError(err)
-		return nil, 0, fmt.Errorf("naive CONNECT: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_ = pw.Close()
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("naive CONNECT failed: %v", resp.Status)
-	}
-
-	paddingSupported := resp.Header.Get(paddingHeaderKey) != ""
-	stream := &naiveH2Stream{
-		writer:       newPaddedWriter(pw, paddingSupported),
-		requestBody:  pw,
-		reader:       newPaddedReader(resp.Body, paddingSupported),
-		responseBody: resp.Body,
-	}
-
-	if len(firstWrite) > 0 {
-		n, err = stream.Write(firstWrite)
-		if err != nil {
-			_ = stream.Close()
-			return nil, n, err
+	for attempt := 0; attempt < 2; attempt++ {
+		req, pw, reqErr := c.dialer.newConnectRequest(c.target)
+		if reqErr != nil {
+			return nil, 0, reqErr
 		}
+
+		resp, roundTripErr := c.h2Conn.RoundTrip(req)
+		if roundTripErr != nil {
+			_ = pw.CloseWithError(roundTripErr)
+			if attempt == 0 && shouldRetryNaiveRoundTrip(roundTripErr) {
+				if refreshErr := c.refreshClientConn(); refreshErr == nil {
+					continue
+				} else {
+					return nil, 0, fmt.Errorf("naive CONNECT retry failed after %v: %w", roundTripErr, refreshErr)
+				}
+			}
+			return nil, 0, fmt.Errorf("naive CONNECT: %w", roundTripErr)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			_ = pw.Close()
+			_ = resp.Body.Close()
+			return nil, 0, fmt.Errorf("naive CONNECT failed: %v", resp.Status)
+		}
+
+		paddingSupported := resp.Header.Get(paddingHeaderKey) != ""
+		stream := &naiveH2Stream{
+			writer:       newPaddedWriter(pw, paddingSupported),
+			requestBody:  pw,
+			reader:       newPaddedReader(resp.Body, paddingSupported),
+			responseBody: resp.Body,
+		}
+
+		if len(firstWrite) > 0 {
+			n, err = stream.Write(firstWrite)
+			if err != nil {
+				_ = stream.Close()
+				return nil, n, err
+			}
+		}
+
+		return stream, n, nil
 	}
 
-	return stream, n, nil
+	return nil, 0, fmt.Errorf("naive CONNECT: exhausted retries")
+}
+
+func (c *naiveConn) refreshClientConn() error {
+	rawConn, h2Conn, err := c.dialer.newPooledClientConn(context.Background(), c.magicNetwork)
+	if err != nil {
+		return err
+	}
+	c.rawConn = rawConn
+	c.h2Conn = h2Conn
+	return nil
+}
+
+func shouldRetryNaiveRoundTrip(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var goAwayErr http2.GoAwayError
+	if stderrors.As(err, &goAwayErr) {
+		return true
+	}
+
+	var streamErr http2.StreamError
+	if stderrors.As(err, &streamErr) && streamErr.Code == http2.ErrCodeRefusedStream {
+		return true
+	}
+
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "client conn not usable")
 }
 
 func (c *naiveConn) ensureHandshake(firstWrite []byte) (stream *naiveH2Stream, firstWriteN int, owner bool, err error) {
@@ -496,17 +549,7 @@ func (p *naiveH2ConnPool) GetConn(ctx context.Context, d *naiveDialer, magicNetw
 	if err != nil {
 		return nil, nil, err
 	}
-
-	list.mu.Lock()
-	list.conns = append(list.conns, &pooledNaiveH2Conn{
-		rawConn: rawConn,
-		h2Conn:  h2Conn,
-	})
-	list.mu.Unlock()
-
-	p.mu.Lock()
-	p.connToNet[h2Conn] = magicNetwork
-	p.mu.Unlock()
+	p.registerConn(magicNetwork, rawConn, h2Conn)
 
 	return rawConn, h2Conn, nil
 }
@@ -519,6 +562,21 @@ func (p *naiveH2ConnPool) getConnList(magicNetwork string) *naiveH2ConnList {
 		p.connsByNet[magicNetwork] = &naiveH2ConnList{}
 	}
 	return p.connsByNet[magicNetwork]
+}
+
+func (p *naiveH2ConnPool) registerConn(magicNetwork string, rawConn netproxy.Conn, h2Conn *http2.ClientConn) {
+	list := p.getConnList(magicNetwork)
+
+	list.mu.Lock()
+	list.conns = append(list.conns, &pooledNaiveH2Conn{
+		rawConn: rawConn,
+		h2Conn:  h2Conn,
+	})
+	list.mu.Unlock()
+
+	p.mu.Lock()
+	p.connToNet[h2Conn] = magicNetwork
+	p.mu.Unlock()
 }
 
 func (p *naiveH2ConnPool) GetClientConn(_ *http.Request, _ string) (*http2.ClientConn, error) {

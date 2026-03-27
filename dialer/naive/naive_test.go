@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	stderrors "errors"
 	"io"
 	"testing"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/net/http2"
 )
 
 func TestPaddedWriteReadRoundTrip(t *testing.T) {
@@ -310,4 +312,17 @@ func TestNewConnectRequestUsesProxyAuthorization(t *testing.T) {
 	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")), req.Header.Get("Proxy-Authorization"))
 	assert.Empty(t, req.Header.Get("Authorization"))
 	assert.NotEmpty(t, req.Header.Get(paddingHeaderKey))
+}
+
+func TestShouldRetryNaiveRoundTrip(t *testing.T) {
+	assert.True(t, shouldRetryNaiveRoundTrip(http2.GoAwayError{
+		LastStreamID: 27,
+		ErrCode:      http2.ErrCodeNo,
+	}))
+	assert.True(t, shouldRetryNaiveRoundTrip(http2.StreamError{
+		StreamID: 3,
+		Code:     http2.ErrCodeRefusedStream,
+	}))
+	assert.True(t, shouldRetryNaiveRoundTrip(stderrors.New("http2: client conn not usable")))
+	assert.False(t, shouldRetryNaiveRoundTrip(io.EOF))
 }
