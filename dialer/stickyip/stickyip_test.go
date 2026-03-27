@@ -3,7 +3,7 @@ package stickyip
 import "testing"
 
 func TestSplitHostPortSupportsPortUnion(t *testing.T) {
-	host, port, err := splitHostPort("example.com:443,8443-8450")
+	host, port, err := SplitHostPort("example.com:443,8443-8450")
 	if err != nil {
 		t.Fatalf("SplitHostPort() error = %v", err)
 	}
@@ -16,7 +16,7 @@ func TestSplitHostPortSupportsPortUnion(t *testing.T) {
 }
 
 func TestSplitHostPortSupportsBracketedIPv6(t *testing.T) {
-	host, port, err := splitHostPort("[2001:db8::1]:443,8443")
+	host, port, err := SplitHostPort("[2001:db8::1]:443,8443")
 	if err != nil {
 		t.Fatalf("SplitHostPort() error = %v", err)
 	}
