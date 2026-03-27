@@ -94,10 +94,14 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 				if err != nil {
 					return nil, err
 				}
+				remoteAddr := config.ServerAddr
+				if addr := remoteAddrOf(conn); addr != nil {
+					remoteAddr = addr
+				}
 				return netproxy.NewFakeNetPacketConn(
 					conn.(netproxy.PacketConn),
 					net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-					config.ServerAddr,
+					remoteAddr,
 				), nil
 			},
 		}
@@ -138,6 +142,16 @@ func (a hostnameUDPAddr) Network() string {
 
 func (a hostnameUDPAddr) String() string {
 	return string(a)
+}
+
+func remoteAddrOf(conn netproxy.Conn) net.Addr {
+	type remoteAddrConn interface {
+		RemoteAddr() net.Addr
+	}
+	if c, ok := conn.(remoteAddrConn); ok {
+		return c.RemoteAddr()
+	}
+	return nil
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (netproxy.Conn, error) {

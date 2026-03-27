@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/netproxy"
 	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"
-	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
@@ -64,6 +64,7 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	serverAddr := quicRemoteAddr(pktConn, c.config.ServerAddr)
 	// Convert config to TLS config & QUIC config
 	tlsConfig := &tls.Config{
 		ServerName:            c.config.TLSConfig.ServerName,
@@ -87,7 +88,7 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-			qc, err := quic.DialEarly(ctx, pktConn, c.config.ServerAddr, tlsCfg, cfg)
+			qc, err := quic.DialEarly(ctx, pktConn, serverAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, err
 			}
@@ -155,6 +156,18 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		UDPEnabled: authResp.UDPEnabled,
 		Tx:         actualTx,
 	}, nil
+}
+
+func quicRemoteAddr(pktConn net.PacketConn, fallback net.Addr) net.Addr {
+	type remoteAddrConn interface {
+		RemoteAddr() net.Addr
+	}
+	if c, ok := pktConn.(remoteAddrConn); ok {
+		if addr := c.RemoteAddr(); addr != nil {
+			return addr
+		}
+	}
+	return fallback
 }
 
 func (c *clientImpl) active() bool {
@@ -368,7 +381,6 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 		return udpMsg, nil
 	}
 }
-
 
 func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
 	msgN := msg.Serialize(buf)
