@@ -58,7 +58,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 
 	var err error
 	if !isPortHoppingPort(port) {
-		config.ServerAddr, err = net.ResolveUDPAddr("udp", hostPort)
+		if ip := net.ParseIP(host); ip != nil {
+			config.ServerAddr, err = net.ResolveUDPAddr("udp", hostPort)
+		} else {
+			config.ServerAddr = hostnameUDPAddr(hostPort)
+		}
 	} else {
 		config.ServerAddr, err = udphop.ParseUDPHopAddr(hostPort)
 	}
@@ -124,6 +128,16 @@ func parseServerAddrString(addrStr string) (host, port, hostPort string) {
 // We consider a port string to be a port hopping port if it contains "-" or ",".
 func isPortHoppingPort(port string) bool {
 	return strings.Contains(port, "-") || strings.Contains(port, ",")
+}
+
+type hostnameUDPAddr string
+
+func (a hostnameUDPAddr) Network() string {
+	return "udp"
+}
+
+func (a hostnameUDPAddr) String() string {
+	return string(a)
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (netproxy.Conn, error) {

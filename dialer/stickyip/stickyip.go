@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -252,7 +253,7 @@ type StickyIpDialer struct {
 	dialer     netproxy.Dialer
 	cache      *ProxyIpCache
 	checkCycle uint64
-	proxyAddr  string // Original proxy address (domain:port or IP:port)
+	proxyAddr  string // Original proxy address (domain:port, IP:port, or port-union variant)
 	proxyHost  string
 }
 
@@ -261,7 +262,7 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 	if cache == nil {
 		cache = NewProxyIpCache()
 	}
-	proxyHost, _, _ := net.SplitHostPort(proxyAddr)
+	proxyHost, _, _ := splitHostPort(proxyAddr)
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] NewStickyIpDialer created")
 	}
@@ -353,29 +354,30 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 		// Only use cached IP if it's different from proxy address (i.e., it's a resolved IP)
 		// GetCachedProxyAddr returns proxyAddr when cache is empty/expired, so we need to check
 		if cachedAddr != "" && cachedAddr != d.proxyAddr {
+			targetAddr := rewriteAddrPort(cachedAddr, addr)
 			// Try with cached IP first
-			conn, err := d.dialer.DialContext(ctx, network, cachedAddr)
+			conn, err := d.dialer.DialContext(ctx, network, targetAddr)
 			if err == nil {
 				// For UDP, verify the connection actually works by trying to read
 				if baseNetwork == "udp" {
 					if !d.verifyUDPConnectivity(ctx, conn.(netproxy.PacketConn)) {
 						_ = conn.Close()
-						logCacheFailure(d.proxyAddr, cachedAddr, network, fmt.Errorf("UDP verification failed"))
+						logCacheFailure(d.proxyAddr, targetAddr, network, fmt.Errorf("UDP verification failed"))
 						d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
 						// Fall through to resolve and try other IPs
 					} else {
 						// UDP verification succeeded
-						logCacheHit(d.proxyAddr, cachedAddr, network)
+						logCacheHit(d.proxyAddr, targetAddr, network)
 						return conn, nil
 					}
 				} else {
 					// TCP - connection success is enough
-					logCacheHit(d.proxyAddr, cachedAddr, network)
+					logCacheHit(d.proxyAddr, targetAddr, network)
 					return conn, nil
 				}
 			} else {
 				// Log cache miss/failure
-				logCacheFailure(d.proxyAddr, cachedAddr, network, err)
+				logCacheFailure(d.proxyAddr, targetAddr, network, err)
 				// Cached IP failed, invalidate this protocol's cache
 				d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
 			}
@@ -451,7 +453,7 @@ func (d *StickyIpDialer) isProxyAddress(addr string) bool {
 		return true
 	}
 	// Check if host part matches
-	addrHost, _, err := net.SplitHostPort(addr)
+	addrHost, _, err := splitHostPort(addr)
 	if err == nil && d.proxyHost != "" {
 		return d.proxyHost == addrHost
 	}
@@ -461,7 +463,7 @@ func (d *StickyIpDialer) isProxyAddress(addr string) bool {
 // dialWithIpResolution resolves the address to IPs and tries each one.
 // The first successful IP is cached for subsequent connections.
 func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr, baseNetwork string) (netproxy.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
+	host, port, err := splitHostPort(addr)
 	if err != nil {
 		// Not in host:port format, try directly
 		logResolutionError(d.proxyAddr, "invalid address format", err)
@@ -534,6 +536,41 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	// All IPs failed, return an error
 	logAllIPsFailed(d.proxyAddr, lastErr)
 	return nil, &net.OpError{Op: "dial", Err: lastErr}
+}
+
+// splitHostPort splits host:port strings and also accepts proxy port-union strings like
+// example.com:443,8443-8450. IPv6 literals must use brackets, e.g. [2001:db8::1]:443.
+func splitHostPort(addr string) (host, port string, err error) {
+	if strings.HasPrefix(addr, "[") {
+		end := strings.LastIndexByte(addr, ']')
+		if end == -1 || end+1 >= len(addr) || addr[end+1] != ':' {
+			return "", "", &net.AddrError{Err: "missing port in address", Addr: addr}
+		}
+		host = addr[1:end]
+		port = addr[end+2:]
+		if port == "" {
+			return "", "", &net.AddrError{Err: "missing port in address", Addr: addr}
+		}
+		return host, port, nil
+	}
+
+	colon := strings.LastIndexByte(addr, ':')
+	if colon == -1 || colon == len(addr)-1 {
+		return "", "", &net.AddrError{Err: "missing port in address", Addr: addr}
+	}
+	return addr[:colon], addr[colon+1:], nil
+}
+
+func rewriteAddrPort(cachedAddr, targetAddr string) string {
+	cachedHost, _, err := splitHostPort(cachedAddr)
+	if err != nil {
+		return cachedAddr
+	}
+	_, targetPort, err := splitHostPort(targetAddr)
+	if err != nil {
+		return cachedAddr
+	}
+	return net.JoinHostPort(cachedHost, targetPort)
 }
 
 // Logging functions for debugging sticky IP caching
