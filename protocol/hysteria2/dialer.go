@@ -60,7 +60,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if !isPortHoppingPort(port) {
 		config.ServerAddr, err = net.ResolveUDPAddr("udp", hostPort)
 	} else {
-		config.ServerAddr, err = udphop.ResolveUDPHopAddr(hostPort)
+		config.ServerAddr, err = udphop.ParseUDPHopAddr(hostPort)
 	}
 	if err != nil {
 		return nil, err

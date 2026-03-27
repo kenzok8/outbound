@@ -24,6 +24,7 @@ type udpHopPacketConn struct {
 
 	connMutex   sync.RWMutex
 	prevConn    net.PacketConn
+	currentAddr net.Addr
 	currentConn net.PacketConn
 
 	readBufferSize  int
@@ -57,7 +58,8 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 	}
 
 	newAddrIndex := rand.Intn(len(addrs))
-	curConn, err := dialFunc(addrs[newAddrIndex])
+	curAddr := addrs[newAddrIndex]
+	curConn, err := dialFunc(curAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +69,7 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 		HopInterval: hopInterval,
 		dialFunc:    dialFunc,
 		prevConn:    nil,
+		currentAddr: curAddr,
 		currentConn: curConn,
 		recvQueue:   make(chan *udpPacket, packetQueueSize),
 		closeChan:   make(chan struct{}),
@@ -126,7 +129,8 @@ func (u *udpHopPacketConn) hop() {
 		return
 	}
 	newAddrIndex := rand.Intn(len(u.Addrs))
-	newConn, err := u.dialFunc(u.Addrs[newAddrIndex])
+	newAddr := u.Addrs[newAddrIndex]
+	newConn, err := u.dialFunc(newAddr)
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return
@@ -143,6 +147,7 @@ func (u *udpHopPacketConn) hop() {
 		_ = u.prevConn.Close() // recvLoop for this conn will exit
 	}
 	u.prevConn = u.currentConn
+	u.currentAddr = newAddr
 	u.currentConn = newConn
 	// Set buffer sizes if previously set
 	if u.readBufferSize > 0 {
@@ -178,9 +183,7 @@ func (u *udpHopPacketConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
 	if u.closed {
 		return 0, net.ErrClosed
 	}
-	// Skip the check for now, always write to the server,
-	// for the same reason as in ReadFrom.
-	return u.currentConn.WriteTo(b, u.Addr)
+	return u.currentConn.WriteTo(b, u.currentAddr)
 }
 
 func (u *udpHopPacketConn) Close() error {
@@ -199,6 +202,7 @@ func (u *udpHopPacketConn) Close() error {
 	close(u.closeChan)
 	u.closed = true
 	u.Addrs = nil // For GC
+	u.currentAddr = nil
 	return err
 }
 
