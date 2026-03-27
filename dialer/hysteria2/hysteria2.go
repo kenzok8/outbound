@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,7 @@ type Hysteria2 struct {
 	Insecure  bool
 	Sni       string
 	PinSHA256 string
+	CA        string
 	MaxTx     uint64
 	MaxRx     uint64
 }
@@ -45,16 +47,24 @@ func NewHysteria2(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 
 func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
 	d := nextDialer
+	tlsConfig := &tls.Config{
+		ServerName:         s.Sni,
+		InsecureSkipVerify: s.Insecure || option.AllowInsecure,
+	}
+	if s.CA != "" {
+		rootCAs, err := loadCustomRootCAs(s.CA)
+		if err != nil {
+			return nil, nil, err
+		}
+		tlsConfig.RootCAs = rootCAs
+	}
 	header := protocol.Header{
 		ProxyAddress: s.Server,
-		TlsConfig: &tls.Config{
-			ServerName:         s.Sni,
-			InsecureSkipVerify: s.Insecure || option.AllowInsecure,
-		},
-		SNI:      s.Sni,
-		User:     s.User,
-		Password: s.Password,
-		IsClient: true,
+		TlsConfig:    tlsConfig,
+		SNI:          s.Sni,
+		User:         s.User,
+		Password:     s.Password,
+		IsClient:     true,
 	}
 
 	feature1 := &hysteria2.Feature1{
@@ -84,20 +94,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 	header.Feature1 = feature1
 
 	if s.PinSHA256 != "" {
-		nHash := normalizeCertHash(s.PinSHA256)
-		header.TlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			certHashes := make([]string, 0, len(rawCerts))
-			for _, cert := range rawCerts {
-				hash := sha256.Sum256(cert)
-				hashHex := hex.EncodeToString(hash[:])
-				certHashes = append(certHashes, hashHex)
-				if hashHex == nHash {
-					return nil
-				}
-			}
-			// No match
-			return fmt.Errorf("no matching certificate found, %s not in %v", nHash, certHashes)
-		}
+		header.TlsConfig.VerifyPeerCertificate = newPinnedCertVerifier(s.PinSHA256)
 	}
 	var err error
 	if d, err = protocol.NewDialer("hysteria2", d, header); err != nil {
@@ -116,6 +113,33 @@ func normalizeCertHash(hash string) string {
 	r = strings.ReplaceAll(r, ":", "")
 	r = strings.ReplaceAll(r, "-", "")
 	return r
+}
+
+func newPinnedCertVerifier(pinSHA256 string) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	nHash := normalizeCertHash(pinSHA256)
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("no peer certificate provided")
+		}
+		hash := sha256.Sum256(rawCerts[0])
+		hashHex := hex.EncodeToString(hash[:])
+		if hashHex != nHash {
+			return fmt.Errorf("leaf certificate pin mismatch: %s != %s", hashHex, nHash)
+		}
+		return nil
+	}
+}
+
+func loadCustomRootCAs(caPath string) (*x509.CertPool, error) {
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("load custom CA %q: %w", caPath, err)
+	}
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("load custom CA %q: failed to parse PEM certificate", caPath)
+	}
+	return rootCAs, nil
 }
 
 // ref: https://v2.hysteria.network/zh/docs/developers/URI-Scheme/
@@ -151,6 +175,7 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 		Insecure:  insecure,
 		Sni:       q.Get("sni"),
 		PinSHA256: q.Get("pinSHA256"),
+		CA:        q.Get("ca"),
 		MaxTx:     maxTx,
 		MaxRx:     maxRx,
 	}
@@ -177,6 +202,9 @@ func (s *Hysteria2) ExportToURL() string {
 	}
 	if s.PinSHA256 != "" {
 		q.Set("pinSHA256", s.PinSHA256)
+	}
+	if s.CA != "" {
+		q.Set("ca", s.CA)
 	}
 	if s.MaxTx > 0 && s.MaxRx > 0 {
 		q.Set("maxTx", strconv.FormatUint(s.MaxTx, 10))
