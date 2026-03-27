@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daeuniverse/outbound/dialer/stickyip"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/client"
@@ -121,7 +122,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 // parseServerAddrString parses server address string.
 // Server address can be in either "host:port" or "host" format (in which case we assume port 443).
 func parseServerAddrString(addrStr string) (host, port, hostPort string) {
-	h, p, err := net.SplitHostPort(addrStr)
+	h, p, err := stickyip.SplitHostPort(addrStr)
 	if err != nil {
 		return addrStr, "443", net.JoinHostPort(addrStr, "443")
 	}

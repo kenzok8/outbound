@@ -262,7 +262,7 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 	if cache == nil {
 		cache = NewProxyIpCache()
 	}
-	proxyHost, _, _ := splitHostPort(proxyAddr)
+	proxyHost, _, _ := SplitHostPort(proxyAddr)
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] NewStickyIpDialer created")
 	}
@@ -453,7 +453,7 @@ func (d *StickyIpDialer) isProxyAddress(addr string) bool {
 		return true
 	}
 	// Check if host part matches
-	addrHost, _, err := splitHostPort(addr)
+	addrHost, _, err := SplitHostPort(addr)
 	if err == nil && d.proxyHost != "" {
 		return d.proxyHost == addrHost
 	}
@@ -463,7 +463,7 @@ func (d *StickyIpDialer) isProxyAddress(addr string) bool {
 // dialWithIpResolution resolves the address to IPs and tries each one.
 // The first successful IP is cached for subsequent connections.
 func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr, baseNetwork string) (netproxy.Conn, error) {
-	host, port, err := splitHostPort(addr)
+	host, port, err := SplitHostPort(addr)
 	if err != nil {
 		// Not in host:port format, try directly
 		logResolutionError(d.proxyAddr, "invalid address format", err)
@@ -538,9 +538,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	return nil, &net.OpError{Op: "dial", Err: lastErr}
 }
 
-// splitHostPort splits host:port strings and also accepts proxy port-union strings like
+// SplitHostPort splits host:port strings and also accepts proxy port-union strings like
 // example.com:443,8443-8450. IPv6 literals must use brackets, e.g. [2001:db8::1]:443.
-func splitHostPort(addr string) (host, port string, err error) {
+func SplitHostPort(addr string) (host, port string, err error) {
 	if strings.HasPrefix(addr, "[") {
 		end := strings.LastIndexByte(addr, ']')
 		if end == -1 || end+1 >= len(addr) || addr[end+1] != ':' {
@@ -562,11 +562,11 @@ func splitHostPort(addr string) (host, port string, err error) {
 }
 
 func rewriteAddrPort(cachedAddr, targetAddr string) string {
-	cachedHost, _, err := splitHostPort(cachedAddr)
+	cachedHost, _, err := SplitHostPort(cachedAddr)
 	if err != nil {
 		return cachedAddr
 	}
-	_, targetPort, err := splitHostPort(targetAddr)
+	_, targetPort, err := SplitHostPort(targetAddr)
 	if err != nil {
 		return cachedAddr
 	}
