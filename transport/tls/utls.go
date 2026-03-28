@@ -97,3 +97,13 @@ func nameToUtlsClientHelloID(name string) (*utls.ClientHelloID, error) {
 	}
 	return clientHelloID, nil
 }
+
+// UTLSConfigFromTLSConfig converts a stdlib TLS config into a uTLS config.
+func UTLSConfigFromTLSConfig(config *tls.Config) *utls.Config {
+	return uTLSConfigFromTLSConfig(config)
+}
+
+// NameToUTLSClientHelloID resolves a configured uTLS fingerprint name.
+func NameToUTLSClientHelloID(name string) (*utls.ClientHelloID, error) {
+	return nameToUtlsClientHelloID(name)
+}

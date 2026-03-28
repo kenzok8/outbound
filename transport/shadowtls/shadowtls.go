@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	utls "github.com/refraction-networking/utls"
 	shadowtls "github.com/sagernet/sing-shadowtls"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -16,6 +17,7 @@ import (
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	outboundtls "github.com/daeuniverse/outbound/transport/tls"
 )
 
 func init() {
@@ -24,12 +26,14 @@ func init() {
 }
 
 type ShadowTLS struct {
-	nextDialer netproxy.Dialer
-	addr       string
-	version    int
-	password   string
-	sni        string
-	skipVerify bool
+	nextDialer  netproxy.Dialer
+	addr        string
+	version     int
+	password    string
+	sni         string
+	skipVerify  bool
+	tlsImpl     string
+	utlsImitate string
 }
 
 func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -56,11 +60,8 @@ func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 		return nil, nil, fmt.Errorf("missing shadow-tls password")
 	}
 
-	sni := query.Get("sni")
-	if sni == "" {
-		sni = query.Get("host")
-	}
-	if sni == "" {
+	sni, ok := queryValueWithPresence(query, "sni", "host")
+	if !ok {
 		sni = u.Hostname()
 	}
 
@@ -69,13 +70,31 @@ func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 		skipVerify = true
 	}
 
+	tlsImpl := "tls"
+	if option != nil && option.TlsImplementation != "" {
+		tlsImpl = option.TlsImplementation
+	}
+	if value, ok := queryValueWithPresence(query, "tlsImplementation", "tls_implementation"); ok && value != "" {
+		tlsImpl = value
+	}
+
+	utlsImitate := defaultShadowTLSUTLSImitate
+	if option != nil && option.UtlsImitate != "" {
+		utlsImitate = option.UtlsImitate
+	}
+	if value, ok := queryValueWithPresence(query, "utlsImitate", "utls_imitate", "fingerprint", "fp"); ok && value != "" {
+		utlsImitate = value
+	}
+
 	s := &ShadowTLS{
-		nextDialer: nextDialer,
-		addr:       u.Host,
-		version:    version,
-		password:   password,
-		sni:        sni,
-		skipVerify: skipVerify,
+		nextDialer:  nextDialer,
+		addr:        u.Host,
+		version:     version,
+		password:    password,
+		sni:         sni,
+		skipVerify:  skipVerify,
+		tlsImpl:     strings.ToLower(tlsImpl),
+		utlsImitate: strings.ToLower(utlsImitate),
 	}
 
 	var d netproxy.Dialer = s
@@ -150,35 +169,20 @@ func (s *ShadowTLS) DialContext(ctx context.Context, network string, addr string
 	// Wrap netproxy.Conn to net.Conn for sing-shadowtls
 	netConn := &connToNetConn{Conn: conn}
 
-	// Build TLS handshake function
-	var tlsHandshakeFunc shadowtls.TLSHandshakeFunc
-	switch s.version {
-	case 1:
-		// V1: standard TLS 1.2 handshake (no session ID generator needed)
-		tlsConfig := &tls.Config{
-			NextProtos:         []string{"h2", "http/1.1"},
-			MinVersion:         tls.VersionTLS12,
-			MaxVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: s.skipVerify,
-			ServerName:         s.sni,
-		}
-		tlsHandshakeFunc = func(ctx context.Context, conn net.Conn, _ shadowtls.TLSSessionIDGeneratorFunc) error {
-			tlsConn := tls.Client(conn, tlsConfig)
-			return tlsConn.HandshakeContext(ctx)
-		}
-	case 2, 3:
-		// V2/V3: use DefaultTLSHandshakeFunc from sing-shadowtls
-		// This uses the internal TLS library with SessionIDGenerator support
-		tlsConfig := &tls.Config{
-			NextProtos:         []string{"h2", "http/1.1"},
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: s.skipVerify,
-			ServerName:         s.sni,
-		}
-		tlsHandshakeFunc = shadowtls.DefaultTLSHandshakeFunc(s.password, tlsConfig)
-	default:
+	tlsConfig := &tls.Config{
+		NextProtos:         []string{"h2", "http/1.1"},
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: s.skipVerify,
+		ServerName:         s.sni,
+	}
+	if s.version == 1 {
+		tlsConfig.MaxVersion = tls.VersionTLS12
+	}
+
+	tlsHandshakeFunc, err := newShadowTLSHandshakeFunc(s.version, s.password, tlsConfig, s.tlsImpl, s.utlsImitate)
+	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("unsupported shadow-tls version: %d", s.version)
+		return nil, err
 	}
 
 	// Create shadow-tls client
@@ -243,6 +247,76 @@ func parseAllowInsecure(query url.Values) bool {
 		}
 	}
 	return false
+}
+
+const defaultShadowTLSUTLSImitate = "chrome_auto"
+
+func queryValueWithPresence(query url.Values, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if values, ok := query[key]; ok {
+			if len(values) == 0 {
+				return "", true
+			}
+			return values[0], true
+		}
+	}
+	return "", false
+}
+
+func newShadowTLSHandshakeFunc(version int, password string, tlsConfig *tls.Config, tlsImpl string, utlsImitate string) (shadowtls.TLSHandshakeFunc, error) {
+	switch tlsImpl {
+	case "", "tls":
+		switch version {
+		case 1:
+			return func(ctx context.Context, conn net.Conn, _ shadowtls.TLSSessionIDGeneratorFunc) error {
+				tlsConn := tls.Client(conn, tlsConfig.Clone())
+				return tlsConn.HandshakeContext(ctx)
+			}, nil
+		case 2, 3:
+			return shadowtls.DefaultTLSHandshakeFunc(password, tlsConfig.Clone()), nil
+		default:
+			return nil, fmt.Errorf("unsupported shadow-tls version: %d", version)
+		}
+	case "utls":
+		clientHelloID, err := outboundtls.NameToUTLSClientHelloID(utlsImitate)
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context, conn net.Conn, sessionIDGenerator shadowtls.TLSSessionIDGeneratorFunc) error {
+			uConn := utls.UClient(conn, outboundtls.UTLSConfigFromTLSConfig(tlsConfig.Clone()), *clientHelloID)
+			if sessionIDGenerator != nil {
+				if err := prepareShadowTLSUTLSClientHello(uConn, sessionIDGenerator); err != nil {
+					return err
+				}
+			}
+			return uConn.HandshakeContext(ctx)
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown tls implementation: %s", tlsImpl)
+	}
+}
+
+func prepareShadowTLSUTLSClientHello(uConn *utls.UConn, sessionIDGenerator shadowtls.TLSSessionIDGeneratorFunc) error {
+	if err := uConn.BuildHandshakeState(); err != nil {
+		return err
+	}
+	hello := uConn.HandshakeState.Hello
+	if hello == nil {
+		return fmt.Errorf("uTLS client hello unavailable")
+	}
+	if len(hello.SessionId) == 0 {
+		return fmt.Errorf("uTLS client hello missing session id")
+	}
+	if len(hello.Raw) == 0 {
+		if err := uConn.MarshalClientHello(); err != nil {
+			return err
+		}
+	}
+	clientHello := append([]byte(nil), hello.Raw...)
+	if err := sessionIDGenerator(clientHello, hello.SessionId); err != nil {
+		return err
+	}
+	return uConn.MarshalClientHello()
 }
 
 func parseVersion(u *url.URL, query url.Values) (int, error) {
