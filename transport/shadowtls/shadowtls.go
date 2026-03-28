@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 
 	shadowtls "github.com/sagernet/sing-shadowtls"
 	"github.com/sagernet/sing/common/logger"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 func init() {
@@ -44,15 +46,20 @@ func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 
 	query := u.Query()
 
-	version := 3
-	if v := query.Get("version"); v != "" {
-		version, err = strconv.Atoi(v)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid version: %w", err)
-		}
+	version, err := parseVersion(u, query)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	password := parsePassword(u, query)
+	if version >= 2 && password == "" {
+		return nil, nil, fmt.Errorf("missing shadow-tls password")
 	}
 
 	sni := query.Get("sni")
+	if sni == "" {
+		sni = query.Get("host")
+	}
 	if sni == "" {
 		sni = u.Hostname()
 	}
@@ -60,11 +67,6 @@ func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 	skipVerify := parseAllowInsecure(query)
 	if option != nil && option.AllowInsecure {
 		skipVerify = true
-	}
-
-	password := ""
-	if u.User != nil {
-		password = u.User.Username()
 	}
 
 	s := &ShadowTLS{
@@ -76,7 +78,53 @@ func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 		skipVerify: skipVerify,
 	}
 
-	return s, &dialer.Property{
+	var d netproxy.Dialer = s
+	innerCipher := strings.ToLower(query.Get("inner-cipher"))
+	if innerCipher != "" {
+		innerPassword := query.Get("inner-ss-pass")
+		if innerPassword == "" {
+			innerPassword = query.Get("inner-password")
+		}
+		if innerPassword == "" {
+			return nil, nil, fmt.Errorf("missing inner shadowsocks password")
+		}
+
+		nextDialerName, err := shadowsocksProtocolName(innerCipher)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		innerHost := query.Get("inner-ss-host")
+		if innerHost == "" {
+			innerHost = query.Get("inner-host")
+		}
+		if innerHost == "" {
+			innerHost = u.Hostname()
+		}
+
+		innerPort := query.Get("inner-ss-port")
+		if innerPort == "" {
+			innerPort = query.Get("inner-port")
+		}
+		if innerPort == "" {
+			innerPort = u.Port()
+		}
+		if innerPort == "" {
+			return nil, nil, fmt.Errorf("missing inner shadowsocks port")
+		}
+
+		d, err = protocol.NewDialer(nextDialerName, s, protocol.Header{
+			ProxyAddress: net.JoinHostPort(innerHost, innerPort),
+			Cipher:       innerCipher,
+			Password:     innerPassword,
+			IsClient:     true,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("create inner shadowsocks dialer: %w", err)
+		}
+	}
+
+	return d, &dialer.Property{
 		Name:     u.Fragment,
 		Address:  u.Host,
 		Protocol: "shadow-tls",
@@ -195,4 +243,62 @@ func parseAllowInsecure(query url.Values) bool {
 		}
 	}
 	return false
+}
+
+func parseVersion(u *url.URL, query url.Values) (int, error) {
+	if value := query.Get("version"); value != "" {
+		version, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, fmt.Errorf("invalid version: %w", err)
+		}
+		return version, nil
+	}
+	if u.User != nil {
+		username := u.User.Username()
+		if isVersionMarker(username) {
+			version, err := strconv.Atoi(username[1:])
+			if err != nil {
+				return 0, fmt.Errorf("invalid version marker: %w", err)
+			}
+			return version, nil
+		}
+	}
+	return 3, nil
+}
+
+func parsePassword(u *url.URL, query url.Values) string {
+	keys := []string{"password", "passwd", "pwd"}
+	for _, key := range keys {
+		if value := query.Get(key); value != "" {
+			return value
+		}
+	}
+	if u.User != nil {
+		username := u.User.Username()
+		if !isVersionMarker(username) {
+			return username
+		}
+	}
+	return ""
+}
+
+func isVersionMarker(value string) bool {
+	if len(value) < 2 || value[0] != 'v' {
+		return false
+	}
+	_, err := strconv.Atoi(value[1:])
+	return err == nil
+}
+
+func shadowsocksProtocolName(cipher string) (string, error) {
+	switch cipher {
+	case "aes-256-gcm", "aes-128-gcm", "chacha20-poly1305", "chacha20-ietf-poly1305":
+		return "shadowsocks", nil
+	case "2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-chacha20-poly1305":
+		return "shadowsocks_2022", nil
+	case "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "des-cfb", "bf-cfb", "cast5-cfb", "rc4-md5", "rc4-md5-6", "chacha20", "chacha20-ietf", "salsa20", "camellia-128-cfb", "camellia-192-cfb", "camellia-256-cfb", "idea-cfb", "rc2-cfb", "seed-cfb", "rc4", "none", "plain":
+		return "shadowsocks_stream", nil
+	default:
+		return "", fmt.Errorf("unsupported shadowsocks encryption method: %v", cipher)
+	}
 }
