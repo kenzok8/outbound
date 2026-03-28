@@ -206,6 +206,12 @@ func (u *udpHopPacketConn) Close() error {
 	return err
 }
 
+func (u *udpHopPacketConn) RemoteAddr() net.Addr {
+	u.connMutex.RLock()
+	defer u.connMutex.RUnlock()
+	return u.currentAddr
+}
+
 func (u *udpHopPacketConn) LocalAddr() net.Addr {
 	u.connMutex.RLock()
 	defer u.connMutex.RUnlock()
