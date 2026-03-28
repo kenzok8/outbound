@@ -466,23 +466,25 @@ func (c *naiveConn) Close() error {
 }
 
 func (c *naiveConn) SetDeadline(t time.Time) error {
-	if c.rawConn != nil {
-		return c.rawConn.SetDeadline(t)
-	}
+	_ = t
+	// naiveConn represents a single H2 CONNECT stream multiplexed over a shared
+	// TCP/TLS session. Propagating stream deadlines to the underlying socket
+	// would affect every other stream on the same pooled H2 connection.
+	//
+	// The TCP dial / TLS handshake / CONNECT setup already honor their own
+	// contexts. Once the stream is established, per-stream deadlines cannot be
+	// implemented safely via the shared raw connection, so this is intentionally
+	// a no-op.
 	return nil
 }
 
 func (c *naiveConn) SetReadDeadline(t time.Time) error {
-	if c.rawConn != nil {
-		return c.rawConn.SetReadDeadline(t)
-	}
+	_ = t
 	return nil
 }
 
 func (c *naiveConn) SetWriteDeadline(t time.Time) error {
-	if c.rawConn != nil {
-		return c.rawConn.SetWriteDeadline(t)
-	}
+	_ = t
 	return nil
 }
 

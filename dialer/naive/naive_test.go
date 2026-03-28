@@ -6,9 +6,12 @@ import (
 	"encoding/base64"
 	stderrors "errors"
 	"io"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/daeuniverse/outbound/dialer"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/http2"
 )
@@ -325,4 +328,40 @@ func TestShouldRetryNaiveRoundTrip(t *testing.T) {
 	}))
 	assert.True(t, shouldRetryNaiveRoundTrip(stderrors.New("http2: client conn not usable")))
 	assert.False(t, shouldRetryNaiveRoundTrip(io.EOF))
+}
+
+type deadlineTrackingConn struct {
+	setDeadlineCalls      int
+	setReadDeadlineCalls  int
+	setWriteDeadlineCalls int
+}
+
+func (c *deadlineTrackingConn) Read(_ []byte) (int, error)    { return 0, io.EOF }
+func (c *deadlineTrackingConn) Write(b []byte) (int, error)   { return len(b), nil }
+func (c *deadlineTrackingConn) Close() error                  { return nil }
+func (c *deadlineTrackingConn) LocalAddr() net.Addr           { return &net.TCPAddr{} }
+func (c *deadlineTrackingConn) RemoteAddr() net.Addr          { return &net.TCPAddr{} }
+func (c *deadlineTrackingConn) SetDeadline(_ time.Time) error { c.setDeadlineCalls++; return nil }
+func (c *deadlineTrackingConn) SetReadDeadline(_ time.Time) error {
+	c.setReadDeadlineCalls++
+	return nil
+}
+func (c *deadlineTrackingConn) SetWriteDeadline(_ time.Time) error {
+	c.setWriteDeadlineCalls++
+	return nil
+}
+
+var _ netproxy.Conn = (*deadlineTrackingConn)(nil)
+
+func TestNaiveConnDeadlinesDoNotTouchSharedRawConn(t *testing.T) {
+	rawConn := &deadlineTrackingConn{}
+	conn := &naiveConn{rawConn: rawConn}
+
+	assert.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+	assert.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	assert.NoError(t, conn.SetWriteDeadline(time.Now().Add(time.Second)))
+
+	assert.Zero(t, rawConn.setDeadlineCalls)
+	assert.Zero(t, rawConn.setReadDeadlineCalls)
+	assert.Zero(t, rawConn.setWriteDeadlineCalls)
 }
