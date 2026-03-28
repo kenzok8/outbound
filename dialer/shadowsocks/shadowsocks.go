@@ -13,6 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/transport/mux"
+	"github.com/daeuniverse/outbound/transport/shadowtls"
 	"github.com/daeuniverse/outbound/transport/simpleobfs"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
@@ -108,6 +109,32 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 			}
 		default:
 			return nil, nil, fmt.Errorf("unsupported mode %v of plugin %v", s.Plugin.Opts.Obfs, s.Plugin.Name)
+		}
+	case "shadow-tls":
+		uShadowTLS := url.URL{
+			Scheme: "shadow-tls",
+			Host:   net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		}
+		if s.Plugin.Opts.Password != "" {
+			uShadowTLS.User = url.User(s.Plugin.Opts.Password)
+		}
+		query := uShadowTLS.Query()
+		if s.Plugin.Opts.Version != "" {
+			query.Set("version", s.Plugin.Opts.Version)
+		}
+		sni := s.Plugin.Opts.SNI
+		if sni == "" {
+			sni = s.Plugin.Opts.Host
+		}
+		if sni != "" {
+			query.Set("sni", sni)
+		}
+		if s.Plugin.Opts.AllowInsecure != "" {
+			query.Set("allowInsecure", s.Plugin.Opts.AllowInsecure)
+		}
+		uShadowTLS.RawQuery = query.Encode()
+		if d, _, err = shadowtls.NewShadowTLS(option, d, uShadowTLS.String()); err != nil {
+			return nil, nil, err
 		}
 	default:
 	}
@@ -215,22 +242,28 @@ type Sip003 struct {
 	Opts Sip003Opts `json:"opts"`
 }
 type Sip003Opts struct {
-	Tls  string `json:"tls"`  // for v2ray-plugin
-	Obfs string `json:"obfs"` // mode for v2ray-plugin
-	Host string `json:"host"`
-	Path string `json:"uri"`
+	Tls           string `json:"tls"`  // for v2ray-plugin
+	Obfs          string `json:"obfs"` // mode for v2ray-plugin
+	Host          string `json:"host"`
+	Path          string `json:"uri"`
+	Password      string `json:"password"`
+	Version       string `json:"version"`
+	SNI           string `json:"sni"`
+	AllowInsecure string `json:"allowInsecure"`
 }
 
 func ParseSip003Opts(opts string) Sip003Opts {
 	var sip003Opts Sip003Opts
 	fields := strings.Split(opts, ";")
 	for i := range fields {
-		a := strings.Split(fields[i], "=")
+		if fields[i] == "" {
+			continue
+		}
+		a := strings.SplitN(fields[i], "=", 2)
 		if len(a) == 1 {
-			// to avoid panic
 			a = append(a, "")
 		}
-		switch a[0] {
+		switch strings.ToLower(a[0]) {
 		case "tls":
 			sip003Opts.Tls = "tls"
 		case "obfs", "mode":
@@ -242,6 +275,14 @@ func ParseSip003Opts(opts string) Sip003Opts {
 			sip003Opts.Path = a[1]
 		case "obfs-host", "host":
 			sip003Opts.Host = a[1]
+		case "password", "passwd", "pwd":
+			sip003Opts.Password = a[1]
+		case "version", "v":
+			sip003Opts.Version = a[1]
+		case "sni":
+			sip003Opts.SNI = a[1]
+		case "allowinsecure", "allow_insecure", "insecure", "skip-cert-verify":
+			sip003Opts.AllowInsecure = a[1]
 		}
 	}
 	return sip003Opts
@@ -249,18 +290,27 @@ func ParseSip003Opts(opts string) Sip003Opts {
 func ParseSip003(plugin string) Sip003 {
 	var sip003 Sip003
 	fields := strings.SplitN(plugin, ";", 2)
-	switch fields[0] {
+	opts := ""
+	if len(fields) == 2 {
+		opts = fields[1]
+	}
+	switch strings.ToLower(fields[0]) {
 	case "obfs-local", "simpleobfs":
 		sip003.Name = "simple-obfs"
+	case "shadowtls", "shadow-tls", "sstls":
+		sip003.Name = "shadow-tls"
 	default:
 		sip003.Name = fields[0]
 	}
-	sip003.Opts = ParseSip003Opts(fields[1])
+	sip003.Opts = ParseSip003Opts(opts)
 	return sip003
 }
 
 func (s *Sip003) String() string {
 	list := []string{s.Name}
+	if s.Opts.Tls != "" {
+		list = append(list, "tls")
+	}
 	if s.Opts.Obfs != "" {
 		list = append(list, "obfs="+s.Opts.Obfs)
 	}
@@ -269,6 +319,18 @@ func (s *Sip003) String() string {
 	}
 	if s.Opts.Path != "" {
 		list = append(list, "obfs-uri="+s.Opts.Path)
+	}
+	if s.Opts.Password != "" {
+		list = append(list, "password="+s.Opts.Password)
+	}
+	if s.Opts.Version != "" {
+		list = append(list, "version="+s.Opts.Version)
+	}
+	if s.Opts.SNI != "" {
+		list = append(list, "sni="+s.Opts.SNI)
+	}
+	if s.Opts.AllowInsecure != "" {
+		list = append(list, "allowInsecure="+s.Opts.AllowInsecure)
 	}
 	return strings.Join(list, ";")
 }
