@@ -47,9 +47,13 @@ func NewHysteria2(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link s
 
 func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
 	d := nextDialer
+	// When pinSHA256 is set, certificate pin verification replaces chain
+	// verification. Force InsecureSkipVerify so that Go's TLS skips chain
+	// verification; the pin callback handles all trust decisions.
+	skipVerify := s.Insecure || option.AllowInsecure || s.PinSHA256 != ""
 	tlsConfig := &tls.Config{
 		ServerName:         s.Sni,
-		InsecureSkipVerify: s.Insecure || option.AllowInsecure,
+		InsecureSkipVerify: skipVerify,
 	}
 	if s.CA != "" {
 		rootCAs, err := loadCustomRootCAs(s.CA)

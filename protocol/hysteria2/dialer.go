@@ -73,9 +73,12 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 
 	if config.ServerAddr.Network() == "udphop" {
 		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
+			NewFunc: func(_ context.Context) (net.PacketConn, error) {
+				// Use Background() for hop dials because the hop loop runs long
+				// after the original request that triggered connect() has completed.
+				hopCtx := context.Background()
 				dialFunc := func(addr net.Addr) (net.PacketConn, error) {
-					conn, err := nextDialer.DialContext(ctx, "udp", addr.String())
+					conn, err := nextDialer.DialContext(hopCtx, "udp", addr.String())
 					if err != nil {
 						return nil, err
 					}
