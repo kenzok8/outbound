@@ -59,3 +59,55 @@ func TestUDPHopPacketConnWritesToCurrentHopAddr(t *testing.T) {
 		t.Fatalf("lastWriteAddr = %q, want %q", got, want)
 	}
 }
+
+func TestUDPHopPacketConnRemoteAddrReturnsCurrentIPv6HopAddr(t *testing.T) {
+	currentAddr := &net.UDPAddr{
+		IP:   net.ParseIP("2001:db8::1"),
+		Port: 8443,
+	}
+	conn := &udpHopPacketConn{
+		Addr:        &UDPHopAddr{Host: "2001:db8::1", PortStr: "443,8443"},
+		currentAddr: currentAddr,
+	}
+
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		t.Fatal("RemoteAddr() returned nil")
+	}
+	if got, want := addr.String(), currentAddr.String(); got != want {
+		t.Fatalf("RemoteAddr() = %q, want %q", got, want)
+	}
+}
+
+func TestUDPHopPacketConnReadFromReturnsPacketSourceAddr(t *testing.T) {
+	packetAddr := &net.UDPAddr{
+		IP:   net.ParseIP("2001:db8::2"),
+		Port: 8443,
+	}
+	conn := &udpHopPacketConn{
+		Addr:        &UDPHopAddr{Host: "2001:db8::1", PortStr: "443,8443"},
+		currentAddr: &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443},
+		recvQueue:   make(chan *udpPacket, 1),
+		closeChan:   make(chan struct{}),
+	}
+	conn.recvQueue <- &udpPacket{
+		Buf:  []byte("hello"),
+		N:    len("hello"),
+		Addr: packetAddr,
+	}
+
+	buf := make([]byte, len("hello"))
+	n, addr, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	if got, want := string(buf[:n]), "hello"; got != want {
+		t.Fatalf("ReadFrom() payload = %q, want %q", got, want)
+	}
+	if addr == nil {
+		t.Fatal("ReadFrom() returned nil addr")
+	}
+	if got, want := addr.String(), packetAddr.String(); got != want {
+		t.Fatalf("ReadFrom() addr = %q, want %q", got, want)
+	}
+}

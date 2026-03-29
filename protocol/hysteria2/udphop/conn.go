@@ -166,11 +166,17 @@ func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) 
 			if p.Err != nil {
 				return 0, nil, p.Err
 			}
-			// Currently we do not check whether the packet is from
-			// the server or not due to performance reasons.
+			// Preserve the actual packet source so callers see the concrete
+			// hop address instead of the logical port-union descriptor.
 			n := copy(b, p.Buf[:p.N])
 			u.bufPool.Put(p.Buf) // nolint:staticcheck
-			return n, u.Addr, nil
+			addr = p.Addr
+			if addr == nil {
+				u.connMutex.RLock()
+				addr = u.currentAddr
+				u.connMutex.RUnlock()
+			}
+			return n, addr, nil
 		case <-u.closeChan:
 			return 0, nil, net.ErrClosed
 		}
