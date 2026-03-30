@@ -10,6 +10,7 @@ package stickyip
 
 import (
 	"context"
+	stderrors "errors"
 	"net"
 	"strings"
 	"sync"
@@ -474,6 +475,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	}
 
 	// All IPs failed, return an error
+	if lastErr == nil {
+		lastErr = errNoUsableProxyIPs
+	}
 	logAllIPsFailed(d.proxyAddr, lastErr)
 	return nil, &net.OpError{Op: "dial", Err: lastErr}
 }
@@ -517,6 +521,8 @@ func rewriteAddrPort(cachedAddr, targetAddr string) string {
 
 var logger = logrus.StandardLogger()
 
+var errNoUsableProxyIPs = stderrors.New("no usable proxy IP addresses")
+
 func logCacheHit(proxyAddr, cachedAddr, network string) {
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
@@ -540,11 +546,14 @@ func logCacheFailure(proxyAddr, cachedAddr, network string, err error) {
 
 func logResolutionError(proxyAddr, host string, err error) {
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
-		logger.WithFields(logrus.Fields{
+		fields := logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"host":       host,
-			"error":      err.Error(),
-		}).Debug("[StickyIP] DNS resolution failed (will use original domain)")
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+		}
+		logger.WithFields(fields).Debug("[StickyIP] DNS resolution failed (will use original domain)")
 	}
 }
 
@@ -610,9 +619,12 @@ func logIPFailure(proxyAddr, targetAddr string, err error) {
 
 func logAllIPsFailed(proxyAddr string, lastErr error) {
 	if logger.IsLevelEnabled(logrus.ErrorLevel) {
-		logger.WithFields(logrus.Fields{
+		fields := logrus.Fields{
 			"proxy_addr": proxyAddr,
-			"error":      lastErr.Error(),
-		}).Error("[StickyIP] All proxy IPs failed - connection refused")
+		}
+		if lastErr != nil {
+			fields["error"] = lastErr.Error()
+		}
+		logger.WithFields(fields).Error("[StickyIP] All proxy IPs failed")
 	}
 }

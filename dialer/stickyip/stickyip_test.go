@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -163,5 +164,48 @@ func TestStickyIpDialerDoesNotProbeLiveUDPConn(t *testing.T) {
 	}
 	if packetConn.readFromCalls != 0 {
 		t.Fatalf("ReadFrom() calls = %d, want 0", packetConn.readFromCalls)
+	}
+}
+
+func TestStickyIpDialerReturnsStableErrorWhenNoUsableIPsResolved(t *testing.T) {
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{{}},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	_, err := dialer.DialContext(context.Background(), "tcp", "proxy.example:443")
+	if err == nil {
+		t.Fatal("DialContext() error = nil, want non-nil")
+	}
+	if got, want := err.Error(), "no usable proxy IP addresses"; got == want {
+		return
+	}
+	if !strings.Contains(err.Error(), "no usable proxy IP addresses") {
+		t.Fatalf("DialContext() error = %q, want substring %q", err.Error(), "no usable proxy IP addresses")
+	}
+}
+
+func TestStickyIpDialerFallsBackToOriginalAddrWhenResolverReturnsEmptySet(t *testing.T) {
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{},
+		conn:         nopConn{},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	conn, err := dialer.DialContext(context.Background(), "tcp", "proxy.example:443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	if conn == nil {
+		t.Fatal("DialContext() returned nil conn")
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if len(parent.dialCalls) != 1 {
+		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "proxy.example:443"; got != want {
+		t.Fatalf("DialContext() addr = %q, want %q", got, want)
 	}
 }
