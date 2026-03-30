@@ -135,3 +135,54 @@ func TestQuicStreamPacketConnWriteToAfterClose(t *testing.T) {
 		t.Fatalf("expected net.ErrClosed after Close, got %v", err)
 	}
 }
+
+func TestQuicStreamPacketConnCloseUnblocksReadFrom(t *testing.T) {
+	packets := NewPackets()
+	closeDone := make(chan struct{})
+	q := &quicStreamPacketConn{
+		incomingPackets: packets,
+		closeDeferFn: func() {
+			close(closeDone)
+		},
+	}
+
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := q.ReadFrom(make([]byte, 1024))
+		readErr <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	select {
+	case err := <-readErr:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("expected net.ErrClosed from ReadFrom after Close, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadFrom did not unblock after quicStreamPacketConn.Close")
+	}
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeDeferFn was not called")
+	}
+}
+
+func TestPacketsPushBackAfterCloseIsIgnored(t *testing.T) {
+	p := NewPackets()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	p.PushBack(&Packet{DATA: []byte("test")})
+
+	if got := p.list.Len(); got != 0 {
+		t.Fatalf("closed packet queue length = %d, want 0", got)
+	}
+}

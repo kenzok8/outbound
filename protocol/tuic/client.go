@@ -175,7 +175,7 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 		// QUIC's keepalive mechanism will handle connection health
 		message, err := quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
-		if outbounderrors.IsTemporaryError(err) {
+			if outbounderrors.IsTemporaryError(err) {
 				continue
 			}
 			return err
@@ -345,7 +345,9 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 		udpRelayMode:          t.UdpRelayMode,
 		maxUdpRelayPacketSize: t.MaxUdpRelayPacketSize,
 		deferQuicConnFn:       t.deferQuicConn,
-		closeDeferFn:          nil,
+		closeDeferFn: func() {
+			t.udpIncomingPacketsMap.CompareAndDelete(connId, incomingPackets)
+		},
 	}
 	return pc, nil
 }

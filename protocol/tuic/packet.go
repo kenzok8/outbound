@@ -39,6 +39,9 @@ func NewPackets() *Packets {
 func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed.Load() {
+		return
+	}
 	p.list.PushBack(packet)
 	select {
 	case <-p.isEmptyState.Done():
@@ -72,6 +75,7 @@ func (p *Packets) Close() error {
 		return nil
 	}
 	p.closed.Store(true)
+	p.list.Init()
 	select {
 	case <-p.isEmptyState.Done():
 	default:
@@ -125,8 +129,12 @@ func (q *quicStreamPacketConn) close() (err error) {
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
-	if q.incomingPackets != nil {
-		q.incomingPackets = nil
+	incomingPackets := q.incomingPackets
+	q.incomingPackets = nil
+	if incomingPackets != nil {
+		_ = incomingPackets.Close()
+	}
+	if incomingPackets != nil && q.quicConn != nil {
 
 		buf := pool.GetBuffer()
 		defer pool.PutBuffer(buf)
