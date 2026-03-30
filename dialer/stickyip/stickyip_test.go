@@ -118,7 +118,7 @@ func TestStickyIpDialerUsesUnderlyingResolverForProxyLookup(t *testing.T) {
 		lookupResult: []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}},
 		conn:         nopConn{},
 	}
-	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+	dialer := NewStickyIpDialer(parent, "proxy.example:443,8443-8450", NewProxyIpCache())
 
 	conn, err := dialer.DialContext(context.Background(), network, "proxy.example:8443")
 	if err != nil {
@@ -143,6 +143,33 @@ func TestStickyIpDialerUsesUnderlyingResolverForProxyLookup(t *testing.T) {
 		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
 	}
 	if got, want := parent.dialCalls[0][1], "203.0.113.10:8443"; got != want {
+		t.Fatalf("DialContext() addr = %q, want %q", got, want)
+	}
+}
+
+func TestStickyIpDialerDoesNotTreatDifferentFixedPortAsProxyAddress(t *testing.T) {
+	parent := &recordingLookupDialer{
+		conn: nopConn{},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	conn, err := dialer.DialContext(context.Background(), "tcp", "proxy.example:8443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	if conn == nil {
+		t.Fatal("DialContext() returned nil conn")
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.lookupCalls != 0 {
+		t.Fatalf("LookupIPAddr() calls = %d, want 0", parent.lookupCalls)
+	}
+	if len(parent.dialCalls) != 1 {
+		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "proxy.example:8443"; got != want {
 		t.Fatalf("DialContext() addr = %q, want %q", got, want)
 	}
 }

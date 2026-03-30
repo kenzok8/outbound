@@ -12,6 +12,7 @@ import (
 	"context"
 	stderrors "errors"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -255,6 +256,7 @@ type StickyIpDialer struct {
 	checkCycle uint64
 	proxyAddr  string // Original proxy address (domain:port, IP:port, or port-union variant)
 	proxyHost  string
+	proxyPort  string
 }
 
 type ipLookupDialer interface {
@@ -266,7 +268,7 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 	if cache == nil {
 		cache = NewProxyIpCache()
 	}
-	proxyHost, _, _ := SplitHostPort(proxyAddr)
+	proxyHost, proxyPort, _ := SplitHostPort(proxyAddr)
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] NewStickyIpDialer created")
 	}
@@ -276,6 +278,7 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 		checkCycle: 0,
 		proxyAddr:  proxyAddr,
 		proxyHost:  proxyHost,
+		proxyPort:  proxyPort,
 	}
 }
 
@@ -409,14 +412,41 @@ func (d *StickyIpDialer) lookupIPAddr(ctx context.Context, network, host string)
 
 // isProxyAddress checks if the given address matches the proxy address.
 func (d *StickyIpDialer) isProxyAddress(addr string) bool {
-	// Exact match
-	if addr == d.proxyAddr {
+	addrHost, addrPort, err := SplitHostPort(addr)
+	if err != nil {
+		return addr == d.proxyAddr
+	}
+	if addrHost != d.proxyHost {
+		return false
+	}
+	return matchPortSpec(addrPort, d.proxyPort)
+}
+
+func matchPortSpec(port, spec string) bool {
+	if port == spec || spec == "" {
 		return true
 	}
-	// Check if host part matches
-	addrHost, _, err := SplitHostPort(addr)
-	if err == nil && d.proxyHost != "" {
-		return d.proxyHost == addrHost
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if part == port {
+			return true
+		}
+		startStr, endStr, ok := strings.Cut(part, "-")
+		if !ok {
+			continue
+		}
+		start, errStart := strconv.Atoi(strings.TrimSpace(startStr))
+		end, errEnd := strconv.Atoi(strings.TrimSpace(endStr))
+		target, errTarget := strconv.Atoi(port)
+		if errStart != nil || errEnd != nil || errTarget != nil {
+			continue
+		}
+		if target >= start && target <= end {
+			return true
+		}
 	}
 	return false
 }
