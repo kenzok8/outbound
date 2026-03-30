@@ -54,6 +54,15 @@ func (d *lazyDirectDialer) DialContext(ctx context.Context, network, addr string
 	return d.getDialer().DialContext(ctx, network, addr)
 }
 
+func (d *lazyDirectDialer) LookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	if resolver, ok := d.getDialer().(interface {
+		LookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error)
+	}); ok {
+		return resolver.LookupIPAddr(ctx, network, host)
+	}
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
 type Option struct {
 	FullCone    bool
 	FallbackDNS string
@@ -221,6 +230,26 @@ func (d *directDialer) dialTcp(ctx context.Context, addr string, mark int, mptcp
 	}
 	dialer.Resolver = d.createResolver(mark, fallback)
 	return dialer.DialContext(ctx, "tcp", addr)
+}
+
+func (d *directDialer) lookupIPAddr(ctx context.Context, host string, mark int, fallback bool) ([]net.IPAddr, error) {
+	resolver := d.createResolver(mark, fallback)
+	if resolver == nil {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
+	return resolver.LookupIPAddr(ctx, host)
+}
+
+func (d *directDialer) LookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := d.lookupIPAddr(ctx, host, int(magicNetwork.Mark), false)
+	if err != nil && d.Option.FallbackDNS != "" && outbounderrors.IsDNSTimeout(err) {
+		return d.lookupIPAddr(ctx, host, int(magicNetwork.Mark), true)
+	}
+	return ips, err
 }
 
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {

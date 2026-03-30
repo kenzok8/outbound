@@ -10,7 +10,6 @@ package stickyip
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -257,6 +256,10 @@ type StickyIpDialer struct {
 	proxyHost  string
 }
 
+type ipLookupDialer interface {
+	LookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error)
+}
+
 // NewStickyIpDialer creates a new sticky IP dialer wrapper.
 func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpCache) *StickyIpDialer {
 	if cache == nil {
@@ -334,7 +337,6 @@ func (d *StickyIpDialer) GetCachedProxyAddrWithIpVersion(network, ipVersion stri
 
 // DialContext implements sticky IP caching by intercepting dial calls.
 // It resolves all IPs for the target, tries the cached IP first, then falls back.
-// For UDP, it verifies UDP connectivity before caching an IP.
 func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
 	// Extract the base network type (tcp/udp) from magic network if present
 	baseNetwork := d.getBaseNetwork(network)
@@ -358,23 +360,8 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			// Try with cached IP first
 			conn, err := d.dialer.DialContext(ctx, network, targetAddr)
 			if err == nil {
-				// For UDP, verify the connection actually works by trying to read
-				if baseNetwork == "udp" {
-					if !d.verifyUDPConnectivity(ctx, conn.(netproxy.PacketConn)) {
-						_ = conn.Close()
-						logCacheFailure(d.proxyAddr, targetAddr, network, fmt.Errorf("UDP verification failed"))
-						d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
-						// Fall through to resolve and try other IPs
-					} else {
-						// UDP verification succeeded
-						logCacheHit(d.proxyAddr, targetAddr, network)
-						return conn, nil
-					}
-				} else {
-					// TCP - connection success is enough
-					logCacheHit(d.proxyAddr, targetAddr, network)
-					return conn, nil
-				}
+				logCacheHit(d.proxyAddr, targetAddr, network)
+				return conn, nil
 			} else {
 				// Log cache miss/failure
 				logCacheFailure(d.proxyAddr, targetAddr, network, err)
@@ -412,38 +399,11 @@ func (d *StickyIpDialer) getBaseNetwork(network string) string {
 	return magicNetwork.Network
 }
 
-// verifyUDPConnectivity checks if a UDP connection is actually working.
-// For UDP, we do a basic sanity check by trying to read with a short deadline.
-// Note: UDP connectivity can only be truly verified by sending/receiving actual data,
-// so this is a best-effort check. The real validation happens during protocol handshake.
-func (d *StickyIpDialer) verifyUDPConnectivity(ctx context.Context, conn netproxy.PacketConn) bool {
-	// Set a very short read deadline
-	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-
-	// Try to read - this will tell us if the socket is properly bound
-	var buf [1]byte
-	_, _, err := conn.ReadFrom(buf[:])
-
-	if err != nil {
-		// A timeout is expected and means the socket is working (just no data yet)
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return true
-		}
-		// Check for immediate connection refused
-		if opErr, ok := err.(*net.OpError); ok {
-			if opErr.Err.Error() == "connection refused" {
-				logger.WithField("error", err).Debug("[StickyIP] UDP connection refused detected")
-				return false
-			}
-		}
-		// Other errors at this stage are inconclusive for UDP
-		// The socket might be fine, just no data available
-		logger.WithField("error", err).Trace("[StickyIP] UDP verification read error (inconclusive)")
+func (d *StickyIpDialer) lookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
+	if resolver, ok := d.dialer.(ipLookupDialer); ok {
+		return resolver.LookupIPAddr(ctx, network, host)
 	}
-
-	// If we got here without a definitive failure, consider the socket potentially working
-	return true
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
 // isProxyAddress checks if the given address matches the proxy address.
@@ -477,7 +437,7 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	}
 
 	// Resolve to get all IPs
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := d.lookupIPAddr(ctx, network, host)
 	if err != nil || len(ips) == 0 {
 		// Resolution failed, try original address
 		logResolutionError(d.proxyAddr, host, err)
@@ -486,9 +446,6 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 
 	// Log all resolved IPs
 	logResolvedIPs(d.proxyAddr, ips, port, network)
-
-	// Extract base network type for protocol-specific caching
-	isUDP := baseNetwork == "udp"
 
 	// Try each IP until one works
 	var lastErr error
@@ -502,23 +459,6 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 		logTryingIP(d.proxyAddr, targetAddr, network)
 		conn, err := d.dialer.DialContext(ctx, network, targetAddr)
 		if err == nil {
-			// For UDP, verify the connection actually works
-			if isUDP {
-				packetConn, ok := conn.(netproxy.PacketConn)
-				if !ok {
-					_ = conn.Close()
-					lastErr = fmt.Errorf("not a packet connection")
-					logIPFailure(d.proxyAddr, targetAddr, lastErr)
-					continue
-				}
-				if !d.verifyUDPConnectivity(ctx, packetConn) {
-					_ = conn.Close()
-					lastErr = fmt.Errorf("UDP connection verification failed")
-					logIPFailure(d.proxyAddr, targetAddr, lastErr)
-					continue
-				}
-			}
-
 			// This IP works for this protocol, cache it
 			// Determine IP version from the successful IP
 			ipVersion := "4"
