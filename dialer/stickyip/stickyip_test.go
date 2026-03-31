@@ -5,8 +5,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,12 +65,16 @@ type recordingLookupDialer struct {
 	dialCalls [][2]string
 	conn      netproxy.Conn
 	dialErr   error
+	dialFunc  func(network, addr string) (netproxy.Conn, error)
 }
 
 func (d *recordingLookupDialer) DialContext(_ context.Context, network, addr string) (netproxy.Conn, error) {
 	d.mu.Lock()
 	d.dialCalls = append(d.dialCalls, [2]string{network, addr})
 	d.mu.Unlock()
+	if d.dialFunc != nil {
+		return d.dialFunc(network, addr)
+	}
 	if d.dialErr != nil {
 		return nil, d.dialErr
 	}
@@ -98,6 +104,7 @@ func (nopConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 type trackingPacketConn struct {
 	readFromCalls int
+	readErr       error
 }
 
 func (c *trackingPacketConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
@@ -108,9 +115,15 @@ func (c *trackingPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *trackingPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
 func (c *trackingPacketConn) ReadFrom(_ []byte) (int, netip.AddrPort, error) {
 	c.readFromCalls++
-	return 0, netip.AddrPort{}, io.EOF
+	return 0, netip.AddrPort{}, c.readErr
 }
 func (c *trackingPacketConn) WriteTo(p []byte, _ string) (int, error) { return len(p), nil }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 func TestStickyIpDialerUsesUnderlyingResolverForProxyLookup(t *testing.T) {
 	network := netproxy.MagicNetwork{Network: "tcp", Mark: 123}.Encode()
@@ -174,8 +187,8 @@ func TestStickyIpDialerDoesNotTreatDifferentFixedPortAsProxyAddress(t *testing.T
 	}
 }
 
-func TestStickyIpDialerDoesNotProbeLiveUDPConn(t *testing.T) {
-	packetConn := &trackingPacketConn{}
+func TestStickyIpDialerProbesResolvedUDPProxyConnBeforeCaching(t *testing.T) {
+	packetConn := &trackingPacketConn{readErr: timeoutErr{}}
 	parent := &recordingLookupDialer{
 		lookupResult: []net.IPAddr{{IP: net.ParseIP("198.51.100.20")}},
 		conn:         packetConn,
@@ -189,8 +202,62 @@ func TestStickyIpDialerDoesNotProbeLiveUDPConn(t *testing.T) {
 	if conn == nil {
 		t.Fatal("DialContext() returned nil conn")
 	}
-	if packetConn.readFromCalls != 0 {
-		t.Fatalf("ReadFrom() calls = %d, want 0", packetConn.readFromCalls)
+	if packetConn.readFromCalls != 1 {
+		t.Fatalf("ReadFrom() calls = %d, want 1", packetConn.readFromCalls)
+	}
+}
+
+func TestStickyIpDialerSkipsRefusedUDPProxyIPAndUsesNextResolvedAddress(t *testing.T) {
+	badConn := &trackingPacketConn{
+		readErr: &net.OpError{
+			Op:  "read",
+			Net: "udp",
+			Err: &os.SyscallError{Syscall: "recvmsg", Err: syscall.ECONNREFUSED},
+		},
+	}
+	goodConn := &trackingPacketConn{readErr: timeoutErr{}}
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{
+			{IP: net.ParseIP("198.51.100.10")},
+			{IP: net.ParseIP("198.51.100.20")},
+		},
+		dialFunc: func(_ string, addr string) (netproxy.Conn, error) {
+			switch addr {
+			case "198.51.100.10:443":
+				return badConn, nil
+			case "198.51.100.20:443":
+				return goodConn, nil
+			default:
+				return nil, io.EOF
+			}
+		},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	conn, err := dialer.DialContext(context.Background(), "udp", "proxy.example:443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	if conn != goodConn {
+		t.Fatal("DialContext() did not return the verified good UDP conn")
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if len(parent.dialCalls) != 2 {
+		t.Fatalf("DialContext() calls = %d, want 2", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "198.51.100.10:443"; got != want {
+		t.Fatalf("first dial addr = %q, want %q", got, want)
+	}
+	if got, want := parent.dialCalls[1][1], "198.51.100.20:443"; got != want {
+		t.Fatalf("second dial addr = %q, want %q", got, want)
+	}
+	if badConn.readFromCalls != 1 {
+		t.Fatalf("bad conn ReadFrom() calls = %d, want 1", badConn.readFromCalls)
+	}
+	if goodConn.readFromCalls != 1 {
+		t.Fatalf("good conn ReadFrom() calls = %d, want 1", goodConn.readFromCalls)
 	}
 }
 
@@ -244,7 +311,7 @@ func TestStickyIpDialerHonorsRequestedIPVersion(t *testing.T) {
 			{IP: net.ParseIP("203.0.113.10")},
 			{IP: net.ParseIP("2001:db8::10")},
 		},
-		conn: nopConn{},
+		conn: &trackingPacketConn{readErr: timeoutErr{}},
 	}
 	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
 
