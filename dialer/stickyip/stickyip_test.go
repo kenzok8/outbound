@@ -236,3 +236,32 @@ func TestStickyIpDialerFallsBackToOriginalAddrWhenResolverReturnsEmptySet(t *tes
 		t.Fatalf("DialContext() addr = %q, want %q", got, want)
 	}
 }
+
+func TestStickyIpDialerHonorsRequestedIPVersion(t *testing.T) {
+	network := netproxy.MagicNetwork{Network: "udp", IPVersion: "6"}.Encode()
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{
+			{IP: net.ParseIP("203.0.113.10")},
+			{IP: net.ParseIP("2001:db8::10")},
+		},
+		conn: nopConn{},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	conn, err := dialer.DialContext(context.Background(), network, "proxy.example:443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	if conn == nil {
+		t.Fatal("DialContext() returned nil conn")
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if len(parent.dialCalls) != 1 {
+		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "[2001:db8::10]:443"; got != want {
+		t.Fatalf("DialContext() addr = %q, want %q", got, want)
+	}
+}

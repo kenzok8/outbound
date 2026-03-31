@@ -132,18 +132,28 @@ func (d *directDialer) createResolver(mark int, fallback bool) *net.Resolver {
 	}
 }
 
-func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallback bool) (c netproxy.PacketConn, err error) {
+func preferredNetwork(baseNetwork, ipVersion string) string {
+	switch ipVersion {
+	case "4", "6":
+		return baseNetwork + ipVersion
+	default:
+		return baseNetwork
+	}
+}
+
+func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, ipVersion string, fallback bool) (c netproxy.PacketConn, err error) {
+	network := preferredNetwork("udp", ipVersion)
 	if d.Option.FallbackDNS != "" && !fallback {
 		defer func() { // don't remove func wrapper for d.tryRetry
 			d.tryRetry(err, addr, func() {
-				c, err = d.dialUdp(ctx, addr, mark, true)
+				c, err = d.dialUdp(ctx, addr, mark, ipVersion, true)
 			})
 		}()
 	}
 	resolver := d.createResolver(mark, fallback)
 	if mark == 0 {
 		if d.Option.FullCone {
-			conn, err := net.ListenUDP("udp", d.udpLocalAddr)
+			conn, err := net.ListenUDP(network, d.udpLocalAddr)
 			if err != nil {
 				return nil, err
 			}
@@ -153,7 +163,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 				LocalAddr: d.udpLocalAddr,
 				Resolver:  resolver,
 			}
-			conn, err := dialer.DialContext(ctx, "udp", addr)
+			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -173,7 +183,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 			if d.udpLocalAddr != nil {
 				laddr = d.udpLocalAddr.String()
 			}
-			_conn, err := c.ListenPacket(context.Background(), "udp", laddr)
+			_conn, err := c.ListenPacket(context.Background(), network, laddr)
 			if err != nil {
 				return nil, err
 			}
@@ -186,7 +196,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 				LocalAddr: d.udpLocalAddr,
 				Resolver:  d.createResolver(mark, fallback),
 			}
-			c, err := dialer.DialContext(ctx, "udp", addr)
+			c, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -207,11 +217,12 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 	}
 }
 
-func (d *directDialer) dialTcp(ctx context.Context, addr string, mark int, mptcp bool, fallback bool) (c net.Conn, err error) {
+func (d *directDialer) dialTcp(ctx context.Context, addr string, mark int, ipVersion string, mptcp bool, fallback bool) (c net.Conn, err error) {
+	network := preferredNetwork("tcp", ipVersion)
 	if d.Option.FallbackDNS != "" && !fallback {
 		defer func() { // don't remove func wrapper for d.tryRetry
 			d.tryRetry(err, addr, func() {
-				c, err = d.dialTcp(ctx, addr, mark, mptcp, true)
+				c, err = d.dialTcp(ctx, addr, mark, ipVersion, mptcp, true)
 			})
 		}()
 	}
@@ -229,7 +240,7 @@ func (d *directDialer) dialTcp(ctx context.Context, addr string, mark int, mptcp
 		dialer.Control = nil
 	}
 	dialer.Resolver = d.createResolver(mark, fallback)
-	return dialer.DialContext(ctx, "tcp", addr)
+	return dialer.DialContext(ctx, network, addr)
 }
 
 func (d *directDialer) lookupIPAddr(ctx context.Context, host string, mark int, fallback bool) ([]net.IPAddr, error) {
@@ -259,9 +270,9 @@ func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c
 	}
 	switch magicNetwork.Network {
 	case "tcp":
-		return d.dialTcp(ctx, addr, int(magicNetwork.Mark), magicNetwork.Mptcp, false)
+		return d.dialTcp(ctx, addr, int(magicNetwork.Mark), magicNetwork.IPVersion, magicNetwork.Mptcp, false)
 	case "udp":
-		return d.dialUdp(ctx, addr, int(magicNetwork.Mark), false)
+		return d.dialUdp(ctx, addr, int(magicNetwork.Mark), magicNetwork.IPVersion, false)
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}

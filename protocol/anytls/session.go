@@ -93,9 +93,15 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 
 func (s *session) removeStream(sid uint32) {
 	s.streamLock.Lock()
-	s.closeStreamChan <- sid
 	delete(s.streams, sid)
 	s.streamLock.Unlock()
+	if s.closed.Load() {
+		return
+	}
+	select {
+	case s.closeStreamChan <- sid:
+	default:
+	}
 }
 
 func (s *session) run() error {
@@ -207,11 +213,15 @@ func (s *session) run() error {
 func (s *session) Close() error {
 	if s.closed.CompareAndSwap(false, true) {
 		s.streamLock.Lock()
-		defer s.streamLock.Unlock()
-		for i := range s.streams {
-			_ = s.streams[i].Close()
+		streams := make([]*stream, 0, len(s.streams))
+		for _, stream := range s.streams {
+			streams = append(streams, stream)
 		}
 		s.streams = make(map[uint32]*stream)
+		s.streamLock.Unlock()
+		for _, stream := range streams {
+			_ = stream.Close()
+		}
 		_ = s.conn.Close()
 		return nil
 	}

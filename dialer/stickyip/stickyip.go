@@ -11,10 +11,12 @@ package stickyip
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -253,7 +255,7 @@ func (c *ProxyIpCache) InvalidateCycle(cycle uint64) {
 type StickyIpDialer struct {
 	dialer     netproxy.Dialer
 	cache      *ProxyIpCache
-	checkCycle uint64
+	checkCycle atomic.Uint64
 	proxyAddr  string // Original proxy address (domain:port, IP:port, or port-union variant)
 	proxyHost  string
 	proxyPort  string
@@ -273,26 +275,27 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] NewStickyIpDialer created")
 	}
 	return &StickyIpDialer{
-		dialer:     dialer,
-		cache:      cache,
-		checkCycle: 0,
-		proxyAddr:  proxyAddr,
-		proxyHost:  proxyHost,
-		proxyPort:  proxyPort,
+		dialer:    dialer,
+		cache:     cache,
+		proxyAddr: proxyAddr,
+		proxyHost: proxyHost,
+		proxyPort: proxyPort,
 	}
 }
 
 // IncrementCheckCycle advances the health check cycle.
 func (d *StickyIpDialer) IncrementCheckCycle() {
-	oldCycle := d.checkCycle
-	d.checkCycle++
+	oldCycle := d.checkCycle.Load()
+	newCycle := d.checkCycle.Add(1)
 	logger.WithFields(logrus.Fields{
 		"old_cycle":  oldCycle,
-		"new_cycle":  d.checkCycle,
+		"new_cycle":  newCycle,
 		"proxy_addr": d.proxyAddr,
 	}).Debug("[StickyIP] Check cycle incremented")
 	// Invalidate old cycle entries to force refresh
-	d.cache.InvalidateCycle(d.checkCycle - 1)
+	if newCycle > 0 {
+		d.cache.InvalidateCycle(newCycle - 1)
+	}
 }
 
 // InvalidateProtocolCache invalidates the cached IP for a specific protocol.
@@ -327,7 +330,7 @@ func (d *StickyIpDialer) GetCachedProxyAddr(network string) string {
 	if d == nil {
 		return ""
 	}
-	return d.cache.GetWithCycle(d.proxyAddr, network, d.checkCycle)
+	return d.cache.GetWithCycle(d.proxyAddr, network, d.checkCycle.Load())
 }
 
 // GetCachedProxyAddrWithIpVersion returns the cached IP for the proxy address, network type and IP version.
@@ -336,14 +339,14 @@ func (d *StickyIpDialer) GetCachedProxyAddrWithIpVersion(network, ipVersion stri
 	if d == nil {
 		return ""
 	}
-	return d.cache.GetWithCycleAndIpVersion(d.proxyAddr, network, ipVersion, d.checkCycle)
+	return d.cache.GetWithCycleAndIpVersion(d.proxyAddr, network, ipVersion, d.checkCycle.Load())
 }
 
 // DialContext implements sticky IP caching by intercepting dial calls.
 // It resolves all IPs for the target, tries the cached IP first, then falls back.
 func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	// Extract the base network type (tcp/udp) from magic network if present
-	baseNetwork := d.getBaseNetwork(network)
+	// Extract the base network type (tcp/udp) and requested IP family from magic network if present.
+	baseNetwork, requestedIPVersion := d.getNetworkPreference(network)
 
 	// Log every dial attempt for debugging
 	logger.WithFields(logrus.Fields{
@@ -351,12 +354,16 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 		"target":       addr,
 		"network":      network,
 		"base_network": baseNetwork,
+		"ip_version":   requestedIPVersion,
 		"is_proxy":     d.isProxyAddress(addr),
 	}).Debug("[StickyIP] DialContext called")
 
 	// Check if we should use a cached proxy IP for this connection
 	if d.isProxyAddress(addr) {
 		cachedAddr := d.GetCachedProxyAddr(baseNetwork)
+		if requestedIPVersion != "" {
+			cachedAddr = d.GetCachedProxyAddrWithIpVersion(baseNetwork, requestedIPVersion)
+		}
 		// Only use cached IP if it's different from proxy address (i.e., it's a resolved IP)
 		// GetCachedProxyAddr returns proxyAddr when cache is empty/expired, so we need to check
 		if cachedAddr != "" && cachedAddr != d.proxyAddr {
@@ -380,7 +387,7 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			"network":     network,
 			"cached_addr": cachedAddr,
 		}).Debug("[StickyIP] No valid cached IP - resolving proxy domain")
-		return d.dialWithIpResolution(ctx, network, addr, baseNetwork)
+		return d.dialWithIpResolution(ctx, network, addr, baseNetwork, requestedIPVersion)
 	}
 
 	// Not the proxy address, just pass through
@@ -392,15 +399,15 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 	return d.dialer.DialContext(ctx, network, addr)
 }
 
-// getBaseNetwork extracts the base network type (tcp/udp) from magic network.
-func (d *StickyIpDialer) getBaseNetwork(network string) string {
+// getNetworkPreference extracts the base network type (tcp/udp) and requested IP family from magic network.
+func (d *StickyIpDialer) getNetworkPreference(network string) (baseNetwork string, ipVersion string) {
 	// Parse magic network to get base type
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
 	if err != nil {
 		// Default to treating as-is
-		return network
+		return network, ""
 	}
-	return magicNetwork.Network
+	return magicNetwork.Network, magicNetwork.IPVersion
 }
 
 func (d *StickyIpDialer) lookupIPAddr(ctx context.Context, network, host string) ([]net.IPAddr, error) {
@@ -453,7 +460,7 @@ func matchPortSpec(port, spec string) bool {
 
 // dialWithIpResolution resolves the address to IPs and tries each one.
 // The first successful IP is cached for subsequent connections.
-func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr, baseNetwork string) (netproxy.Conn, error) {
+func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr, baseNetwork, requestedIPVersion string) (netproxy.Conn, error) {
 	host, port, err := SplitHostPort(addr)
 	if err != nil {
 		// Not in host:port format, try directly
@@ -473,6 +480,10 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 		// Resolution failed, try original address
 		logResolutionError(d.proxyAddr, host, err)
 		return d.dialer.DialContext(ctx, network, addr)
+	}
+	ips = filterIPAddrsByVersion(ips, requestedIPVersion)
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no usable proxy IPs for %s%s", baseNetwork, requestedIPVersion)
 	}
 
 	// Log all resolved IPs
@@ -496,8 +507,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 			if ipAddr.IP.To4() == nil {
 				ipVersion = "6"
 			}
-			d.cache.Set(d.proxyAddr, targetAddr, baseNetwork, ipVersion, d.checkCycle)
-			logIPSuccess(d.proxyAddr, targetAddr, baseNetwork, ipVersion, d.checkCycle)
+			cycle := d.checkCycle.Load()
+			d.cache.Set(d.proxyAddr, targetAddr, baseNetwork, ipVersion, cycle)
+			logIPSuccess(d.proxyAddr, targetAddr, baseNetwork, ipVersion, cycle)
 			return conn, nil
 		}
 		lastErr = err
@@ -510,6 +522,26 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	}
 	logAllIPsFailed(d.proxyAddr, lastErr)
 	return nil, &net.OpError{Op: "dial", Err: lastErr}
+}
+
+func filterIPAddrsByVersion(ips []net.IPAddr, ipVersion string) []net.IPAddr {
+	if ipVersion == "" {
+		return ips
+	}
+	filtered := make([]net.IPAddr, 0, len(ips))
+	for _, ipAddr := range ips {
+		switch ipVersion {
+		case "4":
+			if ipAddr.IP.To4() != nil {
+				filtered = append(filtered, ipAddr)
+			}
+		case "6":
+			if ipAddr.IP.To4() == nil {
+				filtered = append(filtered, ipAddr)
+			}
+		}
+	}
+	return filtered
 }
 
 // SplitHostPort splits host:port strings and also accepts proxy port-union strings like
