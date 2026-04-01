@@ -103,7 +103,6 @@ type quicStreamPacketConn struct {
 	closeErr  error
 	closed    atomic.Bool
 
-	// TODO: multiple defraggers for different PKT_ID
 	deFraggers sync.Map
 
 	lastDeFraggerCleanupNano atomic.Int64
@@ -115,6 +114,114 @@ type quicStreamPacketConn struct {
 var deFraggerIdleTimeout = 30 * time.Second
 
 var deFraggerCleanupInterval = 5 * time.Second
+
+type deFraggerBucket struct {
+	mu         sync.Mutex
+	deFraggers []*deFragger
+}
+
+func (b *deFraggerBucket) len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.deFraggers)
+}
+
+func (b *deFraggerBucket) removeAt(index int) {
+	if index < 0 || index >= len(b.deFraggers) {
+		return
+	}
+	last := len(b.deFraggers) - 1
+	b.deFraggers[index] = b.deFraggers[last]
+	b.deFraggers[last] = nil
+	b.deFraggers = b.deFraggers[:last]
+}
+
+func (b *deFraggerBucket) pruneExpired(nowNano int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if deFraggerIdleTimeout <= 0 {
+		return
+	}
+	dst := b.deFraggers[:0]
+	for _, d := range b.deFraggers {
+		if d == nil || d.IsExpired(nowNano, deFraggerIdleTimeout) {
+			continue
+		}
+		dst = append(dst, d)
+	}
+	for i := len(dst); i < len(b.deFraggers); i++ {
+		b.deFraggers[i] = nil
+	}
+	b.deFraggers = dst
+}
+
+func (b *deFraggerBucket) feed(packet *Packet, p []byte, nowNano int64) (n int, addr netip.AddrPort, assembled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	var candidates []int
+	for i, d := range b.deFraggers {
+		if d != nil && d.matches(packet) {
+			candidates = append(candidates, i)
+		}
+	}
+
+	selectedIndex := -1
+	switch len(candidates) {
+	case 0:
+		b.deFraggers = append(b.deFraggers, newDeFragger(nowNano))
+		selectedIndex = len(b.deFraggers) - 1
+	case 1:
+		selectedIndex = candidates[0]
+	default:
+		if packet.FRAG_ID == 0 {
+			addrPort := packetFragmentAddrPort(packet)
+			for _, idx := range candidates {
+				if d := b.deFraggers[idx]; d != nil && d.hasFirstFrag && d.firstAddrPort == addrPort {
+					selectedIndex = idx
+					break
+				}
+			}
+			if selectedIndex == -1 {
+				for _, idx := range candidates {
+					if d := b.deFraggers[idx]; d != nil && !d.hasFirstFrag {
+						selectedIndex = idx
+						break
+					}
+				}
+			}
+			if selectedIndex == -1 {
+				b.deFraggers = append(b.deFraggers, newDeFragger(nowNano))
+				selectedIndex = len(b.deFraggers) - 1
+			}
+		} else {
+			// The protocol only carries a 16-bit packet ID on non-first fragments.
+			// If multiple in-flight fragment sets remain compatible, routing this
+			// fragment is ambiguous. Drop it rather than corrupt another payload.
+			for _, idx := range candidates {
+				if d := b.deFraggers[idx]; d != nil && d.hasFirstFrag {
+					if selectedIndex != -1 {
+						return 0, netip.AddrPort{}, false
+					}
+					selectedIndex = idx
+				}
+			}
+			if selectedIndex == -1 {
+				return 0, netip.AddrPort{}, false
+			}
+		}
+	}
+
+	d := b.deFraggers[selectedIndex]
+	if d == nil {
+		return 0, netip.AddrPort{}, false
+	}
+	n, addr, assembled = d.Feed(packet, p, nowNano)
+	if assembled {
+		b.removeAt(selectedIndex)
+	}
+	return n, addr, assembled
+}
 
 func (q *quicStreamPacketConn) Close() error {
 	q.closeOnce.Do(func() {
@@ -185,9 +292,10 @@ func (q *quicStreamPacketConn) maybeCleanupDeFraggers(nowNano int64) {
 		return
 	}
 	q.deFraggers.Range(func(key, value any) bool {
-		d := value.(*deFragger)
-		if d.IsExpired(nowNano, deFraggerIdleTimeout) {
-			q.deFraggers.CompareAndDelete(key, d)
+		bucket := value.(*deFraggerBucket)
+		bucket.pruneExpired(nowNano)
+		if bucket.len() == 0 {
+			q.deFraggers.CompareAndDelete(key, bucket)
 		}
 		return true
 	})
@@ -235,15 +343,18 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			err = net.ErrClosed
 			return
 		}
+		if packet.FRAG_TOTAL <= 1 {
+			return copy(p, packet.DATA), packet.ADDR.UDPAddr().AddrPort(), nil
+		}
 		nowNano := time.Now().UnixNano()
 		q.maybeCleanupDeFraggers(nowNano)
-		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, newDeFragger(nowNano))
-		d := _d.(*deFragger)
+		bucketAny, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFraggerBucket{})
+		bucket := bucketAny.(*deFraggerBucket)
 		var assembled bool
-		// Feed packet into this deFragger.
-		// Return if this PKT_ID is ready and assembled.
-		if n, addr, assembled = d.Feed(packet, p, nowNano); assembled {
-			q.deFraggers.Delete(packet.PKT_ID)
+		if n, addr, assembled = bucket.feed(packet, p, nowNano); assembled {
+			if bucket.len() == 0 {
+				q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
+			}
 			return
 		}
 	}

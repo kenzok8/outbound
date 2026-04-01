@@ -11,8 +11,8 @@ import (
 
 func countDeFraggers(q *quicStreamPacketConn) int {
 	count := 0
-	q.deFraggers.Range(func(_, _ any) bool {
-		count++
+	q.deFraggers.Range(func(_, value any) bool {
+		count += value.(*deFraggerBucket).len()
 		return true
 	})
 	return count
@@ -209,8 +209,12 @@ func TestQuicStreamPacketConnPrunesExpiredDeFraggers(t *testing.T) {
 
 	q := &quicStreamPacketConn{}
 	nowNano := time.Now().UnixNano()
-	q.deFraggers.Store(uint16(1), newDeFragger(nowNano-int64(2*deFraggerIdleTimeout)))
-	q.deFraggers.Store(uint16(2), newDeFragger(nowNano))
+	q.deFraggers.Store(uint16(1), &deFraggerBucket{
+		deFraggers: []*deFragger{newDeFragger(nowNano - int64(2*deFraggerIdleTimeout))},
+	})
+	q.deFraggers.Store(uint16(2), &deFraggerBucket{
+		deFraggers: []*deFragger{newDeFragger(nowNano)},
+	})
 
 	q.maybeCleanupDeFraggers(nowNano)
 
@@ -305,5 +309,75 @@ func TestQuicStreamPacketConnReadFromAssemblesCompleteFragments(t *testing.T) {
 	}
 	if got := countDeFraggers(q); got != 0 {
 		t.Fatalf("deFragger count after successful assembly = %d, want 0", got)
+	}
+}
+
+func TestQuicStreamPacketConnReadFromSeparatesSamePktIDDifferentFragmentSets(t *testing.T) {
+	packets := NewPackets()
+	q := &quicStreamPacketConn{
+		incomingPackets: packets,
+	}
+
+	packets.PushBack(&Packet{
+		PKT_ID:     7,
+		FRAG_ID:    0,
+		FRAG_TOTAL: 2,
+		DATA:       []byte("hello "),
+		ADDR:       &Address{TYPE: AtypIPv4, ADDR: []byte{127, 0, 0, 1}, PORT: 53},
+	})
+	packets.PushBack(&Packet{
+		PKT_ID:     7,
+		FRAG_ID:    0,
+		FRAG_TOTAL: 3,
+		DATA:       []byte("golang "),
+		ADDR:       &Address{TYPE: AtypIPv4, ADDR: []byte{127, 0, 0, 2}, PORT: 54},
+	})
+	packets.PushBack(&Packet{
+		PKT_ID:     7,
+		FRAG_ID:    1,
+		FRAG_TOTAL: 3,
+		DATA:       []byte("still "),
+		ADDR:       &Address{TYPE: AtypNone},
+	})
+	packets.PushBack(&Packet{
+		PKT_ID:     7,
+		FRAG_ID:    1,
+		FRAG_TOTAL: 2,
+		DATA:       []byte("world"),
+		ADDR:       &Address{TYPE: AtypNone},
+	})
+	packets.PushBack(&Packet{
+		PKT_ID:     7,
+		FRAG_ID:    2,
+		FRAG_TOTAL: 3,
+		DATA:       []byte("rocks"),
+		ADDR:       &Address{TYPE: AtypNone},
+	})
+
+	buf := make([]byte, 64)
+	n, addr, err := q.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("first ReadFrom returned error: %v", err)
+	}
+	if got := string(buf[:n]); got != "hello world" {
+		t.Fatalf("first assembled payload = %q, want %q", got, "hello world")
+	}
+	if addr != netip.MustParseAddrPort("127.0.0.1:53") {
+		t.Fatalf("first assembled addr = %v, want 127.0.0.1:53", addr)
+	}
+
+	n, addr, err = q.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("second ReadFrom returned error: %v", err)
+	}
+	if got := string(buf[:n]); got != "golang still rocks" {
+		t.Fatalf("second assembled payload = %q, want %q", got, "golang still rocks")
+	}
+	if addr != netip.MustParseAddrPort("127.0.0.2:54") {
+		t.Fatalf("second assembled addr = %v, want 127.0.0.2:54", addr)
+	}
+
+	if got := countDeFraggers(q); got != 0 {
+		t.Fatalf("deFragger count after both assemblies = %d, want 0", got)
 	}
 }
