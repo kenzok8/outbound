@@ -63,6 +63,14 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 	if err != nil {
 		return nil, err
 	}
+	if actualAddr := remoteAddrOfPacketConn(curConn); actualAddr != nil {
+		if frozenAddrs, frozenCurrentAddr, ok := freezeAddrsForResolvedIP(addr, actualAddr); ok {
+			addrs = frozenAddrs
+			curAddr = frozenCurrentAddr
+		} else {
+			curAddr = actualAddr
+		}
+	}
 	hConn := &udpHopPacketConn{
 		Addr:        addr,
 		Addrs:       addrs,
@@ -95,7 +103,13 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 				// Only pass through timeout errors here, not permanent errors
 				// like connection closed. Connection close is normal as we close
 				// the old connection to exit this loop every time we hop.
-				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
+				select {
+				case u.recvQueue <- &udpPacket{nil, 0, nil, netErr}:
+				case <-u.closeChan:
+				default:
+					// If the consumer is already backlogged, dropping the timeout
+					// notification is better than pinning this goroutine forever.
+				}
 			}
 			return
 		}
@@ -134,6 +148,9 @@ func (u *udpHopPacketConn) hop() {
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return
+	}
+	if actualAddr := remoteAddrOfPacketConn(newConn); actualAddr != nil {
+		newAddr = actualAddr
 	}
 	// We need to keep receiving packets from the previous connection,
 	// because otherwise there will be packet loss due to the time gap
@@ -301,4 +318,41 @@ func trySetWriteBuffer(pc net.PacketConn, bytes int) error {
 		return sc.SetWriteBuffer(bytes)
 	}
 	return nil
+}
+
+func remoteAddrOfPacketConn(conn net.PacketConn) net.Addr {
+	type remoteAddrConn interface {
+		RemoteAddr() net.Addr
+	}
+	if c, ok := conn.(remoteAddrConn); ok {
+		if addr := c.RemoteAddr(); addr != nil {
+			return addr
+		}
+	}
+	return nil
+}
+
+func freezeAddrsForResolvedIP(addr *UDPHopAddr, actualAddr net.Addr) ([]net.Addr, net.Addr, bool) {
+	if addr == nil || len(addr.Ports) == 0 {
+		return nil, nil, false
+	}
+	udpAddr, ok := actualAddr.(*net.UDPAddr)
+	if !ok || udpAddr == nil || udpAddr.IP == nil {
+		return nil, nil, false
+	}
+	ip := append(net.IP(nil), udpAddr.IP...)
+	addrs := make([]net.Addr, 0, len(addr.Ports))
+	for _, port := range addr.Ports {
+		addrs = append(addrs, &net.UDPAddr{
+			IP:   ip,
+			Port: int(port),
+			Zone: udpAddr.Zone,
+		})
+	}
+	currentAddr := &net.UDPAddr{
+		IP:   append(net.IP(nil), udpAddr.IP...),
+		Port: udpAddr.Port,
+		Zone: udpAddr.Zone,
+	}
+	return addrs, currentAddr, true
 }

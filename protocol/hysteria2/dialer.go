@@ -82,10 +82,14 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					if err != nil {
 						return nil, err
 					}
+					remoteAddr := addr
+					if actualAddr := remoteAddrOf(conn); actualAddr != nil {
+						remoteAddr = actualAddr
+					}
 					return netproxy.NewFakeNetPacketConn(
 						conn.(netproxy.PacketConn),
 						net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-						addr,
+						remoteAddr,
 					), nil
 				}
 				return udphop.NewUDPHopPacketConn(config.ServerAddr.(*udphop.UDPHopAddr), config.UDPHopInterval, dialFunc)
