@@ -5,10 +5,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -103,15 +101,19 @@ func (nopConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (nopConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 type trackingPacketConn struct {
-	readFromCalls int
-	readErr       error
+	readFromCalls        int
+	setReadDeadlineCalls int
+	readErr              error
 }
 
-func (c *trackingPacketConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
-func (c *trackingPacketConn) Write(p []byte) (int, error)        { return len(p), nil }
-func (c *trackingPacketConn) Close() error                       { return nil }
-func (c *trackingPacketConn) SetDeadline(_ time.Time) error      { return nil }
-func (c *trackingPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *trackingPacketConn) Read(_ []byte) (int, error)    { return 0, io.EOF }
+func (c *trackingPacketConn) Write(p []byte) (int, error)   { return len(p), nil }
+func (c *trackingPacketConn) Close() error                  { return nil }
+func (c *trackingPacketConn) SetDeadline(_ time.Time) error { return nil }
+func (c *trackingPacketConn) SetReadDeadline(_ time.Time) error {
+	c.setReadDeadlineCalls++
+	return nil
+}
 func (c *trackingPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
 func (c *trackingPacketConn) ReadFrom(_ []byte) (int, netip.AddrPort, error) {
 	c.readFromCalls++
@@ -187,7 +189,7 @@ func TestStickyIpDialerDoesNotTreatDifferentFixedPortAsProxyAddress(t *testing.T
 	}
 }
 
-func TestStickyIpDialerProbesResolvedUDPProxyConnBeforeCaching(t *testing.T) {
+func TestStickyIpDialerDoesNotProbeResolvedUDPProxyConnBeforeCaching(t *testing.T) {
 	packetConn := &trackingPacketConn{readErr: timeoutErr{}}
 	parent := &recordingLookupDialer{
 		lookupResult: []net.IPAddr{{IP: net.ParseIP("198.51.100.20")}},
@@ -202,20 +204,17 @@ func TestStickyIpDialerProbesResolvedUDPProxyConnBeforeCaching(t *testing.T) {
 	if conn == nil {
 		t.Fatal("DialContext() returned nil conn")
 	}
-	if packetConn.readFromCalls != 1 {
-		t.Fatalf("ReadFrom() calls = %d, want 1", packetConn.readFromCalls)
+	if packetConn.readFromCalls != 0 {
+		t.Fatalf("ReadFrom() calls = %d, want 0", packetConn.readFromCalls)
+	}
+	if packetConn.setReadDeadlineCalls != 0 {
+		t.Fatalf("SetReadDeadline() calls = %d, want 0", packetConn.setReadDeadlineCalls)
 	}
 }
 
-func TestStickyIpDialerSkipsRefusedUDPProxyIPAndUsesNextResolvedAddress(t *testing.T) {
-	badConn := &trackingPacketConn{
-		readErr: &net.OpError{
-			Op:  "read",
-			Net: "udp",
-			Err: &os.SyscallError{Syscall: "recvmsg", Err: syscall.ECONNREFUSED},
-		},
-	}
-	goodConn := &trackingPacketConn{readErr: timeoutErr{}}
+func TestStickyIpDialerUsesCachedUDPProxyAddrWithoutReadProbe(t *testing.T) {
+	firstConn := &trackingPacketConn{readErr: timeoutErr{}}
+	secondConn := &trackingPacketConn{readErr: timeoutErr{}}
 	parent := &recordingLookupDialer{
 		lookupResult: []net.IPAddr{
 			{IP: net.ParseIP("198.51.100.10")},
@@ -224,11 +223,9 @@ func TestStickyIpDialerSkipsRefusedUDPProxyIPAndUsesNextResolvedAddress(t *testi
 		dialFunc: func(_ string, addr string) (netproxy.Conn, error) {
 			switch addr {
 			case "198.51.100.10:443":
-				return badConn, nil
-			case "198.51.100.20:443":
-				return goodConn, nil
+				return firstConn, nil
 			default:
-				return nil, io.EOF
+				return secondConn, nil
 			}
 		},
 	}
@@ -238,26 +235,42 @@ func TestStickyIpDialerSkipsRefusedUDPProxyIPAndUsesNextResolvedAddress(t *testi
 	if err != nil {
 		t.Fatalf("DialContext() error = %v", err)
 	}
-	if conn != goodConn {
-		t.Fatal("DialContext() did not return the verified good UDP conn")
+	if conn != firstConn {
+		t.Fatal("DialContext() did not return the first successfully dialed UDP conn")
+	}
+	conn, err = dialer.DialContext(context.Background(), "udp", "proxy.example:443")
+	if err != nil {
+		t.Fatalf("second DialContext() error = %v", err)
+	}
+	if conn != firstConn {
+		t.Fatal("second DialContext() did not use the cached UDP proxy addr")
 	}
 
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
+	if parent.lookupCalls != 1 {
+		t.Fatalf("LookupIPAddr() calls = %d, want 1", parent.lookupCalls)
+	}
 	if len(parent.dialCalls) != 2 {
 		t.Fatalf("DialContext() calls = %d, want 2", len(parent.dialCalls))
 	}
 	if got, want := parent.dialCalls[0][1], "198.51.100.10:443"; got != want {
 		t.Fatalf("first dial addr = %q, want %q", got, want)
 	}
-	if got, want := parent.dialCalls[1][1], "198.51.100.20:443"; got != want {
+	if got, want := parent.dialCalls[1][1], "198.51.100.10:443"; got != want {
 		t.Fatalf("second dial addr = %q, want %q", got, want)
 	}
-	if badConn.readFromCalls != 1 {
-		t.Fatalf("bad conn ReadFrom() calls = %d, want 1", badConn.readFromCalls)
+	if firstConn.readFromCalls != 0 {
+		t.Fatalf("first conn ReadFrom() calls = %d, want 0", firstConn.readFromCalls)
 	}
-	if goodConn.readFromCalls != 1 {
-		t.Fatalf("good conn ReadFrom() calls = %d, want 1", goodConn.readFromCalls)
+	if firstConn.setReadDeadlineCalls != 0 {
+		t.Fatalf("first conn SetReadDeadline() calls = %d, want 0", firstConn.setReadDeadlineCalls)
+	}
+	if secondConn.readFromCalls != 0 {
+		t.Fatalf("second conn ReadFrom() calls = %d, want 0", secondConn.readFromCalls)
+	}
+	if secondConn.setReadDeadlineCalls != 0 {
+		t.Fatalf("second conn SetReadDeadline() calls = %d, want 0", secondConn.setReadDeadlineCalls)
 	}
 }
 

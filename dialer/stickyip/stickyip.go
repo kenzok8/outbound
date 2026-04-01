@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -345,9 +344,12 @@ func (d *StickyIpDialer) GetCachedProxyAddrWithIpVersion(network, ipVersion stri
 
 // DialContext implements sticky IP caching by intercepting dial calls.
 // It resolves all IPs for the target, tries the cached IP first, then falls back.
-// For UDP, it probes candidate proxy IPs before returning them so a domain that
-// resolves to multiple proxy IPs does not cache a path that already failed with
-// an immediate local read error.
+//
+// UDP connections are validated only by successful dial completion and PacketConn
+// support. stickyip must not read from the returned business UDP connection:
+// many proxy protocols manage application-visible session state on that conn, so
+// speculative SetReadDeadline/ReadFrom probes can consume packets or terminate
+// a flow before dae attaches its own read loop.
 func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
 	// Extract the base network type (tcp/udp) and requested IP family from magic network if present.
 	baseNetwork, requestedIPVersion := d.getNetworkPreference(network)
@@ -376,14 +378,10 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			conn, err := d.dialer.DialContext(ctx, network, targetAddr)
 			if err == nil {
 				if baseNetwork == "udp" {
-					packetConn, ok := conn.(netproxy.PacketConn)
+					_, ok := conn.(netproxy.PacketConn)
 					if !ok {
 						_ = conn.Close()
 						logCacheFailure(d.proxyAddr, targetAddr, network, fmt.Errorf("not a packet connection"))
-						d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
-					} else if !d.verifyUDPConnectivity(packetConn) {
-						_ = conn.Close()
-						logCacheFailure(d.proxyAddr, targetAddr, network, fmt.Errorf("UDP verification failed"))
 						d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
 					} else {
 						logCacheHit(d.proxyAddr, targetAddr, network)
@@ -417,50 +415,6 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 		"network":    network,
 	}).Trace("[StickyIP] Pass-through (not proxy address)")
 	return d.dialer.DialContext(ctx, network, addr)
-}
-
-func (d *StickyIpDialer) verifyUDPConnectivity(conn netproxy.PacketConn) bool {
-	if conn == nil {
-		return false
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	defer func() {
-		_ = conn.SetReadDeadline(time.Time{})
-	}()
-
-	var buf [1]byte
-	_, _, err := conn.ReadFrom(buf[:])
-	if err == nil {
-		return true
-	}
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		return true
-	}
-	if isImmediateUDPFailure(err) {
-		logger.WithField("error", err).Debug("[StickyIP] UDP proxy candidate failed verification")
-		return false
-	}
-	logger.WithField("error", err).Trace("[StickyIP] UDP verification read error is inconclusive")
-	return true
-}
-
-func isImmediateUDPFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		return false
-	}
-	if stderrors.Is(err, syscall.ECONNREFUSED) ||
-		stderrors.Is(err, syscall.EHOSTUNREACH) ||
-		stderrors.Is(err, syscall.ENETUNREACH) {
-		return true
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "port unreachable") ||
-		strings.Contains(errStr, "host unreachable") ||
-		strings.Contains(errStr, "network is unreachable")
 }
 
 // getNetworkPreference extracts the base network type (tcp/udp) and requested IP family from magic network.
@@ -566,16 +520,10 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 		conn, err := d.dialer.DialContext(ctx, network, targetAddr)
 		if err == nil {
 			if baseNetwork == "udp" {
-				packetConn, ok := conn.(netproxy.PacketConn)
+				_, ok := conn.(netproxy.PacketConn)
 				if !ok {
 					_ = conn.Close()
 					lastErr = fmt.Errorf("not a packet connection")
-					logIPFailure(d.proxyAddr, targetAddr, lastErr)
-					continue
-				}
-				if !d.verifyUDPConnectivity(packetConn) {
-					_ = conn.Close()
-					lastErr = fmt.Errorf("UDP connection verification failed")
 					logIPFailure(d.proxyAddr, targetAddr, lastErr)
 					continue
 				}
