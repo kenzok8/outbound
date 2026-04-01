@@ -2,6 +2,8 @@ package tuic
 
 import (
 	"net/netip"
+	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/olicesx/quic-go"
@@ -43,12 +45,35 @@ func fragWriteNative(quicConn quic.Connection, packet *Packet, buf *bytes.Buffer
 }
 
 type deFragger struct {
-	pkgID uint16
-	frags []*Packet
-	count uint8
+	pkgID          uint16
+	frags          []*Packet
+	count          uint8
+	lastUpdateNano atomic.Int64
 }
 
-func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, assembled bool) {
+func newDeFragger(nowNano int64) *deFragger {
+	d := &deFragger{}
+	d.touch(nowNano)
+	return d
+}
+
+func (d *deFragger) touch(nowNano int64) {
+	if nowNano == 0 {
+		nowNano = time.Now().UnixNano()
+	}
+	d.lastUpdateNano.Store(nowNano)
+}
+
+func (d *deFragger) IsExpired(nowNano int64, ttl time.Duration) bool {
+	if ttl <= 0 {
+		return false
+	}
+	lastUpdateNano := d.lastUpdateNano.Load()
+	return lastUpdateNano > 0 && nowNano-lastUpdateNano >= ttl.Nanoseconds()
+}
+
+func (d *deFragger) Feed(m *Packet, p []byte, nowNano int64) (n int, addrPort netip.AddrPort, assembled bool) {
+	d.touch(nowNano)
 	if m.FRAG_TOTAL <= 1 {
 		return copy(p, m.DATA), m.ADDR.UDPAddr().AddrPort(), true
 	}

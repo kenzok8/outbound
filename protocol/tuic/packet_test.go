@@ -3,10 +3,20 @@ package tuic
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 )
+
+func countDeFraggers(q *quicStreamPacketConn) int {
+	count := 0
+	q.deFraggers.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
+}
 
 func TestReadFromNoDeadlock(t *testing.T) {
 	packets := NewPackets()
@@ -184,5 +194,116 @@ func TestPacketsPushBackAfterCloseIsIgnored(t *testing.T) {
 
 	if got := p.list.Len(); got != 0 {
 		t.Fatalf("closed packet queue length = %d, want 0", got)
+	}
+}
+
+func TestQuicStreamPacketConnPrunesExpiredDeFraggers(t *testing.T) {
+	oldIdleTimeout := deFraggerIdleTimeout
+	oldCleanupInterval := deFraggerCleanupInterval
+	deFraggerIdleTimeout = 10 * time.Millisecond
+	deFraggerCleanupInterval = 0
+	t.Cleanup(func() {
+		deFraggerIdleTimeout = oldIdleTimeout
+		deFraggerCleanupInterval = oldCleanupInterval
+	})
+
+	q := &quicStreamPacketConn{}
+	nowNano := time.Now().UnixNano()
+	q.deFraggers.Store(uint16(1), newDeFragger(nowNano-int64(2*deFraggerIdleTimeout)))
+	q.deFraggers.Store(uint16(2), newDeFragger(nowNano))
+
+	q.maybeCleanupDeFraggers(nowNano)
+
+	if got := countDeFraggers(q); got != 1 {
+		t.Fatalf("deFragger count after cleanup = %d, want 1", got)
+	}
+	if _, ok := q.deFraggers.Load(uint16(1)); ok {
+		t.Fatal("expected stale deFragger to be removed")
+	}
+	if _, ok := q.deFraggers.Load(uint16(2)); !ok {
+		t.Fatal("expected fresh deFragger to remain")
+	}
+}
+
+func TestQuicStreamPacketConnCloseClearsIncompleteDeFraggers(t *testing.T) {
+	packets := NewPackets()
+	q := &quicStreamPacketConn{
+		incomingPackets: packets,
+	}
+
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := q.ReadFrom(make([]byte, 1024))
+		readErr <- err
+	}()
+
+	packets.PushBack(&Packet{
+		PKT_ID:     1,
+		FRAG_ID:    0,
+		FRAG_TOTAL: 2,
+		DATA:       []byte("fragment"),
+		ADDR:       &Address{TYPE: AtypIPv4, ADDR: []byte{127, 0, 0, 1}, PORT: 53},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for countDeFraggers(q) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for incomplete deFragger to be created")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	select {
+	case err := <-readErr:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("ReadFrom error = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadFrom did not unblock after Close")
+	}
+
+	if got := countDeFraggers(q); got != 0 {
+		t.Fatalf("deFragger count after Close = %d, want 0", got)
+	}
+}
+
+func TestQuicStreamPacketConnReadFromAssemblesCompleteFragments(t *testing.T) {
+	packets := NewPackets()
+	q := &quicStreamPacketConn{
+		incomingPackets: packets,
+	}
+
+	packets.PushBack(&Packet{
+		PKT_ID:     1,
+		FRAG_ID:    0,
+		FRAG_TOTAL: 2,
+		DATA:       []byte("hello "),
+		ADDR:       &Address{TYPE: AtypIPv4, ADDR: []byte{127, 0, 0, 1}, PORT: 53},
+	})
+	packets.PushBack(&Packet{
+		PKT_ID:     1,
+		FRAG_ID:    1,
+		FRAG_TOTAL: 2,
+		DATA:       []byte("world"),
+		ADDR:       &Address{TYPE: AtypNone},
+	})
+
+	buf := make([]byte, 64)
+	n, addr, err := q.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom returned error: %v", err)
+	}
+	if got := string(buf[:n]); got != "hello world" {
+		t.Fatalf("assembled payload = %q, want %q", got, "hello world")
+	}
+	if addr != netip.MustParseAddrPort("127.0.0.1:53") {
+		t.Fatalf("assembled addr = %v, want 127.0.0.1:53", addr)
+	}
+	if got := countDeFraggers(q); got != 0 {
+		t.Fatalf("deFragger count after successful assembly = %d, want 0", got)
 	}
 }

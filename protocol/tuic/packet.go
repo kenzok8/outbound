@@ -106,9 +106,15 @@ type quicStreamPacketConn struct {
 	// TODO: multiple defraggers for different PKT_ID
 	deFraggers sync.Map
 
+	lastDeFraggerCleanupNano atomic.Int64
+
 	muTimer       sync.Mutex
 	deadlineTimer *time.Timer
 }
+
+var deFraggerIdleTimeout = 30 * time.Second
+
+var deFraggerCleanupInterval = 5 * time.Second
 
 func (q *quicStreamPacketConn) Close() error {
 	q.closeOnce.Do(func() {
@@ -134,6 +140,7 @@ func (q *quicStreamPacketConn) close() (err error) {
 	if incomingPackets != nil {
 		_ = incomingPackets.Close()
 	}
+	q.clearDeFraggers()
 	if incomingPackets != nil && q.quicConn != nil {
 
 		buf := pool.GetBuffer()
@@ -157,6 +164,33 @@ func (q *quicStreamPacketConn) close() (err error) {
 		}
 	}
 	return
+}
+
+func (q *quicStreamPacketConn) clearDeFraggers() {
+	q.deFraggers.Range(func(key, value any) bool {
+		q.deFraggers.Delete(key)
+		return true
+	})
+}
+
+func (q *quicStreamPacketConn) maybeCleanupDeFraggers(nowNano int64) {
+	if deFraggerIdleTimeout <= 0 {
+		return
+	}
+	lastCleanupNano := q.lastDeFraggerCleanupNano.Load()
+	if lastCleanupNano != 0 && nowNano-lastCleanupNano < deFraggerCleanupInterval.Nanoseconds() {
+		return
+	}
+	if !q.lastDeFraggerCleanupNano.CompareAndSwap(lastCleanupNano, nowNano) {
+		return
+	}
+	q.deFraggers.Range(func(key, value any) bool {
+		d := value.(*deFragger)
+		if d.IsExpired(nowNano, deFraggerIdleTimeout) {
+			q.deFraggers.CompareAndDelete(key, d)
+		}
+		return true
+	})
 }
 
 func (q *quicStreamPacketConn) SetDeadline(t time.Time) error {
@@ -201,17 +235,16 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			err = net.ErrClosed
 			return
 		}
-		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
+		nowNano := time.Now().UnixNano()
+		q.maybeCleanupDeFraggers(nowNano)
+		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, newDeFragger(nowNano))
 		d := _d.(*deFragger)
 		var assembled bool
 		// Feed packet into this deFragger.
 		// Return if this PKT_ID is ready and assembled.
-		if n, addr, assembled = d.Feed(packet, p); assembled {
+		if n, addr, assembled = d.Feed(packet, p, nowNano); assembled {
 			q.deFraggers.Delete(packet.PKT_ID)
 			return
-		} else {
-			// FIXME: Timeout to clean deFraggers.
-			_ = packet // keep the branch but do something with the variable
 		}
 	}
 }
