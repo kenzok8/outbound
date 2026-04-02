@@ -59,7 +59,30 @@ type clientImpl struct {
 	m sync.Mutex
 }
 
+// closeExistingLocked closes the old QUIC connection, packet conn, and UDP
+// session manager before establishing a new connection. Must be called with
+// c.m held.
+func (c *clientImpl) closeExistingLocked() {
+	if c.conn != nil {
+		_ = c.conn.CloseWithError(closeErrCodeOK, "reconnecting")
+	}
+	if c.pktConn != nil {
+		_ = c.pktConn.Close()
+	}
+	// udpSM.run() goroutine will exit when the QUIC connection is closed and
+	// ReceiveDatagram returns an error.  Nil-out the pointer so callers see
+	// UDP as disabled until the next connect() succeeds.
+	c.udpSM = nil
+	c.conn = nil
+	c.pktConn = nil
+}
+
 func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
+	// Close old resources before creating new ones to prevent goroutine and
+	// socket leaks (especially important for UDPHopPacketConn which spawns
+	// recvLoop + hopLoop goroutines).
+	c.closeExistingLocked()
+
 	pktConn, err := c.config.ConnFactory.New(ctx)
 	if err != nil {
 		return nil, err
@@ -206,11 +229,15 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 			return nil, err
 		}
 	}
+	// Snapshot the connection BEFORE releasing the lock so that
+	// handleIfConnectionClosed can compare against the exact instance
+	// that was active when this call started.
+	connSnapshot := c.conn
 	c.m.Unlock()
 
 	stream, err := c.openStream()
 	if err != nil {
-		c.handleIfConnectionClosed(err)
+		c.handleIfConnectionClosed(err, connSnapshot)
 		return nil, err
 	}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -221,7 +248,7 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 	err = protocol.WriteTCPRequest(stream, addr)
 	if err != nil {
 		_ = stream.Close()
-		c.handleIfConnectionClosed(err)
+		c.handleIfConnectionClosed(err, connSnapshot)
 		return nil, err
 	}
 	if c.config.FastOpen {
@@ -230,8 +257,8 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 		// to the first Read() call.
 		return &tcpConn{
 			Orig:             stream,
-			PseudoLocalAddr:  c.conn.LocalAddr(),
-			PseudoRemoteAddr: c.conn.RemoteAddr(),
+			PseudoLocalAddr:  connSnapshot.LocalAddr(),
+			PseudoRemoteAddr: connSnapshot.RemoteAddr(),
 			Established:      false,
 		}, nil
 	}
@@ -239,7 +266,7 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 	ok, msg, err := protocol.ReadTCPResponse(stream)
 	if err != nil {
 		_ = stream.Close()
-		c.handleIfConnectionClosed(err)
+		c.handleIfConnectionClosed(err, connSnapshot)
 		return nil, err
 	}
 	if !ok {
@@ -248,8 +275,8 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 	}
 	return &tcpConn{
 		Orig:             stream,
-		PseudoLocalAddr:  c.conn.LocalAddr(),
-		PseudoRemoteAddr: c.conn.RemoteAddr(),
+		PseudoLocalAddr:  connSnapshot.LocalAddr(),
+		PseudoRemoteAddr: connSnapshot.RemoteAddr(),
 		Established:      true,
 	}, nil
 }
@@ -269,13 +296,17 @@ func (c *clientImpl) UDP(addr string, ctx context.Context) (netproxy.Conn, error
 			return nil, err
 		}
 	}
+	// Snapshot the connection BEFORE releasing the lock so that
+	// handleIfConnectionClosed can compare against the exact instance
+	// that was active when this call started.
+	connSnapshot := c.conn
 	c.m.Unlock()
 
 	if c.udpSM == nil {
 		return nil, coreErrs.DialError{Message: "UDP not enabled"}
 	}
 	conn, err := c.udpSM.NewUDP(addr)
-	c.handleIfConnectionClosed(err)
+	c.handleIfConnectionClosed(err, connSnapshot)
 	return conn, err
 }
 
@@ -284,18 +315,29 @@ func (c *clientImpl) UDP(addr string, ctx context.Context) (netproxy.Conn, error
 // and if so, wraps the error with coreErrs.ClosedError.
 // PITFALL: sometimes quic-go has "internal errors" that are not net.Error,
 // but we still need to treat them as ClosedError.
-func (c *clientImpl) handleIfConnectionClosed(err error) {
+func (c *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connection) {
 	if err == nil {
 		return
 	}
+
+	shouldClose := false
 	if _, ok := err.(coreErrs.ClosedError); ok {
-		_ = c.conn.CloseWithError(closeErrCodeProtocolError, "")
-		_ = c.pktConn.Close()
-		return
+		shouldClose = true
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Temporary() { // nolint:staticcheck
+		shouldClose = true
 	}
-	if netErr, ok := err.(net.Error); !ok || !netErr.Temporary() { // nolint:staticcheck
-		_ = c.conn.CloseWithError(closeErrCodeProtocolError, "")
-		_ = c.pktConn.Close()
+
+	if shouldClose {
+		// Hold the mutex to avoid racing with connect() which may have
+		// already replaced c.conn/c.pktConn with new instances.
+		c.m.Lock()
+		defer c.m.Unlock()
+		// Only close if the connection is still the one that errored.
+		// If connect() already ran, c.conn is a new instance and must not
+		// be closed — doing so would kill the fresh QUIC session.
+		if c.conn == originConn {
+			c.closeExistingLocked()
+		}
 	}
 }
 
