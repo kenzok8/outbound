@@ -438,3 +438,13 @@ func (conn *quicStreamPacketConn) Write(b []byte) (n int, err error) {
 }
 
 var _ netproxy.PacketConn = (*quicStreamPacketConn)(nil)
+
+// TransportDone implements netproxy.TransportLifecycle.
+// The returned channel is closed when the QUIC transport backing this
+// UDP session is permanently dead.
+func (q *quicStreamPacketConn) TransportDone() <-chan struct{} {
+	if q.quicConn == nil {
+		return make(chan struct{})
+	}
+	return q.quicConn.Context().Done()
+}

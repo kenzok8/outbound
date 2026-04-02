@@ -75,8 +75,8 @@ func setUTLSPeerCertificates(t *testing.T, conn *utls.Conn, certs []*x509.Certif
 
 func TestRealityPeerCertificatesReturnsStoredCertificates(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
 	certs := []*x509.Certificate{{Raw: []byte{1}}}

@@ -20,7 +20,8 @@ type Conn struct {
 	onceWrite  bool
 	onceRead   sync.Once
 
-	closeDeferFn func()
+	closeDeferFn  func()
+	transportDone <-chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
@@ -119,13 +120,18 @@ func (c *Conn) close() error {
 
 var _ netproxy.Conn = &Conn{}
 
-func NewConn(stream quic.Stream, mdata *trojanc.Metadata, closeDeferFn func()) *Conn {
+func (c *Conn) TransportDone() <-chan struct{} {
+	return c.transportDone
+}
+
+func NewConn(stream quic.Stream, mdata *trojanc.Metadata, closeDeferFn func(), transportDone <-chan struct{}) *Conn {
 	if mdata == nil {
 		mdata = &trojanc.Metadata{}
 	}
 	return &Conn{
-		Stream:       stream,
-		Metadata:     mdata,
-		closeDeferFn: closeDeferFn,
+		Stream:        stream,
+		Metadata:      mdata,
+		closeDeferFn:  closeDeferFn,
+		transportDone: transportDone,
 	}
 }

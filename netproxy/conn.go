@@ -37,6 +37,20 @@ type PacketConn interface {
 	SetWriteDeadline(t time.Time) error
 }
 
+// TransportLifecycle is an optional interface that PacketConn implementations
+// can expose when the logical packet session depends on another underlying
+// transport or control channel whose death may not surface immediately as
+// ReadFrom/WriteTo errors on the PacketConn itself.
+// When the returned channel is closed, the logical session is defunct and the
+// caller should retire it without waiting for a subsequent I/O error.
+// A nil channel means the PacketConn does not provide a separate lifecycle
+// signal beyond normal I/O errors.
+type TransportLifecycle interface {
+	// TransportDone returns a channel that is closed when the underlying
+	// transport or controlling association is permanently closed.
+	TransportDone() <-chan struct{}
+}
+
 type FakeNetConn struct {
 	Conn
 	LAddr net.Addr
@@ -118,6 +132,13 @@ func (conn *fakeNetPacketConn) LocalAddr() net.Addr {
 }
 func (conn *fakeNetPacketConn) RemoteAddr() net.Addr {
 	return conn.RAddr
+}
+func (conn *fakeNetPacketConn) TransportDone() <-chan struct{} {
+	lifecycle, ok := conn.PacketConn.(TransportLifecycle)
+	if !ok {
+		return nil
+	}
+	return lifecycle.TransportDone()
 }
 func (conn *fakeNetPacketConn) SetWriteBuffer(size int) error {
 	c, ok := conn.PacketConn.(interface{ SetWriteBuffer(int) error })

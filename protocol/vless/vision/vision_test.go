@@ -21,8 +21,8 @@ func (w *intrinsicConnWrapper) IntrinsicConn() netproxy.Conn {
 
 func TestNewConnAcceptsTLSConn(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	tlsConn := gotls.Client(client, &gotls.Config{InsecureSkipVerify: true})
 	conn, err := NewConn(&intrinsicConnWrapper{Conn: tlsConn, intrinsic: tlsConn}, make([]byte, 16))
@@ -36,8 +36,8 @@ func TestNewConnAcceptsTLSConn(t *testing.T) {
 
 func TestNewConnAcceptsUTLSConn(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
 	conn, err := NewConn(&intrinsicConnWrapper{Conn: uConn, intrinsic: uConn}, make([]byte, 16))
@@ -51,8 +51,8 @@ func TestNewConnAcceptsUTLSConn(t *testing.T) {
 
 func TestNewConnAcceptsRealityConn(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
 	realityConn := &outboundtls.RealityUConn{UConn: uConn}
@@ -67,8 +67,8 @@ func TestNewConnAcceptsRealityConn(t *testing.T) {
 
 func TestNewConnRejectsUnsupportedIntrinsicConn(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	if _, err := NewConn(client, make([]byte, 16)); err == nil {
 		t.Fatal("expected error for connection without IntrinsicConn")

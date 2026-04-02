@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/daeuniverse/outbound/netproxy"
 
@@ -22,6 +23,9 @@ type PktConn struct {
 	target    string
 	proxyAddr string
 	cancel    context.CancelFunc
+	done      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewPktConn returns a PktConn, the writeAddr must be *net.UDPAddr or *net.UnixAddr.
@@ -33,6 +37,9 @@ func NewPktConn(c netproxy.PacketConn, proxyAddr string, targetAddr string, ctrl
 		proxyAddr:  proxyAddr,
 		ctrlConn:   ctrlConn,
 		cancel:     cancel,
+	}
+	if ctrlConn != nil {
+		pc.done = make(chan struct{})
 	}
 
 	if ctrlConn != nil {
@@ -49,7 +56,7 @@ func NewPktConn(c netproxy.PacketConn, proxyAddr string, targetAddr string, ctrl
 				if err, ok := err.(net.Error); ok && err.Timeout() {
 					continue
 				}
-				// log.F("[socks5] dialudp udp associate end")
+				_ = pc.Close()
 				return
 			}
 		}()
@@ -121,16 +128,30 @@ func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
 	return 0, err
 }
 
+// TransportDone implements netproxy.TransportLifecycle.
+// The returned channel is closed when the SOCKS5 UDP association control
+// channel terminates and the UDP relay becomes unusable.
+func (pc *PktConn) TransportDone() <-chan struct{} {
+	return pc.done
+}
+
 // Close .
 func (pc *PktConn) Close() error {
-	if pc.cancel != nil {
-		pc.cancel()
-	}
-	if pc.ctrlConn != nil {
-		_ = pc.ctrlConn.Close()
-	}
-
-	return pc.PacketConn.Close()
+	pc.closeOnce.Do(func() {
+		if pc.cancel != nil {
+			pc.cancel()
+		}
+		if pc.done != nil {
+			close(pc.done)
+		}
+		if pc.ctrlConn != nil {
+			_ = pc.ctrlConn.Close()
+		}
+		if pc.PacketConn != nil {
+			pc.closeErr = pc.PacketConn.Close()
+		}
+	})
+	return pc.closeErr
 }
 
 func (c *PktConn) Read(b []byte) (n int, err error) {
@@ -141,3 +162,5 @@ func (c *PktConn) Read(b []byte) (n int, err error) {
 func (c *PktConn) Write(b []byte) (n int, err error) {
 	return c.WriteTo(b, c.target)
 }
+
+var _ netproxy.TransportLifecycle = (*PktConn)(nil)

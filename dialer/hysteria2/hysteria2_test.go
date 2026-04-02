@@ -70,7 +70,7 @@ func TestParseHysteria2URLIncludesCA(t *testing.T) {
 }
 
 func TestLoadCustomRootCAs(t *testing.T) {
-	caPath := writeTestCAPEM(t)
+	caPath, cert := writeTestCAPEM(t)
 
 	pool, err := loadCustomRootCAs(caPath)
 	if err != nil {
@@ -79,8 +79,8 @@ func TestLoadCustomRootCAs(t *testing.T) {
 	if pool == nil {
 		t.Fatal("loadCustomRootCAs() returned nil pool")
 	}
-	if len(pool.Subjects()) != 1 {
-		t.Fatalf("loadCustomRootCAs() subjects = %d, want 1", len(pool.Subjects()))
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+		t.Fatalf("expected returned pool to trust the custom CA: %v", err)
 	}
 }
 
@@ -140,7 +140,7 @@ func TestNoPinSHA256RespectsInsecure(t *testing.T) {
 	}
 }
 
-func writeTestCAPEM(t *testing.T) string {
+func writeTestCAPEM(t *testing.T) (string, *x509.Certificate) {
 	t.Helper()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -161,6 +161,10 @@ func writeTestCAPEM(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("CreateCertificate() error = %v", err)
 	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate() error = %v", err)
+	}
 
 	caPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
@@ -170,5 +174,5 @@ func writeTestCAPEM(t *testing.T) string {
 	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	return caPath
+	return caPath, cert
 }

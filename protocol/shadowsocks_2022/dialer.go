@@ -24,11 +24,11 @@ type FakeNetPacketConn struct {
 }
 
 func (c *FakeNetPacketConn) Write(p []byte) (int, error) {
-	return c.PacketConn.WriteTo(p, c.Addr)
+	return c.WriteTo(p, c.Addr)
 }
 
 func (c *FakeNetPacketConn) Read(p []byte) (int, error) {
-	n, _, err := c.PacketConn.ReadFrom(p)
+	n, _, err := c.ReadFrom(p)
 	return n, err
 }
 

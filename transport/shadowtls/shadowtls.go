@@ -181,19 +181,19 @@ func (s *ShadowTLS) DialContext(ctx context.Context, network string, addr string
 
 	tlsHandshakeFunc, err := newShadowTLSHandshakeFunc(s.version, s.password, tlsConfig, s.tlsImpl, s.utlsImitate)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 
 	// Create shadow-tls client
 	host, portStr, err := net.SplitHostPort(s.addr)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("invalid shadow-tls server address %q: %w", s.addr, err)
 	}
 	portValue, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("invalid shadow-tls server port %q: %w", portStr, err)
 	}
 	client, err := shadowtls.NewClient(shadowtls.ClientConfig{
@@ -204,14 +204,14 @@ func (s *ShadowTLS) DialContext(ctx context.Context, network string, addr string
 		Logger:       logger.NOP(),
 	})
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("shadow-tls NewClient: %w", err)
 	}
 
 	// Use DialContextConn since we already have the TCP connection
 	shadowConn, err := client.DialContextConn(ctx, netConn)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("shadow-tls handshake: %w", err)
 	}
 

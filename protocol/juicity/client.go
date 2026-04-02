@@ -101,7 +101,19 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	}
 	quicConn, err := transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
 	if err != nil {
-		_ = t.Close()
+		select {
+		case <-t.Ctx.Done():
+		default:
+			t.Cancel()
+		}
+		if t.detachCallback != nil {
+			go t.detachCallback()
+			t.detachCallback = nil
+		}
+		_ = transport.Close()
+		if transport.Conn != nil {
+			_ = transport.Conn.Close()
+		}
 		return nil, err
 	}
 
@@ -212,6 +224,7 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 		quicStream,
 		metadata,
 		nil,
+		quicConn.Context().Done(),
 	)
 	return stream, nil
 }

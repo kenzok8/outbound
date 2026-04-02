@@ -35,10 +35,26 @@ type udpConn struct {
 	CloseFunc func()
 	Closed    bool
 
+	// transportDone is closed when the underlying QUIC transport connection
+	// is permanently closed.  Allows upstream consumers (e.g. dae UdpEndpoint)
+	// to detect transport death without waiting for ReadFrom/WriteTo errors.
+	transportDone <-chan struct{}
+
 	writeMu sync.Mutex
 	muTimer sync.Mutex
 	timer   *time.Timer
 	target  string
+}
+
+// TransportDone implements netproxy.TransportLifecycle.
+// The returned channel is closed when the QUIC transport backing this
+// UDP session is permanently dead.
+func (u *udpConn) TransportDone() <-chan struct{} {
+	if u.transportDone == nil {
+		// Return a never-closed channel for safety.
+		return make(chan struct{})
+	}
+	return u.transportDone
 }
 
 func (u *udpConn) Read(b []byte) (n int, err error) {
@@ -141,6 +157,7 @@ type udpSessionManager struct {
 	nextID uint32
 
 	closed bool
+	done   chan struct{}
 }
 
 func newUDPSessionManager(io udpIO) *udpSessionManager {
@@ -148,6 +165,7 @@ func newUDPSessionManager(io udpIO) *udpSessionManager {
 		io:     io,
 		m:      make(map[uint32]*udpConn),
 		nextID: 1,
+		done:   make(chan struct{}),
 	}
 	go func() { _ = m.run() }()
 	return m
@@ -172,6 +190,7 @@ func (m *udpSessionManager) closeCleanup() {
 		m.close(conn)
 	}
 	m.closed = true
+	close(m.done)
 }
 
 func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
@@ -205,11 +224,12 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 	m.nextID++
 
 	conn := &udpConn{
-		ID:        id,
-		D:         &frag.Defragger{},
-		ReceiveCh: make(chan *protocol.UDPMessage, udpMessageChanSize),
-		SendBuf:   make([]byte, protocol.MaxUDPSize),
-		SendFunc:  m.io.SendMessage,
+		ID:            id,
+		D:             &frag.Defragger{},
+		ReceiveCh:     make(chan *protocol.UDPMessage, udpMessageChanSize),
+		SendBuf:       make([]byte, protocol.MaxUDPSize),
+		SendFunc:      m.io.SendMessage,
+		transportDone: m.done,
 
 		writeMu: sync.Mutex{},
 		muTimer: sync.Mutex{},

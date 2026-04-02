@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/trojanc"
@@ -79,6 +80,15 @@ func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 func (c *PacketConn) Close() error {
 	return c.Conn.Close()
 }
+
+func (c *PacketConn) TransportDone() <-chan struct{} {
+	if c.Conn == nil {
+		return nil
+	}
+	return c.Conn.TransportDone()
+}
+
+var _ netproxy.TransportLifecycle = (*PacketConn)(nil)
 
 func SealUDP(metadata trojanc.Metadata, dst []byte, data []byte) []byte {
 	n := metadata.Len()

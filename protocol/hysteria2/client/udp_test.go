@@ -9,6 +9,11 @@ import (
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
+type noopUDPTestIO struct{}
+
+func (noopUDPTestIO) ReceiveMessage() (*protocol.UDPMessage, error)  { return nil, nil }
+func (noopUDPTestIO) SendMessage([]byte, *protocol.UDPMessage) error { return nil }
+
 func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 	t.Helper()
 
@@ -75,5 +80,34 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("unexpected SendFunc call count: got %d want 2", got)
+	}
+}
+
+func TestUDPSessionManagerTransportDoneClosesWithManager(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+
+	connRaw, err := m.NewUDP("127.0.0.1:53")
+	if err != nil {
+		t.Fatalf("NewUDP returned error: %v", err)
+	}
+	conn, ok := connRaw.(*udpConn)
+	if !ok {
+		t.Fatalf("unexpected conn type: %T", connRaw)
+	}
+	if got := conn.TransportDone(); got != m.done {
+		t.Fatal("expected UDP session to expose manager transport done channel")
+	}
+
+	m.closeCleanup()
+
+	select {
+	case <-conn.TransportDone():
+	case <-time.After(time.Second):
+		t.Fatal("expected manager cleanup to close transport done channel")
 	}
 }
