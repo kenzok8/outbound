@@ -123,8 +123,11 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 // |   Data Length (2B)     |      Payload          |
 // +------------------------+------------------------+
 func (pc *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
+	pc.muWrite.Lock()
+	defer pc.muWrite.Unlock()
+
 	dataLen := len(p)
-	prefix, err := pc.prefixPacket(addr)
+	prefix, err := pc.prefixPacketLocked(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -136,7 +139,7 @@ func (pc *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 	return len(p), nil
 }
 
-func (pc *PacketConn) prefixPacket(addr string) (pool.PB, error) {
+func (pc *PacketConn) prefixPacketLocked(addr string) (pool.PB, error) {
 	address, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return nil, err
