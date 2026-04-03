@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"sync"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -46,7 +45,6 @@ type UdpConn struct {
 	sg         SaltGenerator
 
 	tgtAddr string
-	writeMu sync.Mutex
 }
 
 func NewUdpConn(conn netproxy.PacketConn, proxyAddress string, metadata protocol.Metadata, masterKey []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
@@ -90,9 +88,6 @@ func (c *UdpConn) Write(b []byte) (n int, err error) {
 // IPv6 (1 + 16 + 2) = 19 bytes is the maximum.
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	
 	metadata := Metadata{
 		Metadata: c.metadata,
 	}

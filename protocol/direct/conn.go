@@ -21,7 +21,6 @@ type directPacketConn struct {
 	cacheMu       sync.Mutex // protects cacheErr
 	cacheErr      error
 	resolver      *net.Resolver
-	writeMu       sync.Mutex // serializes all write operations
 }
 
 func (c *directPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
@@ -38,8 +37,7 @@ func (c *directPacketConn) WriteTo(b []byte, addr string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+
 	return c.UDPConn.WriteTo(b, uAddr)
 }
 
@@ -48,8 +46,7 @@ func (c *directPacketConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oob
 		n, err = c.Write(b)
 		return n, 0, err
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+
 	return c.UDPConn.WriteMsgUDP(b, oob, addr)
 }
 
@@ -57,8 +54,7 @@ func (c *directPacketConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) 
 	if !c.FullCone {
 		return c.Write(b)
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+
 	return c.UDPConn.WriteToUDP(b, addr)
 }
 
@@ -87,9 +83,6 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 	if !c.FullCone {
 		return c.UDPConn.Write(b)
 	}
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 
 	// Lazy target resolution with thread-safe initialization.
 	// Thread-safety guarantees:
