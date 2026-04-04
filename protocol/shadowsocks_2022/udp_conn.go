@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -54,7 +55,10 @@ type UdpConn struct {
 	replayCount  atomic.Int64
 
 	cleanupCounter atomic.Int64
+	targetCache    common.LastStringValue[socks5.AddressInfo]
 }
+
+var parseAddressInfo = socks5.AddressFromString
 
 const (
 	udpPacketReplayWindowSize = 1024
@@ -279,11 +283,11 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	var separateHeaderEncrypted [16]byte
 	c.BlockCipherEncrypt().Encrypt(separateHeaderEncrypted[:], separateHeader[:])
 
-	addrInfo, err := socks5.AddressFromString(addr)
+	addrInfo, err := c.targetAddrInfo(addr)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to parse target address")
 	}
-	addrLen, err := addrInfoEncodedLen(addrInfo)
+	addrLen, err := addrInfoEncodedLen(&addrInfo)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to calculate address length")
 	}
@@ -306,7 +310,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	message[0] = HeaderTypeClientStream
 	binary.BigEndian.PutUint64(message[1:9], uint64(time.Now().Unix()))
 	binary.BigEndian.PutUint16(message[9:11], 0)
-	addrWritten, err := writeAddrInfoTo(message[11:], addrInfo)
+	addrWritten, err := writeAddrInfoTo(message[11:], &addrInfo)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to encode request address")
 	}
@@ -329,11 +333,11 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 
 	packetID := c.nextPacketID()
 
-	addrInfo, err := socks5.AddressFromString(addr)
+	addrInfo, err := c.targetAddrInfo(addr)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to parse target address")
 	}
-	addrLen, err := addrInfoEncodedLen(addrInfo)
+	addrLen, err := addrInfoEncodedLen(&addrInfo)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to calculate address length")
 	}
@@ -360,7 +364,7 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 	binary.BigEndian.PutUint64(message[17:25], uint64(time.Now().Unix()))
 	binary.BigEndian.PutUint16(message[25:27], 0)
 
-	addrWritten, err := writeAddrInfoTo(message[27:], addrInfo)
+	addrWritten, err := writeAddrInfoTo(message[27:], &addrInfo)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to encode request address")
 	}
@@ -386,6 +390,18 @@ func (c *UdpConn) writeToChacha(b []byte, addr string) (int, error) {
 	}
 	_, err = c.Write(packet)
 	return len(b), err
+}
+
+func (c *UdpConn) targetAddrInfo(addr string) (socks5.AddressInfo, error) {
+	if cached, ok := c.targetCache.Load(addr); ok {
+		return cached, nil
+	}
+	addrInfo, err := parseAddressInfo(addr)
+	if err != nil {
+		return socks5.AddressInfo{}, err
+	}
+	c.targetCache.Store(addr, *addrInfo)
+	return *addrInfo, nil
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {

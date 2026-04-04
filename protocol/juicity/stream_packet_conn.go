@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -18,7 +19,10 @@ import (
 type PacketConn struct {
 	*Conn
 	domainIpMapping sync.Map
+	writeTarget     common.LastStringValue[protocol.Metadata]
 }
+
+var parseMetadata = protocol.ParseMetadata
 
 func (c *PacketConn) Write(b []byte) (int, error) {
 	return c.WriteTo(b, net.JoinHostPort(c.Metadata.Hostname, strconv.Itoa(int(c.Metadata.Port))))
@@ -59,7 +63,7 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort, err err
 }
 
 func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
-	_metadata, err := protocol.ParseMetadata(addr)
+	_metadata, err := c.metadataForAddr(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -75,6 +79,18 @@ func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+func (c *PacketConn) metadataForAddr(addr string) (protocol.Metadata, error) {
+	if cached, ok := c.writeTarget.Load(addr); ok {
+		return cached, nil
+	}
+	mdata, err := parseMetadata(addr)
+	if err != nil {
+		return protocol.Metadata{}, err
+	}
+	c.writeTarget.Store(addr, mdata)
+	return mdata, nil
 }
 
 func (c *PacketConn) Close() error {

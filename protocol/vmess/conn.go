@@ -36,6 +36,7 @@ type Conn struct {
 	dialTgt         string
 	dialTgtAddrPort netip.AddrPort // lazy resolve
 	dialTgtMu       sync.Mutex
+	writeCache      common.LastStringValue[netip.AddrPort]
 
 	NewAEAD func(key []byte) (cipher.AEAD, error)
 

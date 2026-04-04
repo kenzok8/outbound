@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	outboundcommon "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
@@ -88,6 +89,7 @@ type quicStreamPacketConn struct {
 	mu sync.Mutex
 
 	target string
+	addr   outboundcommon.LastStringValue[protocol.Metadata]
 
 	connId          uint16
 	quicConn        quic.Connection
@@ -114,6 +116,8 @@ type quicStreamPacketConn struct {
 var deFraggerIdleTimeout = 30 * time.Second
 
 var deFraggerCleanupInterval = 5 * time.Second
+
+var parseMetadata = protocol.ParseMetadata
 
 type deFraggerBucket struct {
 	mu         sync.Mutex
@@ -374,7 +378,7 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 	}
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
-	mdata, err := protocol.ParseMetadata(addr)
+	mdata, err := q.metadataForAddr(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -422,6 +426,18 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 	n = len(p)
 
 	return
+}
+
+func (q *quicStreamPacketConn) metadataForAddr(addr string) (protocol.Metadata, error) {
+	if cached, ok := q.addr.Load(addr); ok {
+		return cached, nil
+	}
+	mdata, err := parseMetadata(addr)
+	if err != nil {
+		return protocol.Metadata{}, err
+	}
+	q.addr.Store(addr, mdata)
+	return mdata, nil
 }
 
 func (q *quicStreamPacketConn) LocalAddr() net.Addr {

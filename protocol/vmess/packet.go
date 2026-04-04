@@ -37,7 +37,7 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
 		// VMess packet addr does not support domain.
-		address, err := net.ResolveUDPAddr("udp", addr)
+		address, err := c.writeTargetAddrPort(addr)
 		if err != nil {
 			return 0, err
 		}
@@ -54,4 +54,24 @@ func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {
 	}
 
 	return c.write(p)
+}
+
+func (c *Conn) writeTargetAddrPort(addr string) (*net.UDPAddr, error) {
+	if addr == c.dialTgt {
+		target, err := c.dialTargetAddrPort()
+		if err != nil {
+			return nil, err
+		}
+		return net.UDPAddrFromAddrPort(target), nil
+	}
+	if cached, ok := c.writeCache.Load(addr); ok {
+		return net.UDPAddrFromAddrPort(cached), nil
+	}
+	target, err := resolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	addrPort := target.AddrPort()
+	c.writeCache.Store(addr, addrPort)
+	return target, nil
 }

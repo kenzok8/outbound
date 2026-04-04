@@ -5,6 +5,7 @@ import (
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
@@ -16,7 +17,10 @@ type UdpConn struct {
 	cipher      *ciphers.StreamCipher
 	defaultAddr socks.Addr
 	proxyAddr   string
+	targetAddr  common.LastStringValue[socks.Addr]
 }
+
+var parseSocksAddr = socks.ParseAddr
 
 func NewUdpConn(c netproxy.PacketConn, cipher *ciphers.StreamCipher, defaultAddr socks.Addr, proxyAddr string) *UdpConn {
 	return &UdpConn{
@@ -80,11 +84,24 @@ func (c *UdpConn) writeTo(p []byte, addr socks.Addr) (n int, err error) {
 }
 
 func (c *UdpConn) WriteTo(p []byte, to string) (n int, err error) {
-	addr, err := socks.ParseAddr(to)
+	addr, err := c.cachedTargetAddr(to)
 	if err != nil {
 		return 0, err
 	}
 	return c.writeTo(p, addr)
+}
+
+func (c *UdpConn) cachedTargetAddr(addr string) (socks.Addr, error) {
+	if cached, ok := c.targetAddr.Load(addr); ok {
+		return cached, nil
+	}
+	target, err := parseSocksAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	target = append(socks.Addr(nil), target...)
+	c.targetAddr.Store(addr, target)
+	return target, nil
 }
 
 func (c *UdpConn) Write(b []byte) (n int, err error) {

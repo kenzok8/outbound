@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"sync"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -26,7 +27,10 @@ type PktConn struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	closeErr  error
+	addrCache common.LastStringValue[socks.Addr]
 }
+
+var parseSocksAddr = socks.ParseAddr
 
 // NewPktConn returns a PktConn, the writeAddr must be *net.UDPAddr or *net.UnixAddr.
 func NewPktConn(c netproxy.PacketConn, proxyAddr string, targetAddr string, ctrlConn netproxy.Conn) *PktConn {
@@ -106,7 +110,7 @@ func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, erro
 
 // WriteTo overrides the original function from transport.PacketConn.
 func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
-	target, err := socks.ParseAddr(addr)
+	target, err := pc.targetAddr(addr)
 
 	if err != nil {
 		return 0, fmt.Errorf("invalid addr: %w", err)
@@ -126,6 +130,19 @@ func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
 	}
 
 	return 0, err
+}
+
+func (pc *PktConn) targetAddr(addr string) (socks.Addr, error) {
+	if cached, ok := pc.addrCache.Load(addr); ok {
+		return cached, nil
+	}
+	target, err := parseSocksAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	target = append(socks.Addr(nil), target...)
+	pc.addrCache.Store(addr, target)
+	return target, nil
 }
 
 // TransportDone implements netproxy.TransportLifecycle.

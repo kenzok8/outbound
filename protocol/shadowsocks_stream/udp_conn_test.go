@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,5 +104,37 @@ func TestUdpConnConcurrentWriteTo(t *testing.T) {
 		if !seen[target] {
 			t.Fatalf("missing target write for %s", target)
 		}
+	}
+}
+
+func TestUdpConnWriteToCachesLastTarget(t *testing.T) {
+	recorder := &recordingPacketConn{}
+	cipher, err := ciphers.NewStreamCipher("none", "password")
+	if err != nil {
+		t.Fatalf("NewStreamCipher failed: %v", err)
+	}
+	defaultAddr, err := socks.ParseAddr("1.1.1.1:53")
+	if err != nil {
+		t.Fatalf("ParseAddr default target failed: %v", err)
+	}
+
+	conn := NewUdpConn(recorder, cipher, defaultAddr, "127.0.0.1:8388")
+
+	oldParse := parseSocksAddr
+	defer func() { parseSocksAddr = oldParse }()
+
+	var calls atomic.Int32
+	parseSocksAddr = func(addr string) (socks.Addr, error) {
+		calls.Add(1)
+		return oldParse(addr)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := conn.WriteTo([]byte("payload"), "8.8.8.8:53"); err != nil {
+			t.Fatalf("WriteTo() error = %v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("ParseAddr() call count = %d, want 1", got)
 	}
 }

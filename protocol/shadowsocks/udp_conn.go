@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -45,7 +46,10 @@ type UdpConn struct {
 	sg         SaltGenerator
 
 	tgtAddr string
+	target  common.LastStringValue[protocol.Metadata]
 }
+
+var parseMetadata = protocol.ParseMetadata
 
 func NewUdpConn(conn netproxy.PacketConn, proxyAddress string, metadata protocol.Metadata, masterKey []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	conf := ciphers.AeadCiphersConf[metadata.Cipher]
@@ -91,7 +95,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	metadata := Metadata{
 		Metadata: c.metadata,
 	}
-	mdata, err := protocol.ParseMetadata(addr)
+	mdata, err := c.metadataForAddr(addr)
 	if err != nil {
 		return 0, err
 	}
@@ -141,6 +145,18 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 		c.bloom.ExistOrAdd(toWrite[:c.cipherConf.SaltLen])
 	}
 	return c.PacketConn.WriteTo(toWrite, c.proxyAddress)
+}
+
+func (c *UdpConn) metadataForAddr(addr string) (protocol.Metadata, error) {
+	if cached, ok := c.target.Load(addr); ok {
+		return cached, nil
+	}
+	mdata, err := parseMetadata(addr)
+	if err != nil {
+		return protocol.Metadata{}, err
+	}
+	c.target.Store(addr, mdata)
+	return mdata, nil
 }
 
 // metadataLen returns the length of metadata for a given type.
@@ -213,11 +229,11 @@ func encryptUDPInPlace(key *Key, buf []byte, payloadLen int, reusedInfo []byte) 
 
 	// Seal in-place: we need space for tag at the end
 	// Input is buf[saltLen:payloadLen], output goes to buf[saltLen:payloadLen+tagLen]
-	encrypted := ciph.Seal(buf[key.CipherConf.SaltLen:key.CipherConf.SaltLen], 
-		ciphers.ZeroNonce[:key.CipherConf.NonceLen], 
-		buf[key.CipherConf.SaltLen:payloadLen], 
+	encrypted := ciph.Seal(buf[key.CipherConf.SaltLen:key.CipherConf.SaltLen],
+		ciphers.ZeroNonce[:key.CipherConf.NonceLen],
+		buf[key.CipherConf.SaltLen:payloadLen],
 		nil)
-	
+
 	return buf[:key.CipherConf.SaltLen+len(encrypted)], nil
 }
 

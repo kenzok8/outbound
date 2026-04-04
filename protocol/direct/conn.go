@@ -17,6 +17,7 @@ type directPacketConn struct {
 	FullCone      bool
 	dialTgt       string
 	cachedDialTgt atomic.Value // stores netip.AddrPort
+	writeTgtCache common.LastStringValue[netip.AddrPort]
 	cacheOnce     sync.Once
 	cacheMu       sync.Mutex // protects cacheErr
 	cacheErr      error
@@ -33,12 +34,12 @@ func (c *directPacketConn) WriteTo(b []byte, addr string) (int, error) {
 		return c.Write(b)
 	}
 
-	uAddr, err := common.ResolveUDPAddr(c.resolver, addr)
+	target, err := c.writeTargetAddrPort(addr)
 	if err != nil {
 		return 0, err
 	}
 
-	return c.UDPConn.WriteTo(b, uAddr)
+	return c.WriteToUDPAddrPort(b, target)
 }
 
 func (c *directPacketConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error) {
@@ -77,6 +78,27 @@ func (c *directPacketConn) resolveTarget() error {
 	err := c.cacheErr
 	c.cacheMu.Unlock()
 	return err
+}
+
+func (c *directPacketConn) writeTargetAddrPort(addr string) (netip.AddrPort, error) {
+	if addr == c.dialTgt {
+		if c.cachedDialTgt.Load() == nil {
+			if err := c.resolveTarget(); err != nil {
+				return netip.AddrPort{}, err
+			}
+		}
+		return c.cachedDialTgt.Load().(netip.AddrPort), nil
+	}
+	if cached, ok := c.writeTgtCache.Load(addr); ok {
+		return cached, nil
+	}
+	uAddr, err := resolveUDPAddr(c.resolver, addr)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	target := uAddr.AddrPort()
+	c.writeTgtCache.Store(addr, target)
+	return target, nil
 }
 
 func (c *directPacketConn) Write(b []byte) (int, error) {

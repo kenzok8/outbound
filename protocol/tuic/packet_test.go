@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 func countDeFraggers(q *quicStreamPacketConn) int {
@@ -379,5 +381,37 @@ func TestQuicStreamPacketConnReadFromSeparatesSamePktIDDifferentFragmentSets(t *
 
 	if got := countDeFraggers(q); got != 0 {
 		t.Fatalf("deFragger count after both assemblies = %d, want 0", got)
+	}
+}
+
+func TestQuicStreamPacketConnMetadataForAddrCachesLastTarget(t *testing.T) {
+	oldParse := parseMetadata
+	defer func() { parseMetadata = oldParse }()
+
+	var calls int
+	parseMetadata = func(addr string) (protocol.Metadata, error) {
+		calls++
+		return protocol.Metadata{
+			Type:     protocol.MetadataTypeIPv4,
+			Hostname: "127.0.0.1",
+			Port:     53,
+		}, nil
+	}
+
+	var q quicStreamPacketConn
+	for i := 0; i < 2; i++ {
+		if _, err := q.metadataForAddr("127.0.0.1:53"); err != nil {
+			t.Fatalf("metadataForAddr() error = %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("parseMetadata() call count = %d, want 1", calls)
+	}
+
+	if _, err := q.metadataForAddr("127.0.0.2:54"); err != nil {
+		t.Fatalf("metadataForAddr() second target error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("parseMetadata() call count after target change = %d, want 2", calls)
 	}
 }
