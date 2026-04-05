@@ -427,8 +427,7 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
 	msgN := msg.Serialize(buf)
 	if msgN < 0 {
-		// Message larger than buffer, silent drop
-		return nil
+		return &quic.DatagramTooLargeError{MaxDataLen: int64(len(buf))}
 	}
 	return io.Conn.SendDatagram(buf[:msgN])
 }

@@ -1,9 +1,15 @@
 package client
 
 import (
+	"bytes"
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/olicesx/quic-go"
+
+	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
 type packetConnWithRemoteAddr struct {
@@ -58,5 +64,26 @@ func TestQuicRemoteAddrFallsBackWhenPacketConnHasNoRemoteAddr(t *testing.T) {
 
 	if got := quicRemoteAddr(conn, fallback); got.String() != fallback.String() {
 		t.Fatalf("quicRemoteAddr() = %q, want %q", got.String(), fallback.String())
+	}
+}
+
+func TestUDPIOImplSendMessageReturnsDatagramTooLargeOnSerializeOverflow(t *testing.T) {
+	io := &udpIOImpl{}
+	msg := &protocol.UDPMessage{
+		SessionID: 1,
+		PacketID:  0,
+		FragID:    0,
+		FragCount: 1,
+		Addr:      "203.0.113.10:40000",
+		Data:      bytes.Repeat([]byte("x"), 64),
+	}
+
+	err := io.SendMessage(make([]byte, 16), msg)
+	var errTooLarge *quic.DatagramTooLargeError
+	if !errors.As(err, &errTooLarge) {
+		t.Fatalf("SendMessage() error = %T %v, want DatagramTooLargeError", err, err)
+	}
+	if errTooLarge.MaxDataLen != 16 {
+		t.Fatalf("DatagramTooLargeError.MaxDataLen = %d, want 16", errTooLarge.MaxDataLen)
 	}
 }

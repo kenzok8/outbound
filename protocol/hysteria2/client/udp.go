@@ -18,7 +18,10 @@ import (
 )
 
 const (
-	udpMessageChanSize = 1024
+	// Keep enough headroom for short scheduler stalls and bursty game ticks.
+	// dae already backpressures its own reply path, so the remaining drop window
+	// is mainly pre-drain bursts before this session goroutine gets CPU time.
+	udpMessageChanSize = 2048
 )
 
 type udpIO interface {
@@ -99,7 +102,14 @@ func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 		Addr:      addr,
 		Data:      b,
 	}
-	err = u.SendFunc(u.SendBuf, msg)
+	// The session's fixed serialization buffer is smaller than the theoretical
+	// UDP payload limit. Treat local buffer exhaustion the same way quic-go
+	// reports path MTU exhaustion so we fragment instead of silently dropping.
+	if msg.Size() > len(u.SendBuf) {
+		err = &quic.DatagramTooLargeError{MaxDataLen: int64(len(u.SendBuf))}
+	} else {
+		err = u.SendFunc(u.SendBuf, msg)
+	}
 	var errTooLarge *quic.DatagramTooLargeError
 	if errors.As(err, &errTooLarge) {
 		// Message too large, try fragmentation

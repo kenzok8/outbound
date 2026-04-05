@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,4 +111,83 @@ func TestUDPSessionManagerTransportDoneClosesWithManager(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected manager cleanup to close transport done channel")
 	}
+}
+
+func TestUDPConnWriteToFragmentsWhenLocalSendBufferIsTooSmall(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	addr := "203.0.113.10:40000"
+
+	var sent []protocol.UDPMessage
+	u := &udpConn{
+		ID:        7,
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+		SendBuf:   make([]byte, 32),
+		SendFunc: func(_ []byte, msg *protocol.UDPMessage) error {
+			msgCopy := *msg
+			msgCopy.Data = append([]byte(nil), msg.Data...)
+			sent = append(sent, msgCopy)
+			return nil
+		},
+		CloseFunc: func() {},
+		target:    addr,
+	}
+
+	n, err := u.WriteTo(payload, addr)
+	if err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("WriteTo() n = %d, want %d", n, len(payload))
+	}
+	if len(sent) < 2 {
+		t.Fatalf("expected fragmentation to emit multiple messages, got %d", len(sent))
+	}
+
+	var reassembled []byte
+	for i, msg := range sent {
+		if got := msg.Size(); got > len(u.SendBuf) {
+			t.Fatalf("fragment %d size = %d, want <= %d", i, got, len(u.SendBuf))
+		}
+		reassembled = append(reassembled, msg.Data...)
+	}
+	if !bytes.Equal(reassembled, payload) {
+		t.Fatalf("reassembled payload mismatch: got %d bytes want %d", len(reassembled), len(payload))
+	}
+}
+
+func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+
+	connRaw, err := m.NewUDP("127.0.0.1:53")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	conn := connRaw.(*udpConn)
+
+	const burst = 1536
+	if burst >= udpMessageChanSize {
+		t.Fatalf("burst = %d must stay below queue size %d", burst, udpMessageChanSize)
+	}
+
+	for i := 0; i < burst; i++ {
+		m.feed(&protocol.UDPMessage{
+			SessionID: conn.ID,
+			PacketID:  uint16(i + 1),
+			FragID:    0,
+			FragCount: 1,
+			Addr:      "127.0.0.1:53",
+			Data:      []byte{byte(i)},
+		})
+	}
+
+	if got := len(conn.ReceiveCh); got != burst {
+		t.Fatalf("queued messages = %d, want %d", got, burst)
+	}
+
+	m.closeCleanup()
 }

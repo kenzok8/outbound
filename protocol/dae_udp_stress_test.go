@@ -1,85 +1,113 @@
 package protocol
 
 import (
-"crypto/rand"
-"net"
-"sync"
-"sync/atomic"
-"testing"
-"time"
-    
-"github.com/daeuniverse/outbound/protocol/direct"
+	"context"
+	"crypto/rand"
+	"net"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol/direct"
 )
 
 func TestDaeUDPConcurrencyStress(t *testing.T) {
-// Setup underlying OS UDP
-udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-if err != nil {
-t.Fatal(err)
-}
-osConn, err := net.ListenUDP("udp", udpAddr)
-if err != nil {
-t.Fatal(err)
-}
-defer osConn.Close()
+	if testing.Short() {
+		t.Skip("skipping UDP stress test in short mode")
+	}
 
-// Using standard dial to retrieve directPacketConn interface implicitly
-directDialer, err := direct.NewDialer(true, nil)
-if err != nil {
-t.Fatal(err)
-}
+	serverConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
 
-packetConn, err := directDialer.DialPacketConn()
-if err != nil {
-t.Fatal(err)
-}
-defer packetConn.Close()
+	stopDrain := make(chan struct{})
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		buf := make([]byte, 2048)
+		for {
+			_ = serverConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			if _, _, err := serverConn.ReadFromUDP(buf); err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					select {
+					case <-stopDrain:
+						return
+					default:
+						continue
+					}
+				}
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stopDrain)
+		<-drainDone
+	}()
 
-t.Log("Starting dae->outbound high-concurrency UDP stress test (Lock-Free)")
+	target := serverConn.LocalAddr().String()
+	conn, err := direct.SymmetricDirect.DialContext(context.Background(), "udp", target)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	packetConn, ok := conn.(netproxy.PacketConn)
+	if !ok {
+		_ = conn.Close()
+		t.Fatalf("DialContext() returned %T, want netproxy.PacketConn", conn)
+	}
+	defer func() { _ = packetConn.Close() }()
 
-const Goroutines = 200     // 200 concurrent streams from dae
-const PacketsPerGr = 5000  // Each sending 5000 packets
-const Total = Goroutines * PacketsPerGr
+	t.Log("Starting dae->outbound high-concurrency UDP stress test")
 
-payload := make([]byte, 1024)
-rand.Read(payload) // 1KB Random UDP Payload
+	const (
+		goroutines   = 200
+		packetsPerGo = 5000
+		total        = goroutines * packetsPerGo
+	)
 
-var successfulWrites atomic.Int64
-var failedWrites atomic.Int64
+	payload := make([]byte, 1024)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatalf("rand.Read() error = %v", err)
+	}
 
-start := time.Now()
-var wg sync.WaitGroup
-wg.Add(Goroutines)
+	var successfulWrites atomic.Int64
+	var failedWrites atomic.Int64
 
-for i := 0; i < Goroutines; i++ {
-go func(grId int) {
-defer wg.Done()
-for j := 0; j < PacketsPerGr; j++ {
-// Simulating Dae dispatching to UdpEndpoint write buffer concurrently
-n, err := packetConn.WriteTo(payload, "127.0.0.1:53")
-if err != nil || n != len(payload) {
-failedWrites.Add(1)
-} else {
-successfulWrites.Add(1)
-}
-}
-}(i)
-}
+	start := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
 
-wg.Wait()
-elapsed := time.Since(start)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < packetsPerGo; j++ {
+				n, err := packetConn.WriteTo(payload, target)
+				if err != nil || n != len(payload) {
+					failedWrites.Add(1)
+				} else {
+					successfulWrites.Add(1)
+				}
+			}
+		}()
+	}
 
-succ := successfulWrites.Load()
-fail := failedWrites.Load()
+	wg.Wait()
+	elapsed := time.Since(start)
 
-t.Logf("Completed 1,000,000 UDP payload injections in %s", elapsed)
+	succ := successfulWrites.Load()
+	fail := failedWrites.Load()
 
-rate := float64(succ) / elapsed.Seconds()
-t.Logf("Throughput: %.2f Packets/Sec", rate)
-t.Logf("Bandwidth equivalent: %.2f MB/sec", (rate*1024)/(1024*1024))
-t.Logf("Failures: %d (expected 0 under lock-free architecture)", fail)
+	t.Logf("Completed %d UDP payload injections in %s", total, elapsed)
+	rate := float64(succ) / elapsed.Seconds()
+	t.Logf("Throughput: %.2f packets/sec", rate)
+	t.Logf("Bandwidth equivalent: %.2f MiB/sec", (rate*1024)/(1024*1024))
+	t.Logf("Failures: %d", fail)
 
-if succ != Total {
-t.Fatalf("Lost packets! Expected %d, got %d", Total, succ)
-}
+	if succ != total {
+		t.Fatalf("successful writes = %d, want %d", succ, total)
+	}
 }
