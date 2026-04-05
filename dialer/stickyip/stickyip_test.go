@@ -345,3 +345,68 @@ func TestStickyIpDialerHonorsRequestedIPVersion(t *testing.T) {
 		t.Fatalf("DialContext() addr = %q, want %q", got, want)
 	}
 }
+
+func TestProxyIpCacheGetRemovesExpiredEntry(t *testing.T) {
+	cache := NewProxyIpCache()
+	proxyAddr := "proxy.example:443"
+	cache.cache[proxyAddr] = &proxyIpEntry{
+		tcp4Addr:   "1.1.1.1:443",
+		expiresAt:  time.Now().Add(-time.Second),
+		checkCycle: 7,
+	}
+
+	if got := cache.GetWithCycleAndIpVersion(proxyAddr, "tcp", "4", 7); got != proxyAddr {
+		t.Fatalf("GetWithCycleAndIpVersion() = %q, want original addr %q", got, proxyAddr)
+	}
+	if _, ok := cache.cache[proxyAddr]; ok {
+		t.Fatal("expired entry was not deleted from cache")
+	}
+}
+
+func TestProxyIpCacheSetRefreshesExistingEntryMetadata(t *testing.T) {
+	cache := NewProxyIpCache()
+	proxyAddr := "proxy.example:443"
+	cache.cache[proxyAddr] = &proxyIpEntry{
+		tcp4Addr:   "1.1.1.1:443",
+		expiresAt:  time.Now().Add(-time.Minute),
+		checkCycle: 1,
+	}
+
+	cache.Set(proxyAddr, "2.2.2.2:443", "tcp", "4", 9)
+
+	entry := cache.cache[proxyAddr]
+	if entry == nil {
+		t.Fatal("expected cache entry to exist after Set")
+	}
+	if entry.tcp4Addr != "2.2.2.2:443" {
+		t.Fatalf("entry.tcp4Addr = %q, want refreshed address", entry.tcp4Addr)
+	}
+	if entry.checkCycle != 9 {
+		t.Fatalf("entry.checkCycle = %d, want 9", entry.checkCycle)
+	}
+	if !entry.expiresAt.After(time.Now()) {
+		t.Fatalf("entry.expiresAt = %v, want a future timestamp", entry.expiresAt)
+	}
+	if got := cache.GetWithCycleAndIpVersion(proxyAddr, "tcp", "4", 9); got != "2.2.2.2:443" {
+		t.Fatalf("GetWithCycleAndIpVersion() = %q, want refreshed cached address", got)
+	}
+}
+
+func TestProxyIpCacheSetCleansOtherExpiredEntries(t *testing.T) {
+	cache := NewProxyIpCache()
+	cache.cache["stale.example:443"] = &proxyIpEntry{
+		tcp4Addr:   "1.1.1.1:443",
+		expiresAt:  time.Now().Add(-time.Minute),
+		checkCycle: 1,
+	}
+	cache.nextCleanupAt = time.Time{}
+
+	cache.Set("fresh.example:443", "2.2.2.2:443", "tcp", "4", 2)
+
+	if _, ok := cache.cache["stale.example:443"]; ok {
+		t.Fatal("periodic cleanup did not remove stale entry")
+	}
+	if _, ok := cache.cache["fresh.example:443"]; !ok {
+		t.Fatal("fresh entry missing after Set")
+	}
+}

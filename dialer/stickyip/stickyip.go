@@ -28,6 +28,10 @@ const (
 	// This should be at least the health check interval to ensure
 	// all connections in a cycle use the same IP.
 	CacheTTL = 5 * time.Minute
+
+	// cacheCleanupInterval bounds how long expired entries can remain in the map
+	// without a direct lookup on the same proxy address.
+	cacheCleanupInterval = time.Minute
 )
 
 // ProxyIpCache manages sticky IP resolution for proxy server domains.
@@ -35,7 +39,8 @@ const (
 // may have different availability per protocol.
 type ProxyIpCache struct {
 	sync.RWMutex
-	cache map[string]*proxyIpEntry
+	cache         map[string]*proxyIpEntry
+	nextCleanupAt time.Time
 }
 
 type proxyIpEntry struct {
@@ -65,6 +70,34 @@ func NewProxyIpCache() *ProxyIpCache {
 	}
 }
 
+func (c *ProxyIpCache) maybeCleanupExpiredLocked(now time.Time) {
+	if !c.nextCleanupAt.IsZero() && now.Before(c.nextCleanupAt) {
+		return
+	}
+	c.cleanupExpiredLocked(now)
+	c.nextCleanupAt = now.Add(cacheCleanupInterval)
+}
+
+func (c *ProxyIpCache) cleanupExpiredLocked(now time.Time) {
+	for addr, entry := range c.cache {
+		if now.After(entry.expiresAt) {
+			delete(c.cache, addr)
+		}
+	}
+}
+
+func (c *ProxyIpCache) deleteIfExpired(proxyAddr string, now time.Time) {
+	c.Lock()
+	defer c.Unlock()
+	entry, ok := c.cache[proxyAddr]
+	if !ok {
+		return
+	}
+	if now.After(entry.expiresAt) {
+		delete(c.cache, proxyAddr)
+	}
+}
+
 // Set stores a successful proxy IP address for a specific protocol and IP version with cycle tracking.
 // network should be "tcp" or "udp", ipVersion should be "4" or "6".
 // This ensures we only cache IPs that actually work for the specific protocol and address family.
@@ -72,21 +105,26 @@ func (c *ProxyIpCache) Set(originalAddr, actualAddr string, network string, ipVe
 	if c == nil {
 		return
 	}
-	c.Lock()
-	defer c.Unlock()
+
 	now := time.Now()
 
-	// Get or create entry
+	c.Lock()
+	defer c.Unlock()
+	c.maybeCleanupExpiredLocked(now)
+
+	// Get or create entry.
 	entry, exists := c.cache[originalAddr]
 	if !exists {
-		entry = &proxyIpEntry{
-			expiresAt:  now.Add(CacheTTL),
-			checkCycle: cycle,
-		}
+		entry = &proxyIpEntry{}
 		c.cache[originalAddr] = entry
 	}
 
-	// Update the appropriate address based on network type and IP version
+	// Refresh metadata on every successful set so long-lived entries do not
+	// become permanently expired or stuck on an old cycle.
+	entry.expiresAt = now.Add(CacheTTL)
+	entry.checkCycle = cycle
+
+	// Update the appropriate address based on network type and IP version.
 	key := cacheKey(network, ipVersion)
 	switch key {
 	case "tcp4":
@@ -117,31 +155,41 @@ func (c *ProxyIpCache) GetWithCycleAndIpVersion(proxyAddr string, network string
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] Cache is nil")
 		return proxyAddr
 	}
+
+	now := time.Now()
+
 	c.RLock()
-	defer c.RUnlock()
 	entry, ok := c.cache[proxyAddr]
 	if !ok {
+		c.RUnlock()
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] No cache entry found")
 		return proxyAddr
 	}
-	if time.Now().After(entry.expiresAt) {
+
+	expiredAt := entry.expiresAt
+	if now.After(expiredAt) {
+		c.RUnlock()
+		c.deleteIfExpired(proxyAddr, now)
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
-			"expired_at": entry.expiresAt,
+			"expired_at": expiredAt,
 		}).Debug("[StickyIP] Cache entry expired")
 		return proxyAddr
 	}
-	// Only use cached IP if it's from the current cycle
+
+	// Only use cached IP if it's from the current cycle.
 	if entry.checkCycle != currentCycle {
+		entryCycle := entry.checkCycle
+		c.RUnlock()
 		logger.WithFields(logrus.Fields{
 			"proxy_addr":    proxyAddr,
-			"entry_cycle":   entry.checkCycle,
+			"entry_cycle":   entryCycle,
 			"current_cycle": currentCycle,
 		}).Debug("[StickyIP] Cycle mismatch - cache not from current cycle")
 		return proxyAddr
 	}
 
-	// Return the protocol and IP version specific cached address
+	// Return the protocol and IP version specific cached address.
 	var cachedAddr string
 	key := cacheKey(network, ipVersion)
 	switch key {
@@ -154,6 +202,7 @@ func (c *ProxyIpCache) GetWithCycleAndIpVersion(proxyAddr string, network string
 	case "udp6":
 		cachedAddr = entry.udp6Addr
 	}
+	c.RUnlock()
 
 	if cachedAddr == "" {
 		logger.WithFields(logrus.Fields{
