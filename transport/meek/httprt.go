@@ -28,8 +28,18 @@ type httpTripperClient struct {
 
 func CleanGlobalRoundTripperCache() {
 	globalRoundTripperCacheAccess.Lock()
-	defer globalRoundTripperCacheAccess.Unlock()
+	cached := make([]http.RoundTripper, 0, len(globalRoundTripperCacheMap))
+	for _, rt := range globalRoundTripperCacheMap {
+		cached = append(cached, rt)
+	}
 	globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
+	globalRoundTripperCacheAccess.Unlock()
+
+	for _, rt := range cached {
+		if closeIdler, ok := rt.(interface{ CloseIdleConnections() }); ok {
+			closeIdler.CloseIdleConnections()
+		}
+	}
 }
 
 func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Response, err error) {
@@ -37,7 +47,7 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 
 	connectionTagStr := base64.RawURLEncoding.EncodeToString(req.ConnectionTag)
 
-	httpRequest, err := http.NewRequest("POST", c.url, bytes.NewReader(req.Data))
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(req.Data))
 	if err != nil {
 		return
 	}

@@ -43,3 +43,49 @@ func TestSessionCloseClosesActiveStreamsWithoutDeadlock(t *testing.T) {
 		t.Fatalf("remaining streams = %d, want 0", len(s.streams))
 	}
 }
+
+func TestDialerWatchSessionStopsAfterSessionClose(t *testing.T) {
+	d := &Dialer{
+		idleSessions: make(map[uint64]*session),
+	}
+	s := newSession(&stubConn{}, 7)
+
+	done := make(chan struct{})
+	go func() {
+		d.watchSession(s)
+		close(done)
+	}()
+
+	s.closeStreamChan <- 1
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.idleSessionLock.Lock()
+		_, ok := d.idleSessions[s.seq]
+		d.idleSessionLock.Unlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session was not added to idleSessions")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watchSession did not exit after session close")
+	}
+
+	d.idleSessionLock.Lock()
+	_, ok := d.idleSessions[s.seq]
+	d.idleSessionLock.Unlock()
+	if ok {
+		t.Fatal("closed session remained in idleSessions")
+	}
+}

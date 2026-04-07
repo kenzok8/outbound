@@ -32,6 +32,7 @@ type session struct {
 	seq             uint64
 	sid             atomic.Uint32
 	closed          atomic.Bool
+	done            chan struct{}
 	closeStreamChan chan uint32
 }
 
@@ -40,6 +41,7 @@ func newSession(conn netproxy.Conn, seq uint64) *session {
 		conn:            conn,
 		streams:         map[uint32]*stream{},
 		seq:             seq,
+		done:            make(chan struct{}),
 		closeStreamChan: make(chan uint32, 2),
 		sendPadding:     true,
 	}
@@ -95,11 +97,14 @@ func (s *session) removeStream(sid uint32) {
 	s.streamLock.Lock()
 	delete(s.streams, sid)
 	s.streamLock.Unlock()
-	if s.closed.Load() {
+	select {
+	case <-s.done:
 		return
+	default:
 	}
 	select {
 	case s.closeStreamChan <- sid:
+	case <-s.done:
 	default:
 	}
 }
@@ -212,6 +217,7 @@ func (s *session) run() error {
 
 func (s *session) Close() error {
 	if s.closed.CompareAndSwap(false, true) {
+		close(s.done)
 		s.streamLock.Lock()
 		streams := make([]*stream, 0, len(s.streams))
 		for _, stream := range s.streams {
@@ -230,6 +236,10 @@ func (s *session) Close() error {
 
 func (s *session) Closed() bool {
 	return s.closed.Load()
+}
+
+func (s *session) Done() <-chan struct{} {
+	return s.done
 }
 
 func (s *session) SetPadding(padding *paddingFactory) {

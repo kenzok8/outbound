@@ -35,8 +35,18 @@ var (
 
 func CleanGlobalClientConnectionCache() {
 	globalCCAccess.Lock()
-	defer globalCCAccess.Unlock()
+	cached := make([]*grpc.ClientConn, 0, len(globalCCMap))
+	for _, meta := range globalCCMap {
+		if meta != nil && meta.cc != nil {
+			cached = append(cached, meta.cc)
+		}
+	}
 	globalCCMap = make(map[string]*clientConnMeta)
+	globalCCAccess.Unlock()
+
+	for _, cc := range cached {
+		_ = cc.Close()
+	}
 }
 
 type ccCanceller func()
@@ -354,11 +364,16 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 	}
 	globalCCAccess.Unlock()
 
+	var meta *clientConnMeta
 	canceller := func() {
 		globalCCAccess.Lock()
-		defer globalCCAccess.Unlock()
-		_ = globalCCMap[address].cc.Close()
-		delete(globalCCMap, address)
+		if current, ok := globalCCMap[address]; ok && current == meta {
+			delete(globalCCMap, address)
+		}
+		globalCCAccess.Unlock()
+		if meta != nil && meta.cc != nil {
+			_ = meta.cc.Close()
+		}
 	}
 
 	// TODO Should support chain proxy to the same destination
@@ -368,7 +383,7 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 		return meta, canceller, nil
 	}
 	globalCCAccess.Unlock()
-	meta := &clientConnMeta{
+	meta = &clientConnMeta{
 		cc: nil,
 	}
 	meta.cc, err = grpc.DialContext(ctx, address,

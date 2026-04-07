@@ -48,6 +48,28 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}, nil
 }
 
+func (d *Dialer) watchSession(s *session) {
+	for {
+		select {
+		case <-s.Done():
+			d.idleSessionLock.Lock()
+			if current, ok := d.idleSessions[s.seq]; ok && current == s {
+				delete(d.idleSessions, s.seq)
+			}
+			d.idleSessionLock.Unlock()
+			return
+		case <-s.closeStreamChan:
+			if s.Closed() {
+				continue
+			}
+			d.idleSessionLock.Lock()
+			if _, ok := d.idleSessions[s.seq]; !ok {
+				d.idleSessions[s.seq] = s
+			}
+			d.idleSessionLock.Unlock()
+		}
+	}
+}
 
 func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
@@ -116,18 +138,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 
 	seq := d.sessionCounter.Add(1)
 	s := newSession(tlsConn, seq)
-	go func(s *session) {
-		for range s.closeStreamChan {
-			if s.closed.Load() {
-				return
-			}
-			d.idleSessionLock.Lock()
-			if _, ok := d.idleSessions[seq]; !ok {
-				d.idleSessions[seq] = s
-			}
-			d.idleSessionLock.Unlock()
-		}
-	}(s)
+	go d.watchSession(s)
 
 	go func() { _ = s.run() }()
 
