@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -93,5 +94,29 @@ func TestConnWriteStreamsBinaryMessage(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatal("payload mismatch")
+	}
+}
+
+func TestNormalizeWebsocketError_NormalClosure(t *testing.T) {
+	err := normalizeWebsocketError(&websocket.CloseError{Code: websocket.CloseNormalClosure})
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestConnReadNormalCloseReturnsEOF(t *testing.T) {
+	client, server, cleanup := newWSPair(t)
+	defer cleanup()
+
+	if err := server.WriteMessage(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+	); err != nil {
+		t.Fatalf("server close failed: %v", err)
+	}
+
+	buf := make([]byte, 1)
+	if _, err := client.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF, got %v", err)
 	}
 }

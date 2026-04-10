@@ -1,11 +1,12 @@
 package ws
 
 import (
+	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
-	"time"
 )
 
 type conn struct {
@@ -23,6 +24,17 @@ func newConn(wsc *websocket.Conn) *conn {
 	}
 }
 
+func normalizeWebsocketError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, websocket.ErrCloseSent) ||
+		websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		return io.EOF
+	}
+	return err
+}
+
 func (c *conn) Read(b []byte) (n int, err error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
@@ -31,7 +43,7 @@ func (c *conn) Read(b []byte) (n int, err error) {
 		if c.currentReader == nil {
 			messageType, reader, err := c.NextReader()
 			if err != nil {
-				return 0, err
+				return 0, normalizeWebsocketError(err)
 			}
 			if messageType != websocket.BinaryMessage {
 				_, _ = io.Copy(io.Discard, reader)
@@ -41,6 +53,7 @@ func (c *conn) Read(b []byte) (n int, err error) {
 		}
 
 		n, err = c.currentReader.Read(b)
+		err = normalizeWebsocketError(err)
 		if err == nil {
 			return n, nil
 		}
@@ -60,10 +73,11 @@ func (c *conn) Write(b []byte) (n int, err error) {
 
 	writer, err := c.NextWriter(websocket.BinaryMessage)
 	if err != nil {
-		return 0, err
+		return 0, normalizeWebsocketError(err)
 	}
 	n, err = writer.Write(b)
-	closeErr := writer.Close()
+	err = normalizeWebsocketError(err)
+	closeErr := normalizeWebsocketError(writer.Close())
 	if err != nil {
 		return n, err
 	}
