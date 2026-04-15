@@ -46,6 +46,10 @@ type Ws struct {
 	fragmentMaxInterval int64
 }
 
+func (s *Ws) UnwrapDialer() netproxy.Dialer {
+	return s.dialer
+}
+
 // NewWs returns a Ws infra.
 func NewWs(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
 	u, err := url.Parse(link)

@@ -55,6 +55,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}, nil
 }
 
+func (d *Dialer) UnwrapDialer() netproxy.Dialer {
+	return d.nextDialer
+}
+
 func NewDialerFactory(proto protocol.Protocol) func(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	return func(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 		d, err := NewDialer(nextDialer, header)
@@ -66,7 +70,6 @@ func NewDialerFactory(proto protocol.Protocol) func(nextDialer netproxy.Dialer, 
 		return dd, nil
 	}
 }
-
 
 func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
@@ -86,9 +89,10 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			mdata.Type = protocol.MetadataTypeDomain
 		}
 
+		underlayDialer := d.nextDialer
 		if d.protocol == protocol.ProtocolVMessTlsGrpc {
-			d.nextDialer = &grpc.Dialer{
-				NextDialer:  d,
+			underlayDialer = &grpc.Dialer{
+				NextDialer:  d.nextDialer,
 				ServiceName: d.grpcServiceName,
 				ServerName:  d.proxySNI,
 			}
@@ -98,7 +102,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			Mark:    magicNetwork.Mark,
 			Mptcp:   magicNetwork.Mptcp,
 		}.Encode()
-		conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+		conn, err := underlayDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}

@@ -443,6 +443,9 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			} else {
 				// Log cache miss/failure
 				logCacheFailure(d.proxyAddr, targetAddr, network, err)
+				if isCanceledOrClosed(err) {
+					return nil, err
+				}
 				// Cached IP failed, invalidate this protocol's cache
 				d.cache.InvalidateProtocol(d.proxyAddr, baseNetwork)
 			}
@@ -544,6 +547,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	// Resolve to get all IPs
 	ips, err := d.lookupIPAddr(ctx, network, host)
 	if err != nil || len(ips) == 0 {
+		if isCanceledOrClosed(err) {
+			return nil, err
+		}
 		// Resolution failed, try original address
 		logResolutionError(d.proxyAddr, host, err)
 		return d.dialer.DialContext(ctx, network, addr)
@@ -589,6 +595,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 			return conn, nil
 		}
 		lastErr = err
+		if isCanceledOrClosed(err) {
+			return nil, err
+		}
 		logIPFailure(d.proxyAddr, targetAddr, err)
 	}
 
@@ -755,7 +764,23 @@ func logIPFailure(proxyAddr, targetAddr string, err error) {
 	}
 }
 
+func isCanceledOrClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, net.ErrClosed) {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "context canceled") ||
+		strings.Contains(errStr, "operation was canceled") ||
+		strings.Contains(errStr, "use of closed network connection")
+}
+
 func logAllIPsFailed(proxyAddr string, lastErr error) {
+	if isCanceledOrClosed(lastErr) {
+		return
+	}
 	if logger.IsLevelEnabled(logrus.ErrorLevel) {
 		fields := logrus.Fields{
 			"proxy_addr": proxyAddr,

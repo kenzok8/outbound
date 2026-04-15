@@ -20,6 +20,10 @@ type Dialer struct {
 	alpn       []string
 }
 
+func (m *Dialer) UnwrapDialer() netproxy.Dialer {
+	return m.nextDialer
+}
+
 func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	u, err := url.Parse(s)
 	if err != nil {

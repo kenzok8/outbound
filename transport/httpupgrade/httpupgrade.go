@@ -23,6 +23,10 @@ type Dialer struct {
 	skipVerify bool
 }
 
+func (t *Dialer) UnwrapDialer() netproxy.Dialer {
+	return t.nextDialer
+}
+
 func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	u, err := url.Parse(s)
 	query := u.Query()

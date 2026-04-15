@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,14 @@ var (
 	globalCCAccess sync.Mutex
 )
 
+func grpcClientCacheKey(scope, serverName, address string, allowInsecure bool, somark uint32, mptcp bool) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%d\x00%t", scope, serverName, address, allowInsecure, somark, mptcp)
+}
+
+func scopedCachePrefix(scope string) string {
+	return scope + "\x00"
+}
+
 func CleanGlobalClientConnectionCache() {
 	globalCCAccess.Lock()
 	cached := make([]*grpc.ClientConn, 0, len(globalCCMap))
@@ -42,6 +51,29 @@ func CleanGlobalClientConnectionCache() {
 		}
 	}
 	globalCCMap = make(map[string]*clientConnMeta)
+	globalCCAccess.Unlock()
+
+	for _, cc := range cached {
+		_ = cc.Close()
+	}
+}
+
+func CleanScopedClientConnectionCache(scope string) {
+	if scope == "" {
+		return
+	}
+	prefix := scopedCachePrefix(scope)
+	globalCCAccess.Lock()
+	var cached []*grpc.ClientConn
+	for key, meta := range globalCCMap {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if meta != nil && meta.cc != nil {
+			cached = append(cached, meta.cc)
+		}
+		delete(globalCCMap, key)
+	}
 	globalCCAccess.Unlock()
 
 	for _, cc := range cached {
@@ -323,6 +355,10 @@ type Dialer struct {
 	AllowInsecure bool
 }
 
+func (d *Dialer) UnwrapDialer() netproxy.Dialer {
+	return d.NextDialer
+}
+
 func (d *Dialer) DialContext(ctx context.Context, network string, address string) (netproxy.Conn, error) {
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
 	if err != nil {
@@ -351,6 +387,8 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
 }
 
 func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp bool) (*clientConnMeta, ccCanceller, error) {
+	scope := netproxy.TransportCacheNamespace(tcpDialer)
+	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp)
 	// allowInsecure?
 	roots, err := cert.GetSystemCertPool()
 	if err != nil {
@@ -367,8 +405,8 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 	var meta *clientConnMeta
 	canceller := func() {
 		globalCCAccess.Lock()
-		if current, ok := globalCCMap[address]; ok && current == meta {
-			delete(globalCCMap, address)
+		if current, ok := globalCCMap[cacheKey]; ok && current == meta {
+			delete(globalCCMap, cacheKey)
 		}
 		globalCCAccess.Unlock()
 		if meta != nil && meta.cc != nil {
@@ -378,7 +416,7 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 
 	// TODO Should support chain proxy to the same destination
 	globalCCAccess.Lock()
-	if meta, found := globalCCMap[address]; found && meta.cc.GetState() != connectivity.Shutdown {
+	if meta, found := globalCCMap[cacheKey]; found && meta.cc.GetState() != connectivity.Shutdown {
 		globalCCAccess.Unlock()
 		return meta, canceller, nil
 	}
@@ -421,7 +459,7 @@ func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverNam
 		return nil, canceller, err
 	}
 	globalCCAccess.Lock()
-	globalCCMap[address] = meta
+	globalCCMap[cacheKey] = meta
 	globalCCAccess.Unlock()
 	return meta, canceller, err
 }

@@ -35,6 +35,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}, nil
 }
 
+func (d *Dialer) UnwrapDialer() netproxy.Dialer {
+	return d.nextDialer
+}
+
 // Addr returns forwarder's address
 func (d *Dialer) Addr() string {
 	return d.addr

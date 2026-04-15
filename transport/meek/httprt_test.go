@@ -2,6 +2,7 @@ package meek
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
@@ -84,7 +85,7 @@ func TestRoundTripPropagatesRequestContext(t *testing.T) {
 
 	globalRoundTripperCacheAccess.Lock()
 	globalRoundTripperCacheMap = map[string]http.RoundTripper{
-		client.addr: spy,
+		meekRoundTripperCacheKey("", client.addr, client.url, client.tlsConfig): spy,
 	}
 	globalRoundTripperCacheAccess.Unlock()
 
@@ -97,5 +98,41 @@ func TestRoundTripPropagatesRequestContext(t *testing.T) {
 	}
 	if spy.ctx != ctx {
 		t.Fatal("request context was not propagated to the round tripper")
+	}
+}
+
+func TestCleanScopedRoundTripperCacheOnlyClosesMatchingScope(t *testing.T) {
+	globalRoundTripperCacheAccess.Lock()
+	original := globalRoundTripperCacheMap
+	globalRoundTripperCacheMap = nil
+	globalRoundTripperCacheAccess.Unlock()
+	t.Cleanup(func() {
+		globalRoundTripperCacheAccess.Lock()
+		globalRoundTripperCacheMap = original
+		globalRoundTripperCacheAccess.Unlock()
+	})
+
+	spyA := &closeIdleSpyRoundTripper{}
+	spyB := &closeIdleSpyRoundTripper{}
+	globalRoundTripperCacheAccess.Lock()
+	globalRoundTripperCacheMap = map[string]http.RoundTripper{
+		meekRoundTripperCacheKey("scope-a", "test-a", "https://a.example", &tls.Config{}): spyA,
+		meekRoundTripperCacheKey("scope-b", "test-b", "https://b.example", &tls.Config{}): spyB,
+	}
+	globalRoundTripperCacheAccess.Unlock()
+
+	CleanScopedRoundTripperCache("scope-a")
+
+	if got := spyA.closeCalls.Load(); got != 1 {
+		t.Fatalf("scope-a CloseIdleConnections called %d times, want 1", got)
+	}
+	if got := spyB.closeCalls.Load(); got != 0 {
+		t.Fatalf("scope-b CloseIdleConnections called %d times, want 0", got)
+	}
+
+	globalRoundTripperCacheAccess.Lock()
+	defer globalRoundTripperCacheAccess.Unlock()
+	if len(globalRoundTripperCacheMap) != 1 {
+		t.Fatalf("global round tripper cache size = %d, want 1", len(globalRoundTripperCacheMap))
 	}
 }

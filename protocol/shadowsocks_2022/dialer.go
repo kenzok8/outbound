@@ -80,6 +80,10 @@ func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 	}, nil
 }
 
+func (d *Dialer) UnwrapDialer() netproxy.Dialer {
+	return d.parentDialer
+}
+
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
 	magicNetwork, err := netproxy.ParseMagicNetwork(network)
 	if err != nil {

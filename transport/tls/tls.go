@@ -31,6 +31,10 @@ type Tls struct {
 	tlsConfig *tls.Config
 }
 
+func (s *Tls) UnwrapDialer() netproxy.Dialer {
+	return s.dialer
+}
+
 // NewTls returns a Tls infra.
 func NewTls(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
 	u, err := url.Parse(link)

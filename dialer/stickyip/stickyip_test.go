@@ -2,6 +2,7 @@ package stickyip
 
 import (
 	"context"
+	stderrors "errors"
 	"io"
 	"net"
 	"net/netip"
@@ -408,5 +409,56 @@ func TestProxyIpCacheSetCleansOtherExpiredEntries(t *testing.T) {
 	}
 	if _, ok := cache.cache["fresh.example:443"]; !ok {
 		t.Fatal("fresh entry missing after Set")
+	}
+}
+
+func TestStickyIpDialerCachedProxyCancellationDoesNotInvalidateCache(t *testing.T) {
+	cache := NewProxyIpCache()
+	cache.Set("proxy.example:443", "203.0.113.10:443", "tcp", "4", 0)
+	parent := &recordingLookupDialer{dialErr: context.Canceled}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", cache)
+
+	_, err := dialer.DialContext(context.Background(), "tcp4", "proxy.example:443")
+	if !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("DialContext() err = %v, want context.Canceled", err)
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if len(parent.dialCalls) != 1 {
+		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
+	}
+	if got := cache.GetWithCycleAndIpVersion("proxy.example:443", "tcp", "4", 0); got != "203.0.113.10:443" {
+		t.Fatalf("cached addr after cancellation = %q, want cache preserved", got)
+	}
+}
+
+func TestStickyIpDialerResolvedProxyCancellationStopsFallback(t *testing.T) {
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{
+			{IP: net.ParseIP("203.0.113.10")},
+			{IP: net.ParseIP("203.0.113.11")},
+		},
+		dialFunc: func(network, addr string) (netproxy.Conn, error) {
+			return nil, context.Canceled
+		},
+	}
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+
+	_, err := dialer.DialContext(context.Background(), "tcp", "proxy.example:443")
+	if !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("DialContext() err = %v, want context.Canceled", err)
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.lookupCalls != 1 {
+		t.Fatalf("LookupIPAddr() calls = %d, want 1", parent.lookupCalls)
+	}
+	if len(parent.dialCalls) != 1 {
+		t.Fatalf("DialContext() calls = %d, want 1", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "203.0.113.10:443"; got != want {
+		t.Fatalf("DialContext() addr = %q, want %q", got, want)
 	}
 }

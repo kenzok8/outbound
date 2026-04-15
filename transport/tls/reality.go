@@ -155,6 +155,10 @@ func realityECDHEKey(state *utls.PubClientHandshakeState) *ecdh.PrivateKey {
 	return state.State13.EcdheKey // nolint:staticcheck
 }
 
+func (x *Reality) UnwrapDialer() netproxy.Dialer {
+	return x.nextDialer
+}
+
 func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
 	u, err := url.Parse(s)
 	if err != nil {

@@ -36,6 +36,10 @@ type ShadowTLS struct {
 	utlsImitate string
 }
 
+func (s *ShadowTLS) UnwrapDialer() netproxy.Dialer {
+	return s.nextDialer
+}
+
 func NewShadowTLS(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
 	u, err := url.Parse(link)
 	if err != nil {
