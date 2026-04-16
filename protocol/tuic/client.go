@@ -50,6 +50,25 @@ type clientImpl struct {
 	onClose func()
 }
 
+func (t *clientImpl) acquireUniStreamSlot(ctx context.Context) error {
+	if t.streamSem == nil {
+		return nil
+	}
+	select {
+	case t.streamSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (t *clientImpl) releaseUniStreamSlot() {
+	if t.streamSem == nil {
+		return
+	}
+	<-t.streamSem
+}
+
 func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, dialFn common.DialFunc) (quic.Connection, error) {
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
@@ -127,18 +146,16 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 	}()
 	for {
 		var stream quic.ReceiveStream
-		stream, err = quicConn.AcceptUniStream(context.Background())
+		stream, err = quicConn.AcceptUniStream(quicConn.Context())
 		if err != nil {
 			return err
 		}
-		select {
-		case t.streamSem <- struct{}{}:
-		default:
+		if err = t.acquireUniStreamSlot(quicConn.Context()); err != nil {
 			stream.CancelRead(0)
-			continue
+			return err
 		}
 		go func(stream quic.ReceiveStream) {
-			defer func() { <-t.streamSem }()
+			defer t.releaseUniStreamSlot()
 			var err error
 			var assocId uint16
 			defer func() {

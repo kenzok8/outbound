@@ -1,6 +1,7 @@
 package meek
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -63,6 +64,17 @@ func (s *contextSpyRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(http.NoBody),
+	}, nil
+}
+
+type bodySpyRoundTripper struct {
+	body []byte
+}
+
+func (s *bodySpyRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(s.body)),
 	}, nil
 }
 
@@ -134,5 +146,34 @@ func TestCleanScopedRoundTripperCacheOnlyClosesMatchingScope(t *testing.T) {
 	defer globalRoundTripperCacheAccess.Unlock()
 	if len(globalRoundTripperCacheMap) != 1 {
 		t.Fatalf("global round tripper cache size = %d, want 1", len(globalRoundTripperCacheMap))
+	}
+}
+
+func TestRoundTripRejectsOversizedResponse(t *testing.T) {
+	globalRoundTripperCacheAccess.Lock()
+	original := globalRoundTripperCacheMap
+	globalRoundTripperCacheMap = nil
+	globalRoundTripperCacheAccess.Unlock()
+	t.Cleanup(func() {
+		globalRoundTripperCacheAccess.Lock()
+		globalRoundTripperCacheMap = original
+		globalRoundTripperCacheAccess.Unlock()
+	})
+
+	spy := &bodySpyRoundTripper{body: make([]byte, maxMeekResponseBodySize+1)}
+	client := &httpTripperClient{
+		addr: "test",
+		url:  "https://example.com",
+	}
+
+	globalRoundTripperCacheAccess.Lock()
+	globalRoundTripperCacheMap = map[string]http.RoundTripper{
+		meekRoundTripperCacheKey("", client.addr, client.url, client.tlsConfig): spy,
+	}
+	globalRoundTripperCacheAccess.Unlock()
+
+	_, err := client.RoundTrip(context.Background(), Request{Data: []byte("ping")})
+	if err == nil {
+		t.Fatal("RoundTrip() error = nil, want oversized response error")
 	}
 }

@@ -87,7 +87,7 @@ func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core,
 	u := &UdpConn{
 		SS2022Core: core,
 		Conn:       conn,
-		ctx:        ctx,
+		ctx:        context.Background(), // Use Background for long-lived UDP connections
 		bloom:      bloom,
 	}
 
@@ -166,8 +166,6 @@ func (c *UdpConn) ensureCipher() error {
 	return c.cipherErr
 }
 
-const decryptCipherCleanupThreshold = 256
-
 func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
 	if cached, ok := c.decryptCiphers.Load(sessionID); ok {
 		return cached.(cipher.AEAD), nil
@@ -178,13 +176,6 @@ func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("failed to create decrypt cipher for remote session: %w", err)
 	}
 	actual, _ := c.decryptCiphers.LoadOrStore(sessionID, sessionCipher)
-
-	if c.cleanupCounter.Add(1)%decryptCipherCleanupThreshold == 0 {
-		c.decryptCiphers.Range(func(key, _ interface{}) bool {
-			c.decryptCiphers.Delete(key)
-			return true
-		})
-	}
 
 	return actual.(cipher.AEAD), nil
 }

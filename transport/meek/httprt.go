@@ -20,6 +20,8 @@ var (
 	globalRoundTripperCacheAccess sync.Mutex
 )
 
+const maxMeekResponseBodySize = 1 << 20
+
 func meekRoundTripperCacheKey(scope, addr, url string, tlsConfig *tls.Config) string {
 	serverName := ""
 	insecure := false
@@ -93,11 +95,22 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
-	result, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	result, err := readMeekResponseBody(httpResp.Body)
 	if err != nil {
 		return
 	}
 	return Response{Data: result}, err
+}
+
+func readMeekResponseBody(body io.Reader) ([]byte, error) {
+	result, err := io.ReadAll(io.LimitReader(body, maxMeekResponseBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > maxMeekResponseBodySize {
+		return nil, fmt.Errorf("meek: response body exceeds %d bytes", maxMeekResponseBodySize)
+	}
+	return result, nil
 }
 
 func (c *httpTripperClient) getRoundTripper() http.RoundTripper {
