@@ -39,10 +39,10 @@ type TCPConn struct {
 	*SS2022Core // Embedded core for shared logic
 
 	net.Conn
-	addr    *socks5.AddressInfo
-	sg      shadowsocks.SaltGenerator
-	ctx     context.Context
-	ctxMu   sync.RWMutex
+	addr  *socks5.AddressInfo
+	sg    shadowsocks.SaltGenerator
+	ctx   context.Context
+	ctxMu sync.RWMutex
 
 	cipherRead  cipher.AEAD
 	cipherWrite cipher.AEAD
@@ -72,12 +72,15 @@ func NewTCPConn(conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, a
 }
 
 func NewTCPConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tcpConn := &TCPConn{
 		SS2022Core: core,
 		Conn:       conn,
 		addr:       addr,
 		sg:         sg,
-		ctx:        context.Background(), // Use Background for TCP connections to avoid dial context expiry
+		ctx:        ctx,
 		nonceRead:  make([]byte, core.CipherConf().NonceLen),
 		nonceWrite: make([]byte, core.CipherConf().NonceLen),
 		bloom:      bloom,

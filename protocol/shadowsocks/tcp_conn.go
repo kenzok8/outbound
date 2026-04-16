@@ -103,6 +103,14 @@ func NewTCPConn(conn netproxy.Conn, metadata protocol.Metadata, masterKey []byte
 }
 
 func (c *TCPConn) Close() error {
+	c.readMutex.Lock()
+	if c.indexToRead < len(c.leftToRead) {
+		// Release pooled buffer held by a partial read that never completed.
+		pool.Put(c.leftToRead)
+		c.leftToRead = nil
+		c.indexToRead = 0
+	}
+	c.readMutex.Unlock()
 	return c.Conn.Close()
 }
 

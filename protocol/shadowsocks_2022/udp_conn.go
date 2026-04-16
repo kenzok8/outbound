@@ -81,10 +81,13 @@ func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) 
 // not for ongoing I/O operations. UDP connections are long-lived and should not be
 // bound to the dial context's timeout.
 func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	u := &UdpConn{
 		SS2022Core: core,
 		Conn:       conn,
-		ctx:        context.Background(), // Use Background for long-lived UDP connections
+		ctx:        ctx,
 		bloom:      bloom,
 	}
 
@@ -163,6 +166,8 @@ func (c *UdpConn) ensureCipher() error {
 	return c.cipherErr
 }
 
+const decryptCipherCleanupThreshold = 256
+
 func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
 	if cached, ok := c.decryptCiphers.Load(sessionID); ok {
 		return cached.(cipher.AEAD), nil
@@ -173,6 +178,14 @@ func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("failed to create decrypt cipher for remote session: %w", err)
 	}
 	actual, _ := c.decryptCiphers.LoadOrStore(sessionID, sessionCipher)
+
+	if c.cleanupCounter.Add(1)%decryptCipherCleanupThreshold == 0 {
+		c.decryptCiphers.Range(func(key, _ interface{}) bool {
+			c.decryptCiphers.Delete(key)
+			return true
+		})
+	}
+
 	return actual.(cipher.AEAD), nil
 }
 
