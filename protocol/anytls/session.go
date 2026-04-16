@@ -122,8 +122,20 @@ func (s *session) run() error {
 		if s.Closed() {
 			return net.ErrClosed
 		}
-		if _, err := io.ReadFull(s.conn, header[:]); err != nil {
-			return err
+		// Use a goroutine so we can also select on s.done to avoid
+		// leaking the run() goroutine when the session is abandoned.
+		headerReady := make(chan error, 1)
+		go func() {
+			_, err := io.ReadFull(s.conn, header[:])
+			headerReady <- err
+		}()
+		select {
+		case <-s.done:
+			return net.ErrClosed
+		case err := <-headerReady:
+			if err != nil {
+				return err
+			}
 		}
 		sid := header.StreamID()
 		length := int(header.Length())

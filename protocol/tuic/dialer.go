@@ -71,7 +71,8 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					CWND:                  10,
 					MaxUdpRelayPacketSize: maxDatagramFrameSize,
 				},
-				udp: true,
+				udp:       true,
+				streamSem: make(chan struct{}, 64),
 			}
 		}, 10),
 		proxyAddress: header.ProxyAddress,

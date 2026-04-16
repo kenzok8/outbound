@@ -45,6 +45,8 @@ type clientImpl struct {
 
 	udpIncomingPacketsMap sync.Map
 
+	streamSem chan struct{}
+
 	onClose func()
 }
 
@@ -129,7 +131,14 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 		if err != nil {
 			return err
 		}
+		select {
+		case t.streamSem <- struct{}{}:
+		default:
+			stream.CancelRead(0)
+			continue
+		}
 		go func(stream quic.ReceiveStream) {
+			defer func() { <-t.streamSem }()
 			var err error
 			var assocId uint16
 			defer func() {

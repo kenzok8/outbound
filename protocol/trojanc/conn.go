@@ -30,6 +30,8 @@ type Conn struct {
 	metadata Metadata
 	pass     [56]byte
 
+	probeTimer *time.Timer
+
 	writeMutex sync.Mutex
 	onceWrite  bool
 	onceRead   sync.Once
@@ -64,7 +66,7 @@ func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, e
 		pass:     pass,
 	}
 	if metadata.Network == "tcp" && metadata.IsClient {
-		time.AfterFunc(100*time.Millisecond, func() {
+		c.probeTimer = time.AfterFunc(100*time.Millisecond, func() {
 			// avoid the situation where the server sends messages first
 			if _, err = c.Write(nil); err != nil {
 				return
@@ -72,6 +74,13 @@ func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, e
 		})
 	}
 	return c, nil
+}
+
+func (c *Conn) Close() error {
+	if c.probeTimer != nil {
+		c.probeTimer.Stop()
+	}
+	return c.Conn.Close()
 }
 
 func (c *Conn) reqHeaderFromPool() (buf []byte) {
