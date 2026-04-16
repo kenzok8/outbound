@@ -249,7 +249,12 @@ func (d *naiveDialer) newClientConn(ctx context.Context, magicNetwork string) (n
 		}
 	}
 
-	transport := &http2.Transport{ConnPool: d.pool}
+	transport := &http2.Transport{
+		ConnPool:        d.pool,
+		IdleConnTimeout: 90 * time.Second,
+		ReadIdleTimeout: 30 * time.Second,
+		PingTimeout:     15 * time.Second,
+	}
 	h2Conn, err := transport.NewClientConn(&netproxy.FakeNetConn{Conn: rawConn})
 	if err != nil {
 		_ = rawConn.Close()
