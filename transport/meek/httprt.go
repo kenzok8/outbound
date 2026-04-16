@@ -93,7 +93,7 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
-	result, err := io.ReadAll(httpResp.Body)
+	result, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 	if err != nil {
 		return
 	}
