@@ -58,7 +58,11 @@ func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	packet = p.list.Remove(p.list.Front()).(*Packet)
+	front := p.list.Front()
+	if front == nil {
+		return nil, p.closed.Load()
+	}
+	packet = p.list.Remove(front).(*Packet)
 	if p.list.Len() == 0 {
 		p.setEmpty()
 	}

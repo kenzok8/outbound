@@ -214,8 +214,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				if err != nil {
 					if resp != nil {
 						_ = resp.Body.Close()
-						return 0, err
 					}
+					return 0, err
 				}
 				_ = resp.Body.Close()
 				if resp.StatusCode != 200 {
@@ -241,6 +241,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 			resp, err := h2clientConn.RoundTrip(req) // nolint: bodyclose
 			if err != nil {
+				_ = pw.CloseWithError(err)
+				<-done
 				return nil, 0, err
 			}
 
@@ -332,13 +334,20 @@ func (h *http2Conn) Write(p []byte) (n int, err error) {
 }
 
 func (h *http2Conn) Close() error {
-	_ = h.in.Close()
-	return h.out.Close()
+	inErr := h.in.Close()
+	outErr := h.out.Close()
+	if inErr != nil && outErr != nil {
+		return fmt.Errorf("in.Close(): %w; out.Close(): %v", inErr, outErr)
+	}
+	if inErr != nil {
+		return inErr
+	}
+	return outErr
 }
 
 type h2Conn struct {
-	rawConn    netproxy.Conn
-	h2Conn     *http2.ClientConn
+	rawConn netproxy.Conn
+	h2Conn  *http2.ClientConn
 }
 
 type lockedList struct {
@@ -433,7 +442,10 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 		return rawConn, nil, nil
 	case "h2":
 		t := http2.Transport{
-			ConnPool: p,
+			ConnPool:        p,
+			IdleConnTimeout: 90 * time.Second,
+			ReadIdleTimeout: 30 * time.Second,
+			PingTimeout:     15 * time.Second,
 		}
 		h2clientConn, err := t.NewClientConn(&netproxy.FakeNetConn{
 			Conn: rawConn,
