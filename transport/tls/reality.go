@@ -372,9 +372,11 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 							break
 						}
 						req.Header.Set("Referer", req.URL.String())
-						if body, err = io.ReadAll(resp.Body); err != nil {
+						if body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err != nil {
+							_ = resp.Body.Close()
 							break
 						}
+						_ = resp.Body.Close()
 						maps.Lock()
 						for _, m := range href.FindAllSubmatch(body, -1) {
 							m[1] = bytes.TrimPrefix(m[1], prefix)

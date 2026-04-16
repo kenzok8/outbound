@@ -88,6 +88,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 
 		req, err := http.NewRequest("GET", t.path, nil)
 		if err != nil {
+			_ = conn.Close()
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 		req.Header.Set("Connection", "upgrade")
@@ -96,12 +97,14 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 
 		err = req.Write(conn)
 		if err != nil {
+			_ = conn.Close()
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 
 		// TODO The bufio usage here is unreliable
 		resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 		if err != nil {
+			_ = conn.Close()
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 
@@ -110,6 +113,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 			strings.ToLower(resp.Header.Get("Connection")) == "upgrade" {
 			return conn, nil
 		}
+		_ = conn.Close()
 		return nil, errors.New("httpupgrade: unrecognized reply")
 
 	case "udp":

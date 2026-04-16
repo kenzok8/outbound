@@ -120,8 +120,8 @@ func (s *assemblerClientSession) runOnce() {
 		}
 		for {
 			ctx, cancel := netproxy.NewDialTimeoutContextFrom(s.ctx)
-			defer cancel()
 			resp, err := s.tripper.RoundTrip(ctx, Request{Data: data, ConnectionTag: s.sessionID})
+			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return

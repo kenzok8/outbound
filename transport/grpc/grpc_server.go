@@ -38,7 +38,7 @@ type ServerConn struct {
 }
 
 func NewServerConn(tun proto.GunService_TunServer, localAddr net.Addr) *ServerConn {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(tun.Context())
 	ctxRead, cancelRead := context.WithCancel(context.Background())
 	ctxWrite, cancelWrite := context.WithCancel(context.Background())
 	return &ServerConn{
@@ -77,7 +77,6 @@ func (c *ServerConn) Read(p []byte) (n int, err error) {
 	readDone := make(chan RecvResp, 1)
 	// pass channel to the function to avoid closure leak
 	go func(readDone chan RecvResp) {
-		// FIXME: not really abort the send so there is some problems when recover
 		c.muRecv.Lock()
 		defer c.muRecv.Unlock()
 		recv, e := c.tun.Recv()
@@ -122,7 +121,6 @@ func (c *ServerConn) Write(p []byte) (n int, err error) {
 	sendDone := make(chan error, 1)
 	// pass channel to the function to avoid closure leak
 	go func(sendDone chan error) {
-		// FIXME: not really abort the send so there is some problems when recover
 		c.muSend.Lock()
 		defer c.muSend.Unlock()
 		e := c.tun.Send(&proto.Hunk{Data: p})
