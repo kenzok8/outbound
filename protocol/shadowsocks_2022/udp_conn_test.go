@@ -295,3 +295,37 @@ func TestUdpConn_ReadFromChacha2022(t *testing.T) {
 		t.Fatalf("unexpected payload: got %q want %q", got, string(wantPayload))
 	}
 }
+
+func TestUdpConn_DecryptCipherCacheDropsToLowWatermarkAfterBurst(t *testing.T) {
+	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
+	if conf == nil {
+		t.Fatal("missing ss2022 cipher config")
+	}
+
+	psk := make([]byte, conf.KeyLen)
+	for i := range psk {
+		psk[i] = 0x42
+	}
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := NewUdpConn(&udpReadBufferConn{}, core, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i <= maxDecryptCipherEntries; i++ {
+		var sessionID [8]byte
+		sessionID[0] = byte(i)
+		sessionID[1] = byte(i >> 8)
+		if _, err := conn.decryptCipherFor(sessionID); err != nil {
+			t.Fatalf("decryptCipherFor(%d): %v", i, err)
+		}
+	}
+
+	if got := len(conn.decryptCiphers); got > decryptCipherLowWatermark {
+		t.Fatalf("decrypt cipher cache size = %d, want <= %d after burst trimming", got, decryptCipherLowWatermark)
+	}
+}

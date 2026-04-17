@@ -43,11 +43,14 @@ type UdpConn struct {
 	cipherOnce sync.Once
 	cipherErr  error
 
+	// decryptCiphersMu guards decryptCiphers to allow bounded eviction
+	// without the race-prone sync.Map Range+Delete pattern.
+	decryptCiphersMu sync.Mutex
 	// decryptCiphers caches inbound AEAD instances by remote session ID.
 	// Keeping this per-UdpConn avoids the old process-wide cache while
 	// preserving the protocol requirement that receive-side decryption uses
 	// the sender's session ID, not the local one.
-	decryptCiphers sync.Map // map[[8]byte]cipher.AEAD
+	decryptCiphers map[[8]byte]cipher.AEAD
 
 	bloom *disk_bloom.FilterGroup
 
@@ -64,6 +67,8 @@ const (
 	udpPacketReplayWindowSize = 1024
 	maxTrackedUdpSessions     = 128
 	udpPacketNonceSize        = 24
+	maxDecryptCipherEntries   = 64
+	decryptCipherLowWatermark = maxDecryptCipherEntries / 2
 )
 
 type udpSessionReplayState struct {
@@ -81,14 +86,12 @@ func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) 
 // not for ongoing I/O operations. UDP connections are long-lived and should not be
 // bound to the dial context's timeout.
 func NewUdpConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	u := &UdpConn{
-		SS2022Core: core,
-		Conn:       conn,
-		ctx:        context.Background(), // Use Background for long-lived UDP connections
-		bloom:      bloom,
+		SS2022Core:     core,
+		Conn:           conn,
+		ctx:            context.Background(), // Use Background for long-lived UDP connections
+		bloom:          bloom,
+		decryptCiphers: make(map[[8]byte]cipher.AEAD, 16),
 	}
 
 	// Generate session ID
@@ -167,17 +170,36 @@ func (c *UdpConn) ensureCipher() error {
 }
 
 func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
-	if cached, ok := c.decryptCiphers.Load(sessionID); ok {
-		return cached.(cipher.AEAD), nil
+	c.decryptCiphersMu.Lock()
+	defer c.decryptCiphersMu.Unlock()
+
+	if cached, ok := c.decryptCiphers[sessionID]; ok {
+		return cached, nil
 	}
 
 	sessionCipher, err := CreateCipher(c.UPSK(), sessionID[:], c.CipherConf())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create decrypt cipher for remote session: %w", err)
 	}
-	actual, _ := c.decryptCiphers.LoadOrStore(sessionID, sessionCipher)
 
-	return actual.(cipher.AEAD), nil
+	// Trim the cache back to a lower watermark once it reaches the cap so a
+	// burst of new remote sessions does not pay an eviction penalty on every
+	// subsequent miss while still keeping the memory usage bounded.
+	if len(c.decryptCiphers) >= maxDecryptCipherEntries {
+		// Map iteration order is intentionally unspecified, which is good enough
+		// for approximate eviction because remote sessions rotate frequently.
+		toDelete := len(c.decryptCiphers) - decryptCipherLowWatermark + 1
+		for k := range c.decryptCiphers {
+			delete(c.decryptCiphers, k)
+			toDelete--
+			if toDelete == 0 {
+				break
+			}
+		}
+	}
+
+	c.decryptCiphers[sessionID] = sessionCipher
+	return sessionCipher, nil
 }
 
 func (c *UdpConn) nextPacketID() uint64 {

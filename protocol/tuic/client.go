@@ -206,45 +206,47 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 			}
 			return err
 		}
-		go func(message []byte) {
-			var err error
-			var assocId uint16
-			defer func() {
-				t.deferQuicConn(quicConn, err)
-				if err != nil && assocId != 0 {
-					if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
-						_ = val.(*Packets).Close()
-					}
-				}
-			}()
-			reader := bytes.NewReader(message)
-			commandHead, err := ReadCommandHead(reader)
-			if err != nil {
-				return // Ignore ReadFrom errors
-			}
-			switch commandHead.TYPE {
-			case PacketType:
-				var packet *Packet
-				packet, err = ReadPacketWithHead(commandHead, reader)
-				if err != nil {
-					return // Ignore ReadFrom errors
-				}
-				if t.udp && t.UdpRelayMode == common.NATIVE {
-					assocId = packet.ASSOC_ID
-					if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
-						incomingPackets := val.(*Packets)
-						incomingPackets.PushBack(packet)
-					}
-				}
-			case HeartbeatType:
-				_, err = ReadHeartbeatWithHead(commandHead, reader)
-				if err != nil {
-					return // Ignore ReadFrom errors
-				}
-			}
-			_ = err
-		}(message)
+		t.processDatagram(quicConn, message)
 	}
+}
+
+func (t *clientImpl) processDatagram(quicConn quic.Connection, message []byte) {
+	var err error
+	var assocId uint16
+	defer func() {
+		t.deferQuicConn(quicConn, err)
+		if err != nil && assocId != 0 {
+			if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
+				_ = val.(*Packets).Close()
+			}
+		}
+	}()
+	reader := bytes.NewReader(message)
+	commandHead, err := ReadCommandHead(reader)
+	if err != nil {
+		return // Ignore ReadFrom errors
+	}
+	switch commandHead.TYPE {
+	case PacketType:
+		var packet *Packet
+		packet, err = ReadPacketWithHead(commandHead, reader)
+		if err != nil {
+			return // Ignore ReadFrom errors
+		}
+		if t.udp && t.UdpRelayMode == common.NATIVE {
+			assocId = packet.ASSOC_ID
+			if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
+				incomingPackets := val.(*Packets)
+				incomingPackets.PushBack(packet)
+			}
+		}
+	case HeartbeatType:
+		_, err = ReadHeartbeatWithHead(commandHead, reader)
+		if err != nil {
+			return // Ignore ReadFrom errors
+		}
+	}
+	_ = err
 }
 
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {

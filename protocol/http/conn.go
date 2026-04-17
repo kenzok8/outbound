@@ -351,14 +351,16 @@ type h2Conn struct {
 }
 
 type lockedList struct {
-	l  *list.List
-	mu sync.Mutex
+	l    *list.List
+	mu   sync.Mutex
+	refs int
 }
 
 func newLockedList() *lockedList {
 	return &lockedList{
-		l:  list.New(),
-		mu: sync.Mutex{},
+		l:    list.New(),
+		mu:   sync.Mutex{},
+		refs: 0,
 	}
 }
 
@@ -390,6 +392,42 @@ func (p *h2ConnsPool) registerAddrToMagicNetworkMapping(addr string, magicNetwor
 	p.addr2Somark.Store(addr, magicNetwork)
 }
 
+func (p *h2ConnsPool) acquireConnList(addr string) (*lockedList, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	conns, cached := p.h2ConnsPool[addr]
+	if conns == nil {
+		conns = newLockedList()
+		p.h2ConnsPool[addr] = conns
+	}
+	conns.refs++
+	return conns, cached
+}
+
+func (p *h2ConnsPool) releaseConnList(addr string, conns *lockedList) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if conns.refs > 0 {
+		conns.refs--
+	}
+	p.cleanupConnListLocked(addr, conns)
+}
+
+func (p *h2ConnsPool) cleanupConnListLocked(addr string, conns *lockedList) {
+	if conns == nil || p.h2ConnsPool[addr] != conns || conns.refs != 0 {
+		return
+	}
+	conns.mu.Lock()
+	empty := conns.l.Len() == 0
+	conns.mu.Unlock()
+	if !empty {
+		return
+	}
+	delete(p.h2ConnsPool, addr)
+	p.addr2Dialer.Delete(addr)
+	p.addr2Somark.Delete(addr)
+}
+
 func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error) {
 	p.mu.Lock()
 	ident, ok := p.h2Conn2Ident[c]
@@ -401,12 +439,8 @@ func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error
 }
 
 func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
-	p.mu.Lock()
-	if p.h2ConnsPool[addr] == nil {
-		p.h2ConnsPool[addr] = newLockedList()
-	}
-	conns, cachedConnsFound := p.h2ConnsPool[addr]
-	p.mu.Unlock()
+	conns, cachedConnsFound := p.acquireConnList(addr)
+	defer p.releaseConnList(addr, conns)
 
 	if cachedConnsFound {
 		conns.mu.Lock()
@@ -490,12 +524,19 @@ func (p *h2ConnsPool) MarkDead(h2c *http2.ClientConn) {
 		p.mu.Unlock()
 		return
 	}
-	conns := p.h2ConnsPool[ident.addr]
+	addr := ident.addr
+	conns := p.h2ConnsPool[addr]
 	delete(p.h2Conn2Ident, h2c)
 	p.mu.Unlock()
+	if conns == nil {
+		return
+	}
 	conns.mu.Lock()
 	conns.l.Remove(ident.ele)
 	conns.mu.Unlock()
+	p.mu.Lock()
+	p.cleanupConnListLocked(addr, conns)
+	p.mu.Unlock()
 }
 
 var connPool = newH2ConnsPool()

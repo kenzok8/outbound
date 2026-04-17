@@ -72,9 +72,6 @@ func NewTCPConn(conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, a
 }
 
 func NewTCPConnWithContext(ctx context.Context, conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	tcpConn := &TCPConn{
 		SS2022Core: core,
 		Conn:       conn,
