@@ -83,8 +83,20 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 		}
 
 		if t.tlsConfig != nil {
-			conn = tls.Client(&netproxy.FakeNetConn{Conn: conn}, t.tlsConfig)
+			tlsConn := tls.Client(&netproxy.FakeNetConn{Conn: conn}, t.tlsConfig)
+			if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
+				_ = tlsConn.Close()
+				return nil, fmt.Errorf("httpupgrade: %w", err)
+			}
+			conn = tlsConn
 		}
+
+		restoreDeadline, err := netproxy.ApplyConnDeadlineFromContext(ctx, conn)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("httpupgrade: %w", err)
+		}
+		defer restoreDeadline()
 
 		req, err := http.NewRequest("GET", t.path, nil)
 		if err != nil {

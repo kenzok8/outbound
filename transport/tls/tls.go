@@ -151,7 +151,8 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 			return nil, fmt.Errorf("unknown tls implementation: %v", s.tlsImplentation)
 		}
 
-		if err := tlsConn.Handshake(); err != nil {
+		if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
+			_ = tlsConn.Close()
 			return nil, err
 		}
 		return tlsConn, err

@@ -21,6 +21,8 @@ import (
 
 const Ver5 = 0x5
 
+const tuicImmediateFailureWindow = 75 * time.Millisecond
+
 type ClientOption struct {
 	TlsConfig             *tls.Config
 	QuicConfig            *quic.Config
@@ -306,6 +308,65 @@ func (t *clientImpl) Close() error {
 	return nil
 }
 
+func tuicConnectConfirmationWindow(ctx context.Context) time.Duration {
+	if ctx == nil {
+		return tuicImmediateFailureWindow
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0
+		}
+		if remaining < tuicImmediateFailureWindow {
+			return remaining
+		}
+	}
+	return tuicImmediateFailureWindow
+}
+
+func tuicContextCause(ctx context.Context) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return context.Canceled
+}
+
+func waitForImmediateTUICConnectFailure(ctx context.Context, quicConn quic.Connection, stream quic.Stream) error {
+	window := tuicConnectConfirmationWindow(ctx)
+	if window <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-quicConn.Context().Done():
+			return tuicContextCause(quicConn.Context())
+		case <-stream.Context().Done():
+			return tuicContextCause(stream.Context())
+		default:
+			return nil
+		}
+	}
+
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-quicConn.Context().Done():
+		return tuicContextCause(quicConn.Context())
+	case <-stream.Context().Done():
+		return tuicContextCause(stream.Context())
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (netproxy.Conn, error) {
 	if t.closed {
 		return nil, common.ErrClientClosed
@@ -329,16 +390,20 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protoc
 		if err != nil {
 			return nil, err
 		}
+		if _, err = quicStream.Write(buf); err != nil {
+			_ = quicStream.Close()
+			return nil, err
+		}
+		if err = waitForImmediateTUICConnectFailure(ctx, quicConn, quicStream); err != nil {
+			_ = quicStream.Close()
+			return nil, err
+		}
 		stream = common.NewSafeStreamConn(
 			quicStream,
 			quicConn.LocalAddr(),
 			quicConn.RemoteAddr(),
 			nil,
 		)
-		if _, err = stream.Write(buf); err != nil {
-			_ = stream.Close()
-			return nil, err
-		}
 		return stream, err
 	}()
 	if err != nil {

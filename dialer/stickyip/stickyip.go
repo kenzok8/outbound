@@ -424,7 +424,9 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 		if cachedAddr != "" && cachedAddr != d.proxyAddr {
 			targetAddr := rewriteAddrPort(cachedAddr, addr)
 			// Try with cached IP first
-			conn, err := d.dialer.DialContext(ctx, network, targetAddr)
+			cachedCtx, cancel := dialAttemptContext(ctx, 2)
+			conn, err := d.dialer.DialContext(cachedCtx, network, targetAddr)
+			cancel()
 			if err == nil {
 				if baseNetwork == "udp" {
 					_, ok := conn.(netproxy.PacketConn)
@@ -485,6 +487,45 @@ func (d *StickyIpDialer) lookupIPAddr(ctx context.Context, network, host string)
 		return resolver.LookupIPAddr(ctx, network, host)
 	}
 	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+const (
+	// Preserve a small reserve for each fallback attempt without shrinking the
+	// first attempt so aggressively that a merely slow-but-working IP is never
+	// given a fair chance to connect.
+	stickyFallbackReservePerAttempt = 750 * time.Millisecond
+)
+
+func dialAttemptContext(ctx context.Context, attemptsRemaining int) (context.Context, context.CancelFunc) {
+	if attemptsRemaining < 1 {
+		attemptsRemaining = 1
+	}
+	if ctx == nil {
+		return netproxy.NewDialTimeoutContext()
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.WithDeadline(ctx, deadline)
+		}
+		if attemptsRemaining == 1 {
+			return context.WithDeadline(ctx, deadline)
+		}
+
+		reserve := time.Duration(attemptsRemaining-1) * stickyFallbackReservePerAttempt
+		if maxReserve := remaining / 2; reserve > maxReserve {
+			reserve = maxReserve
+		}
+		slice := remaining - reserve
+		if slice <= 0 {
+			slice = remaining / 2
+			if slice <= 0 {
+				slice = remaining
+			}
+		}
+		return context.WithTimeout(ctx, slice)
+	}
+	return netproxy.NewDialTimeoutContextFrom(ctx)
 }
 
 // isProxyAddress checks if the given address matches the proxy address.
@@ -564,7 +605,7 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 
 	// Try each IP until one works
 	var lastErr error
-	for _, ipAddr := range ips {
+	for i, ipAddr := range ips {
 		if ipAddr.IP == nil {
 			continue
 		}
@@ -572,7 +613,9 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 		targetAddr := net.JoinHostPort(ipAddrStr, port)
 
 		logTryingIP(d.proxyAddr, targetAddr, network)
-		conn, err := d.dialer.DialContext(ctx, network, targetAddr)
+		attemptCtx, cancel := dialAttemptContext(ctx, len(ips)-i)
+		conn, err := d.dialer.DialContext(attemptCtx, network, targetAddr)
+		cancel()
 		if err == nil {
 			if baseNetwork == "udp" {
 				_, ok := conn.(netproxy.PacketConn)

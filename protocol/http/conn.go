@@ -28,6 +28,9 @@ type Conn struct {
 	proxy        *HttpProxy
 	magicNetwork string
 	tgt          string
+	// handshakeDeadline preserves the original dial budget for the lazy
+	// proxy handshake that starts on the first Read/Write.
+	handshakeDeadline time.Time
 
 	ctxShakeFinished    context.Context
 	cancelShakeFinished func()
@@ -108,16 +111,21 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	}
 }
 
-func NewConn(nextDialer netproxy.Dialer, proxy *HttpProxy, addr string, network string) *Conn {
+func NewConn(ctx context.Context, nextDialer netproxy.Dialer, proxy *HttpProxy, addr string, network string) *Conn {
 	ctxShakeFinished, cancelShakeFinished := context.WithCancel(context.Background())
 	return &Conn{
 		nextDialer:          nextDialer,
 		proxy:               proxy,
 		tgt:                 addr,
 		magicNetwork:        network,
+		handshakeDeadline:   netproxy.CaptureDeadline(ctx),
 		ctxShakeFinished:    ctxShakeFinished,
 		cancelShakeFinished: cancelShakeFinished,
 	}
+}
+
+func (c *Conn) newHandshakeContext() (context.Context, context.CancelFunc) {
+	return netproxy.NewDialTimeoutContextWithCapturedDeadline(c.handshakeDeadline)
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
@@ -199,8 +207,15 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			req.Header.Del("Proxy-Connection")
 		}
 
-		connectHttp1 := func(rawConn netproxy.Conn) (n int, err error) {
-			err = req.WriteProxy(rawConn)
+		connectHttp1 := func(handshakeCtx context.Context, rawConn netproxy.Conn) (n int, err error) {
+			restoreDeadline, err := netproxy.ApplyConnDeadlineFromContext(handshakeCtx, rawConn)
+			if err != nil {
+				return 0, err
+			}
+			defer restoreDeadline()
+
+			proxyReq := req.Clone(context.Background())
+			err = proxyReq.WriteProxy(rawConn)
 			if err != nil {
 				return 0, err
 			}
@@ -210,7 +225,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				return len(b), nil
 			} else {
 				// We should read tcp connection here, and we will be guaranteed higher priority by chShakeFinished.
-				resp, err := http.ReadResponse(bufio.NewReader(rawConn), req)
+				resp, err := http.ReadResponse(bufio.NewReader(rawConn), proxyReq)
 				if err != nil {
 					if resp != nil {
 						_ = resp.Body.Close()
@@ -227,31 +242,68 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 
 		// Thanks to v2fly/v2ray-core.
-		connectHttp2 := func(rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+		connectHttp2 := func(handshakeCtx context.Context, rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+			proxyReq := req.Clone(context.Background())
 			pr, pw := io.Pipe()
-			req.Body = pr
+			proxyReq.Body = pr
+
+			var timer *time.Timer
+			timeoutTriggered := make(chan struct{})
+			cancelCh := make(chan struct{})
+			completed := make(chan struct{})
+			var completeOnce sync.Once
+			var cancelOnce sync.Once
+			if deadline, ok := handshakeCtx.Deadline(); ok {
+				timeout := time.Until(deadline)
+				if timeout <= 0 {
+					_ = pw.CloseWithError(context.DeadlineExceeded)
+					return nil, 0, context.DeadlineExceeded
+				}
+				timer = time.AfterFunc(timeout, func() {
+					select {
+					case <-completed:
+						return
+					default:
+					}
+					close(timeoutTriggered)
+					cancelOnce.Do(func() { close(cancelCh) })
+				})
+				proxyReq.Cancel = cancelCh
+			}
+			defer completeOnce.Do(func() { close(completed) })
 
 			var pErr error
-			var done = make(chan struct{})
+			done := make(chan struct{})
 
 			go func() {
+				defer close(done)
 				_, pErr = pw.Write(b)
-				done <- struct{}{}
 			}()
 
-			resp, err := h2clientConn.RoundTrip(req) // nolint: bodyclose
+			resp, err := h2clientConn.RoundTrip(proxyReq) // nolint: bodyclose
+			completeOnce.Do(func() { close(completed) })
+			if timer != nil {
+				timer.Stop()
+			}
 			if err != nil {
 				_ = pw.CloseWithError(err)
 				<-done
+				select {
+				case <-timeoutTriggered:
+					return nil, 0, context.DeadlineExceeded
+				default:
+				}
 				return nil, 0, err
 			}
 
 			<-done
 			if pErr != nil {
+				_ = resp.Body.Close()
 				return nil, 0, pErr
 			}
 
 			if resp.StatusCode != http.StatusOK {
+				_ = resp.Body.Close()
 				return nil, 0, fmt.Errorf("proxy responded with non 200 code: %v", resp.Status)
 			}
 			return newHTTP2Conn(&netproxy.FakeNetConn{
@@ -260,22 +312,24 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 
 		if !c.proxy.https {
-			ctx, cancel := netproxy.NewDialTimeoutContext()
+			ctx, cancel := c.newHandshakeContext()
 			defer cancel()
 			conn, err := c.nextDialer.DialContext(ctx, c.magicNetwork, c.proxy.Addr)
 			if err != nil {
 				return 0, err
 			}
 			c.conn = conn
-			return connectHttp1(conn)
+			return connectHttp1(ctx, conn)
 		}
 
-		rawConn, h2Conn, err := connPool.GetConn(c.nextDialer, c.proxy.Addr, c.magicNetwork)
+		handshakeCtx, cancel := c.newHandshakeContext()
+		defer cancel()
+		rawConn, h2Conn, err := connPool.GetConn(handshakeCtx, c.nextDialer, c.proxy.Addr, c.magicNetwork)
 		if err != nil {
 			return 0, err
 		}
 		if h2Conn != nil {
-			proxyConn, n, err := connectHttp2(rawConn, h2Conn, req)
+			proxyConn, n, err := connectHttp2(handshakeCtx, rawConn, h2Conn, req)
 			if err != nil {
 				return 0, err
 			}
@@ -283,14 +337,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			c.isH2 = true
 			return n, nil
 		} else {
-			ctx, cancel := netproxy.NewDialTimeoutContext()
-			defer cancel()
-			conn, err := c.nextDialer.DialContext(ctx, c.magicNetwork, c.proxy.Addr)
-			if err != nil {
-				return 0, err
-			}
-			c.conn = conn
-			return connectHttp1(conn)
+			c.conn = rawConn
+			return connectHttp1(handshakeCtx, rawConn)
 		}
 	}
 }
@@ -438,7 +486,7 @@ func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error
 	return ident.ele.Value.(*h2Conn).rawConn, nil
 }
 
-func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
+func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
 	conns, cachedConnsFound := p.acquireConnList(addr)
 	defer p.releaseConnList(addr, conns)
 
@@ -457,15 +505,16 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 	}
 
 	// New.
-	ctx, cancel := netproxy.NewDialTimeoutContext()
+	dialCtx, cancel := netproxy.NewDialTimeoutContextFrom(ctx)
 	defer cancel()
-	rawConn, err := nextDialer.DialContext(ctx, magicNetwork, addr)
+	rawConn, err := nextDialer.DialContext(dialCtx, magicNetwork, addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("h2ConnsPool.GetClientConn: %w", err)
 	}
 	nextProto := ""
 	if tlsConn, ok := rawConn.(*tls.Conn); ok {
-		if err := tlsConn.Handshake(); err != nil {
+		if err := netproxy.HandshakeWithContext(dialCtx, tlsConn); err != nil {
+			_ = rawConn.Close()
 			return nil, nil, err
 		}
 		nextProto = tlsConn.ConnectionState().NegotiatedProtocol
@@ -513,7 +562,7 @@ func (p *h2ConnsPool) GetClientConn(req *http.Request, addr string) (*http2.Clie
 		return nil, fmt.Errorf("no valid dialer for h2ConnsPool.GetClientConn")
 	}
 	somark, _ := p.addr2Somark.Load(addr)
-	_, h2Conn, err := p.GetConn(d.(netproxy.Dialer), addr, somark.(string))
+	_, h2Conn, err := p.GetConn(req.Context(), d.(netproxy.Dialer), addr, somark.(string))
 	return h2Conn, err
 }
 

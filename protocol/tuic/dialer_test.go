@@ -71,6 +71,30 @@ func TestTcp(t *testing.T) {
 	}
 }
 
+func TestTcpReturnsErrorWhenRemoteConnectFailsImmediately(t *testing.T) {
+	server := startTestTUICServer(t, testTUICPassword)
+	defer server.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	dialer := newTestTUICDialer(t, server.Addr())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	conn, err := dialer.DialContext(ctx, "tcp", backendAddr)
+	if err == nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		t.Fatal("DialContext() error = nil, want remote connect failure")
+	}
+}
+
 func TestUdp(t *testing.T) {
 	server := startTestTUICServer(t, testTUICPassword)
 	defer server.Close()

@@ -130,11 +130,21 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	conn := rawConn.(net.Conn)
 
 	tlsConn := tls.Client(conn, d.tlsConfig)
+	if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
 
 	buf := pool.Get(len(d.key) + 2)
 	defer pool.Put(buf)
 	copy(buf, d.key)
 	binary.BigEndian.PutUint16(buf[len(d.key):], uint16(0))
+	restoreDeadline, err := netproxy.ApplyConnDeadlineFromContext(ctx, tlsConn)
+	if err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
+	defer restoreDeadline()
 	if _, err := tlsConn.Write(buf); err != nil {
 		_ = tlsConn.Close()
 		return nil, err

@@ -61,16 +61,20 @@ type recordingLookupDialer struct {
 	lookupResult  []net.IPAddr
 	lookupErr     error
 
-	dialCalls [][2]string
-	conn      netproxy.Conn
-	dialErr   error
-	dialFunc  func(network, addr string) (netproxy.Conn, error)
+	dialCalls       [][2]string
+	conn            netproxy.Conn
+	dialErr         error
+	dialFunc        func(network, addr string) (netproxy.Conn, error)
+	dialContextFunc func(ctx context.Context, network, addr string) (netproxy.Conn, error)
 }
 
-func (d *recordingLookupDialer) DialContext(_ context.Context, network, addr string) (netproxy.Conn, error) {
+func (d *recordingLookupDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
 	d.mu.Lock()
 	d.dialCalls = append(d.dialCalls, [2]string{network, addr})
 	d.mu.Unlock()
+	if d.dialContextFunc != nil {
+		return d.dialContextFunc(ctx, network, addr)
+	}
 	if d.dialFunc != nil {
 		return d.dialFunc(network, addr)
 	}
@@ -272,6 +276,64 @@ func TestStickyIpDialerUsesCachedUDPProxyAddrWithoutReadProbe(t *testing.T) {
 	}
 	if secondConn.setReadDeadlineCalls != 0 {
 		t.Fatalf("second conn SetReadDeadline() calls = %d, want 0", secondConn.setReadDeadlineCalls)
+	}
+}
+
+func TestStickyIpDialerKeepsBudgetForAlternativeResolvedIPs(t *testing.T) {
+	parent := &recordingLookupDialer{
+		lookupResult: []net.IPAddr{
+			{IP: net.ParseIP("198.51.100.10")},
+			{IP: net.ParseIP("198.51.100.20")},
+		},
+	}
+	parent.dialContextFunc = func(ctx context.Context, _ string, addr string) (netproxy.Conn, error) {
+		if addr == "198.51.100.10:443" {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nopConn{}, nil
+	}
+
+	dialer := NewStickyIpDialer(parent, "proxy.example:443", NewProxyIpCache())
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	conn, err := dialer.DialContext(ctx, "tcp", "proxy.example:443")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	if conn == nil {
+		t.Fatal("DialContext() returned nil conn")
+	}
+
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if len(parent.dialCalls) != 2 {
+		t.Fatalf("DialContext() calls = %d, want 2", len(parent.dialCalls))
+	}
+	if got, want := parent.dialCalls[0][1], "198.51.100.10:443"; got != want {
+		t.Fatalf("first dial addr = %q, want %q", got, want)
+	}
+	if got, want := parent.dialCalls[1][1], "198.51.100.20:443"; got != want {
+		t.Fatalf("second dial addr = %q, want %q", got, want)
+	}
+}
+
+func TestDialAttemptContextLeavesReserveWithoutEqualSplit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	attemptCtx, attemptCancel := dialAttemptContext(ctx, 4)
+	defer attemptCancel()
+
+	deadline, ok := attemptCtx.Deadline()
+	if !ok {
+		t.Fatal("dialAttemptContext() did not preserve a deadline")
+	}
+
+	remaining := time.Until(deadline)
+	if remaining < 5*time.Second || remaining > 7*time.Second {
+		t.Fatalf("first-attempt budget = %v, want a majority of the original budget with fallback reserve preserved", remaining)
 	}
 }
 

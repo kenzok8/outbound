@@ -204,12 +204,13 @@ func (d *naiveDialer) dialTCP(ctx context.Context, magicNetwork string, target s
 	}
 
 	return &naiveConn{
-		dialer:        d,
-		h2Conn:        h2Conn,
-		rawConn:       rawConn,
-		magicNetwork:  magicNetwork,
-		target:        target,
-		handshakeDone: make(chan struct{}),
+		dialer:            d,
+		h2Conn:            h2Conn,
+		rawConn:           rawConn,
+		magicNetwork:      magicNetwork,
+		target:            target,
+		handshakeDeadline: netproxy.CaptureDeadline(ctx),
+		handshakeDone:     make(chan struct{}),
 	}, nil
 }
 
@@ -273,13 +274,13 @@ func (d *naiveDialer) newPooledClientConn(ctx context.Context, magicNetwork stri
 	return rawConn, h2Conn, nil
 }
 
-func (d *naiveDialer) newConnectRequest(target string) (*http.Request, *io.PipeWriter, error) {
+func (d *naiveDialer) newConnectRequest(ctx context.Context, target string) (*http.Request, *io.PipeWriter, error) {
 	reqURL := (&url.URL{
 		Scheme: "http",
 		Host:   target,
 	}).String()
 
-	req, err := http.NewRequest(http.MethodConnect, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, reqURL, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -304,18 +305,23 @@ type naiveConn struct {
 	magicNetwork string
 	target       string
 
-	stateMu          sync.Mutex
-	handshakeStarted bool
-	handshakeDone    chan struct{}
-	handshakeErr     error
-	stream           *naiveH2Stream
-	closed           bool
-	closeOnce        sync.Once
+	stateMu           sync.Mutex
+	handshakeDeadline time.Time
+	handshakeStarted  bool
+	handshakeDone     chan struct{}
+	handshakeErr      error
+	stream            *naiveH2Stream
+	closed            bool
+	closeOnce         sync.Once
 }
 
-func (c *naiveConn) handshake(firstWrite []byte) (conn *naiveH2Stream, n int, err error) {
+func (c *naiveConn) newHandshakeContext() (context.Context, context.CancelFunc) {
+	return netproxy.NewDialTimeoutContextWithCapturedDeadline(c.handshakeDeadline)
+}
+
+func (c *naiveConn) handshake(ctx context.Context, firstWrite []byte) (conn *naiveH2Stream, n int, err error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		req, pw, reqErr := c.dialer.newConnectRequest(c.target)
+		req, pw, reqErr := c.dialer.newConnectRequest(ctx, c.target)
 		if reqErr != nil {
 			return nil, 0, reqErr
 		}
@@ -324,7 +330,7 @@ func (c *naiveConn) handshake(firstWrite []byte) (conn *naiveH2Stream, n int, er
 		if roundTripErr != nil {
 			_ = pw.CloseWithError(roundTripErr)
 			if attempt == 0 && shouldRetryNaiveRoundTrip(roundTripErr) {
-				if refreshErr := c.refreshClientConn(); refreshErr == nil {
+				if refreshErr := c.refreshClientConn(ctx); refreshErr == nil {
 					continue
 				} else {
 					return nil, 0, fmt.Errorf("naive CONNECT retry failed after %v: %w", roundTripErr, refreshErr)
@@ -361,8 +367,8 @@ func (c *naiveConn) handshake(firstWrite []byte) (conn *naiveH2Stream, n int, er
 	return nil, 0, fmt.Errorf("naive CONNECT: exhausted retries")
 }
 
-func (c *naiveConn) refreshClientConn() error {
-	rawConn, h2Conn, err := c.dialer.newPooledClientConn(context.Background(), c.magicNetwork)
+func (c *naiveConn) refreshClientConn(ctx context.Context) error {
+	rawConn, h2Conn, err := c.dialer.newPooledClientConn(ctx, c.magicNetwork)
 	if err != nil {
 		return err
 	}
@@ -401,7 +407,9 @@ func (c *naiveConn) ensureHandshake(firstWrite []byte) (stream *naiveH2Stream, f
 		done := c.handshakeDone
 		c.stateMu.Unlock()
 
-		stream, firstWriteN, err = c.handshake(firstWrite)
+		handshakeCtx, cancel := c.newHandshakeContext()
+		stream, firstWriteN, err = c.handshake(handshakeCtx, firstWrite)
+		cancel()
 
 		c.stateMu.Lock()
 		if c.closed && stream != nil {

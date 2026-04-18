@@ -93,7 +93,7 @@ func (s *HttpProxy) DialContext(ctx context.Context, network, addr string) (netp
 	}
 	switch magicNetwork.Network {
 	case "tcp":
-		return NewConn(s.dialer, s, addr, network), nil
+		return NewConn(ctx, s.dialer, s, addr, network), nil
 	case "udp":
 		return nil, netproxy.UnsupportedTunnelTypeError
 	default:

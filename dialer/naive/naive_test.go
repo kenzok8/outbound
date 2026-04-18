@@ -2,6 +2,7 @@ package naive
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	stderrors "errors"
@@ -309,7 +310,7 @@ func TestNewConnectRequestUsesProxyAuthorization(t *testing.T) {
 		password: "pass",
 	}
 
-	req, pw, err := d.newConnectRequest("example.com:443")
+	req, pw, err := d.newConnectRequest(context.Background(), "example.com:443")
 	assert.NoError(t, err)
 	assert.NotNil(t, pw)
 	assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")), req.Header.Get("Proxy-Authorization"))
