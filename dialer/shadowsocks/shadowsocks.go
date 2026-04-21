@@ -174,14 +174,27 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 		if err != nil {
 			return nil, false
 		}
-		username := u.User.String()
-		username, _ = common.Base64UrlDecode(username)
-		arr := strings.SplitN(username, ":", 2)
-		if len(arr) != 2 {
+
+		var (
+			cipher   string
+			password string
+		)
+		if u.User == nil {
 			return nil, false
 		}
-		cipher := arr[0]
-		password := arr[1]
+		if parsedPassword, hasPassword := u.User.Password(); hasPassword {
+			cipher = u.User.Username()
+			password = parsedPassword
+		} else {
+			username := u.User.Username()
+			username, _ = common.Base64UrlDecode(username)
+			arr := strings.SplitN(username, ":", 2)
+			if len(arr) != 2 {
+				return nil, false
+			}
+			cipher = arr[0]
+			password = arr[1]
+		}
 		var sip003 Sip003
 		plugin := u.Query().Get("plugin")
 		if len(plugin) > 0 {

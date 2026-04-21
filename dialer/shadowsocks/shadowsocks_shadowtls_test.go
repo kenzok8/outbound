@@ -3,6 +3,7 @@ package shadowsocks
 import (
 	"context"
 	stderrors "errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -68,5 +69,26 @@ func TestShadowsocksDialerWithShadowTLSPlugin(t *testing.T) {
 	}
 	if !strings.Contains(property.Link, "password%3Dstls-password") {
 		t.Fatalf("plugin options are missing from exported link: %q", property.Link)
+	}
+}
+
+func TestParseSSURL_DecodesPercentEncodedPassword(t *testing.T) {
+	password := "RCF/0OOYmo6crue3LwlEyD8izLAbuUuyPic/vasJH/o="
+	link := (&url.URL{
+		Scheme:   "ss",
+		User:     url.UserPassword("2022-blake3-aes-256-gcm", password),
+		Host:     "127.0.0.1:443",
+		Fragment: "test",
+	}).String()
+
+	parsed, err := ParseSSURL(link)
+	if err != nil {
+		t.Fatalf("ParseSSURL failed: %v", err)
+	}
+	if parsed.Cipher != "2022-blake3-aes-256-gcm" {
+		t.Fatalf("unexpected cipher: %q", parsed.Cipher)
+	}
+	if parsed.Password != password {
+		t.Fatalf("unexpected password: got %q want %q", parsed.Password, password)
 	}
 }
