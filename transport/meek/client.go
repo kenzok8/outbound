@@ -130,7 +130,11 @@ func (s *assemblerClientSession) runOnce() {
 				continue
 			}
 			if len(resp.Data) != 0 {
-				s.readerChan <- resp.Data
+				select {
+				case <-s.ctx.Done():
+					return
+				case s.readerChan <- resp.Data:
+				}
 			}
 			if len(resp.Data) != 0 {
 				pollConnection = false

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -19,7 +20,18 @@ type Params struct {
 	Method, Passwd, Address, Port string
 }
 
+func requireJuicityIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping juicity integration test in short mode")
+	}
+	if os.Getenv("OUTBOUND_INTEGRATION") == "" {
+		t.Skip("skipping juicity integration test; set OUTBOUND_INTEGRATION=1 to enable")
+	}
+}
+
 func TestTcp(t *testing.T) {
+	requireJuicityIntegration(t)
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",
@@ -59,6 +71,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	requireJuicityIntegration(t)
 	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",

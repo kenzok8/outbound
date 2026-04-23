@@ -21,6 +21,21 @@ import (
 	"golang.org/x/net/http2"
 )
 
+var httpRequestLinePattern = regexp.MustCompile(`^\S+ \S+ HTTP/[\d.]+$`)
+
+var httpMethods = [][]byte{
+	[]byte("GET"),
+	[]byte("HEAD"),
+	[]byte("POST"),
+	[]byte("PUT"),
+	[]byte("DELETE"),
+	[]byte("CONNECT"),
+	[]byte("OPTIONS"),
+	[]byte("TRACE"),
+	[]byte("PATCH"),
+	[]byte("PRI"),
+}
+
 type Conn struct {
 	nextDialer netproxy.Dialer
 	conn       netproxy.Conn
@@ -40,6 +55,8 @@ type Conn struct {
 
 	isH2      bool
 	closeOnce sync.Once
+
+	pendingFirstWrite bytes.Buffer
 }
 
 func (c *Conn) SetDeadline(t time.Time) error {
@@ -132,7 +149,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	c.muShake.Lock()
 	defer c.muShake.Unlock()
 	defer func() {
-		if err == nil {
+		if err == nil && c.conn != nil {
 			c.muFinishShakeFuncs.Lock()
 			defer c.muFinishShakeFuncs.Unlock()
 			// SetDeadline after c.conn filled.
@@ -149,18 +166,39 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return c.conn.Write(b)
 	default:
 		// Handshake
-		defer c.cancelShakeFinished()
-		_, firstLine, _ := bufio.ScanLines(b, true)
-		isHttpReq := regexp.MustCompile(`^\S+ \S+ HTTP/[\d.]+$`).Match(firstLine)
+		handshakeInput := b
+		hadPendingFirstWrite := c.pendingFirstWrite.Len() > 0
+		if hadPendingFirstWrite {
+			_, _ = c.pendingFirstWrite.Write(b)
+			handshakeInput = c.pendingFirstWrite.Bytes()
+		}
+
+		firstLine, hasFirstLine := readHTTPFirstLine(handshakeInput)
+		if !c.proxy.https && !hasFirstLine && isPossibleHTTPRequestLinePrefix(handshakeInput) {
+			if !hadPendingFirstWrite {
+				_, _ = c.pendingFirstWrite.Write(handshakeInput)
+			}
+			return len(b), nil
+		}
+		isHttpReq := !c.proxy.https && httpRequestLinePattern.Match(firstLine)
+		payload := b
+		bufferedPrefixLen := 0
+		if hadPendingFirstWrite && !isHttpReq {
+			payload = bytes.Clone(handshakeInput)
+			bufferedPrefixLen = len(payload) - len(b)
+		}
 
 		var req *http.Request
 		if isHttpReq && !c.proxy.https {
 			// HTTP Request
 
-			req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(b)))
+			req, err = http.ReadRequest(bufio.NewReader(bytes.NewReader(handshakeInput)))
 			if err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) {
 					// Request more data.
+					if c.pendingFirstWrite.Len() == 0 {
+						_, _ = c.pendingFirstWrite.Write(handshakeInput)
+					}
 					return len(b), nil
 				}
 				// Error
@@ -169,6 +207,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 			req.URL.Scheme = "http"
 			req.URL.Host = c.tgt
+			c.pendingFirstWrite.Reset()
 		} else {
 			// Arbitrary TCP
 
@@ -188,7 +227,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			if err != nil {
 				return 0, err
 			}
+			c.pendingFirstWrite.Reset()
 		}
+		defer c.cancelShakeFinished()
 		if c.proxy.Host != "" {
 			req.Host = c.proxy.Host
 		} else if c.proxy.transport {
@@ -237,7 +278,20 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 					err = fmt.Errorf("connect server using proxy error, StatusCode [%d]", resp.StatusCode)
 					return 0, err
 				}
-				return rawConn.Write(b)
+				written, err := rawConn.Write(payload)
+				if err != nil {
+					if written <= bufferedPrefixLen {
+						return 0, err
+					}
+					return written - bufferedPrefixLen, err
+				}
+				if written < len(payload) {
+					if written <= bufferedPrefixLen {
+						return 0, io.ErrShortWrite
+					}
+					return written - bufferedPrefixLen, io.ErrShortWrite
+				}
+				return len(b), nil
 			}
 		}
 
@@ -247,30 +301,17 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			pr, pw := io.Pipe()
 			proxyReq.Body = pr
 
-			var timer *time.Timer
-			timeoutTriggered := make(chan struct{})
-			cancelCh := make(chan struct{})
-			completed := make(chan struct{})
-			var completeOnce sync.Once
-			var cancelOnce sync.Once
+			reqCtx := context.Background()
+			cancelReqCtx := func() {}
 			if deadline, ok := handshakeCtx.Deadline(); ok {
-				timeout := time.Until(deadline)
-				if timeout <= 0 {
+				if time.Until(deadline) <= 0 {
 					_ = pw.CloseWithError(context.DeadlineExceeded)
 					return nil, 0, context.DeadlineExceeded
 				}
-				timer = time.AfterFunc(timeout, func() {
-					select {
-					case <-completed:
-						return
-					default:
-					}
-					close(timeoutTriggered)
-					cancelOnce.Do(func() { close(cancelCh) })
-				})
-				proxyReq.Cancel = cancelCh
+				reqCtx, cancelReqCtx = context.WithDeadline(context.Background(), deadline)
+				proxyReq = proxyReq.WithContext(reqCtx)
 			}
-			defer completeOnce.Do(func() { close(completed) })
+			defer cancelReqCtx()
 
 			var pErr error
 			done := make(chan struct{})
@@ -281,17 +322,14 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			}()
 
 			resp, err := h2clientConn.RoundTrip(proxyReq) // nolint: bodyclose
-			completeOnce.Do(func() { close(completed) })
-			if timer != nil {
-				timer.Stop()
-			}
 			if err != nil {
 				_ = pw.CloseWithError(err)
 				<-done
-				select {
-				case <-timeoutTriggered:
-					return nil, 0, context.DeadlineExceeded
-				default:
+				if reqErr := reqCtx.Err(); reqErr != nil {
+					if errors.Is(reqErr, context.DeadlineExceeded) {
+						return nil, 0, context.DeadlineExceeded
+					}
+					return nil, 0, reqErr
 				}
 				return nil, 0, err
 			}
@@ -341,6 +379,38 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			return connectHttp1(handshakeCtx, rawConn)
 		}
 	}
+}
+
+func readHTTPFirstLine(b []byte) ([]byte, bool) {
+	lineEnd := bytes.IndexByte(b, '\n')
+	if lineEnd < 0 {
+		return nil, false
+	}
+	return bytes.TrimRight(b[:lineEnd], "\r"), true
+}
+
+func isPossibleHTTPRequestLinePrefix(b []byte) bool {
+	method := b
+	if methodEnd := bytes.IndexByte(b, ' '); methodEnd >= 0 {
+		method = b[:methodEnd]
+	}
+	if len(method) == 0 {
+		return false
+	}
+	for _, c := range method {
+		if c < 'A' || c > 'Z' {
+			return false
+		}
+	}
+	for _, httpMethod := range httpMethods {
+		if bytes.Equal(method, httpMethod) {
+			return true
+		}
+		if bytes.HasPrefix(httpMethod, method) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {

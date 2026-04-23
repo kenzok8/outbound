@@ -23,6 +23,15 @@ type Dialer struct {
 	skipVerify bool
 }
 
+type bufferedConn struct {
+	netproxy.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
 func (t *Dialer) UnwrapDialer() netproxy.Dialer {
 	return t.nextDialer
 }
@@ -113,8 +122,8 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 
-		// TODO The bufio usage here is unreliable
-		resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, req)
 		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("httpupgrade: %w", err)
@@ -123,7 +132,10 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 		if resp.Status == "101 Switching Protocols" &&
 			strings.ToLower(resp.Header.Get("Upgrade")) == "websocket" &&
 			strings.ToLower(resp.Header.Get("Connection")) == "upgrade" {
-			return conn, nil
+			if reader.Buffered() == 0 {
+				return conn, nil
+			}
+			return &bufferedConn{Conn: conn, reader: reader}, nil
 		}
 		_ = conn.Close()
 		return nil, errors.New("httpupgrade: unrecognized reply")

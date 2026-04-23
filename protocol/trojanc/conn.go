@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
@@ -29,8 +28,6 @@ type Conn struct {
 	netproxy.Conn
 	metadata Metadata
 	pass     [56]byte
-
-	probeTimer *time.Timer
 
 	writeMutex sync.Mutex
 	onceWrite  bool
@@ -65,21 +62,10 @@ func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, e
 		metadata: metadata,
 		pass:     pass,
 	}
-	if metadata.Network == "tcp" && metadata.IsClient {
-		c.probeTimer = time.AfterFunc(100*time.Millisecond, func() {
-			// avoid the situation where the server sends messages first
-			if _, err = c.Write(nil); err != nil {
-				return
-			}
-		})
-	}
 	return c, nil
 }
 
 func (c *Conn) Close() error {
-	if c.probeTimer != nil {
-		c.probeTimer.Stop()
-	}
 	return c.Conn.Close()
 }
 
@@ -132,7 +118,25 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	return c.Conn.Write(b)
 }
 
+func (c *Conn) ensureRequestHeader() error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	if c.onceWrite || !c.metadata.IsClient {
+		return nil
+	}
+	if _, err := c.writeRequestHeader(nil); err != nil {
+		return err
+	}
+	c.onceWrite = true
+	return nil
+}
+
 func (c *Conn) Read(b []byte) (n int, err error) {
+	if c.metadata.IsClient && !c.onceWrite {
+		if err = c.ensureRequestHeader(); err != nil {
+			return 0, err
+		}
+	}
 	c.onceRead.Do(func() {
 		if !c.metadata.IsClient {
 			if err = c.ReadReqHeader(); err != nil {

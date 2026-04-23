@@ -2,6 +2,7 @@ package trojanc
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -19,6 +20,17 @@ func (c *captureConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *captureConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 var _ netproxy.Conn = (*captureConn)(nil)
+
+type splitCaptureConn struct {
+	writes bytes.Buffer
+}
+
+func (c *splitCaptureConn) Read([]byte) (int, error)           { return 0, io.EOF }
+func (c *splitCaptureConn) Write(p []byte) (int, error)        { return c.writes.Write(p) }
+func (c *splitCaptureConn) Close() error                       { return nil }
+func (c *splitCaptureConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *splitCaptureConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *splitCaptureConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func TestConnWrite_WritesHeaderOnlyOnce(t *testing.T) {
 	raw := &captureConn{}
@@ -64,5 +76,29 @@ func TestConnWrite_WritesHeaderOnlyOnce(t *testing.T) {
 	}
 	if !bytes.Equal(raw.Bytes()[raw.Len()-len(secondPayload):], secondPayload) {
 		t.Fatal("second payload mismatch")
+	}
+}
+
+func TestConnRead_WritesHeaderBeforeFirstReadForClient(t *testing.T) {
+	raw := &splitCaptureConn{}
+	baseMetadata, err := protocol.ParseMetadata("example.com:443")
+	if err != nil {
+		t.Fatalf("parse metadata failed: %v", err)
+	}
+	baseMetadata.IsClient = true
+	conn, err := NewConn(raw, Metadata{Metadata: baseMetadata, Network: "tcp"}, "test-password")
+	if err != nil {
+		t.Fatalf("new conn failed: %v", err)
+	}
+
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("Read() error = nil, want EOF from empty underlying conn")
+	}
+
+	headerMetadata := Metadata{Metadata: baseMetadata, Network: "tcp"}
+	headerLen := 56 + 2 + 1 + headerMetadata.Len() + 2
+	if raw.writes.Len() != headerLen {
+		t.Fatalf("unexpected buffered length after first read: got %d want %d", raw.writes.Len(), headerLen)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -16,7 +17,18 @@ type Params struct {
 	Method, Passwd, Address, Port string
 }
 
+func requireShadowsocksStreamIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping shadowsocks_stream integration test in short mode")
+	}
+	if os.Getenv("OUTBOUND_INTEGRATION") == "" {
+		t.Skip("skipping shadowsocks_stream integration test; set OUTBOUND_INTEGRATION=1 to enable")
+	}
+}
+
 func TestNewSSStream(t *testing.T) {
+	requireShadowsocksStreamIntegration(t)
 	// https://github.com/winterssy/SSR-Docker
 
 	params := Params{
