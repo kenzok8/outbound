@@ -2,24 +2,34 @@ package anytls
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"runtime/debug"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
+const (
+	sessionStateActive uint32 = iota + 1
+	sessionStateIdle
+	sessionStateClosing
+	sessionStateClosed
+)
+
 type session struct {
 	conn     netproxy.Conn
 	connLock sync.Mutex
+	probeMu  sync.Mutex
 
 	streams    map[uint32]*stream
 	streamLock sync.RWMutex
@@ -29,11 +39,16 @@ type session struct {
 	pktCounter  atomic.Uint32
 	peerVersion byte
 
-	seq             uint64
-	sid             atomic.Uint32
-	closed          atomic.Bool
-	done            chan struct{}
+	seq           uint64
+	sid           atomic.Uint32
+	state         atomic.Uint32
+	activeStreams atomic.Int32
+	idleAt        atomic.Int64
+	closed        atomic.Bool
+	done          chan struct{}
+
 	closeStreamChan chan uint32
+	heartResponseCh chan struct{}
 }
 
 func newSession(conn netproxy.Conn, seq uint64) *session {
@@ -43,15 +58,34 @@ func newSession(conn netproxy.Conn, seq uint64) *session {
 		seq:             seq,
 		done:            make(chan struct{}),
 		closeStreamChan: make(chan uint32, 2),
+		heartResponseCh: make(chan struct{}, 1),
 		sendPadding:     true,
 	}
+	s.state.Store(sessionStateActive)
 	s.padding.Store(DefaultPaddingFactory.Load())
 	return s
 }
 
 func (s *session) newStream(addr string) (*stream, error) {
-	s.sid.Add(1)
-	sid := s.sid.Load()
+	if s.Closed() {
+		return nil, net.ErrClosed
+	}
+	tgtAddr, err := socks.ParseAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	sid := s.sid.Add(1)
+	stream := newStream(s, sid)
+	if err := s.addStream(stream); err != nil {
+		return nil, err
+	}
+	created := false
+	defer func() {
+		if !created {
+			_ = stream.closeLocal(false, net.ErrClosed)
+		}
+	}()
 
 	frame := newFrame(cmdSettings, sid)
 	frame.data = settingsBytes(s.GetPadding())
@@ -64,21 +98,13 @@ func (s *session) newStream(addr string) (*stream, error) {
 		return nil, err
 	}
 
-	tgtAddr, err := socks.ParseAddr(addr)
-	if err != nil {
-		return nil, err
-	}
 	frame = newFrame(cmdPSH, sid)
 	frame.data = tgtAddr
 	if _, err := writeFrame(s, frame); err != nil {
 		return nil, err
 	}
 
-	stream := newStream(s, sid)
-	s.streamLock.Lock()
-	s.streams[sid] = stream
-	s.streamLock.Unlock()
-
+	created = true
 	return stream, nil
 }
 
@@ -94,9 +120,29 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 }
 
 func (s *session) removeStream(sid uint32) {
+	var removed bool
+	var idle bool
+
 	s.streamLock.Lock()
-	delete(s.streams, sid)
+	if _, ok := s.streams[sid]; ok {
+		delete(s.streams, sid)
+		removed = true
+		idle = len(s.streams) == 0
+	}
 	s.streamLock.Unlock()
+
+	if !removed {
+		return
+	}
+	if active := s.activeStreams.Add(-1); active < 0 {
+		s.activeStreams.Store(0)
+	}
+	if !idle || s.closed.Load() {
+		return
+	}
+	s.state.Store(sessionStateIdle)
+	s.idleAt.Store(time.Now().UnixNano())
+
 	select {
 	case <-s.done:
 		return
@@ -107,6 +153,19 @@ func (s *session) removeStream(sid uint32) {
 	case <-s.done:
 	default:
 	}
+}
+
+func (s *session) addStream(stream *stream) error {
+	s.streamLock.Lock()
+	defer s.streamLock.Unlock()
+	if s.closed.Load() {
+		return net.ErrClosed
+	}
+	s.streams[stream.id] = stream
+	s.activeStreams.Add(1)
+	s.state.Store(sessionStateActive)
+	s.idleAt.Store(0)
+	return nil
 }
 
 func (s *session) run() error {
@@ -154,7 +213,7 @@ func (s *session) run() error {
 			stream, ok := s.streams[sid]
 			s.streamLock.RUnlock()
 			if ok {
-				if _, err := stream.pw.Write(buf); err != nil {
+				if err := stream.enqueue(buf); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 					pool.Put(buf)
 					return err
 				}
@@ -221,6 +280,10 @@ func (s *session) run() error {
 				return err
 			}
 		case cmdHeartResponse:
+			select {
+			case s.heartResponseCh <- struct{}{}:
+			default:
+			}
 		default:
 			return fmt.Errorf("invalid cmd: %d", header.Cmd())
 		}
@@ -229,6 +292,7 @@ func (s *session) run() error {
 
 func (s *session) Close() error {
 	if s.closed.CompareAndSwap(false, true) {
+		s.state.Store(sessionStateClosing)
 		close(s.done)
 		s.streamLock.Lock()
 		streams := make([]*stream, 0, len(s.streams))
@@ -236,11 +300,13 @@ func (s *session) Close() error {
 			streams = append(streams, stream)
 		}
 		s.streams = make(map[uint32]*stream)
+		s.activeStreams.Store(0)
 		s.streamLock.Unlock()
 		for _, stream := range streams {
-			_ = stream.Close()
+			_ = stream.closeLocal(false, net.ErrClosed)
 		}
 		_ = s.conn.Close()
+		s.state.Store(sessionStateClosed)
 		return nil
 	}
 	return nil
@@ -262,11 +328,84 @@ func (s *session) GetPadding() *paddingFactory {
 	return s.padding.Load().(*paddingFactory)
 }
 
+func (s *session) isReusableIdle() bool {
+	return !s.closed.Load() && s.state.Load() == sessionStateIdle && s.activeStreams.Load() == 0
+}
+
+func (s *session) idleTimedOut(now time.Time, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return false
+	}
+	idleAt := s.idleAt.Load()
+	return idleAt > 0 && !now.Before(time.Unix(0, idleAt).Add(timeout))
+}
+
+func (s *session) needsIdleProbe(now time.Time, threshold time.Duration) bool {
+	if threshold <= 0 {
+		return false
+	}
+	idleAt := s.idleAt.Load()
+	return idleAt > 0 && !now.Before(time.Unix(0, idleAt).Add(threshold))
+}
+
+func (s *session) probeIdleHealth(timeout time.Duration) bool {
+	if s.closed.Load() {
+		return false
+	}
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+
+	for {
+		select {
+		case <-s.heartResponseCh:
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	if _, err := writeFrame(s, newFrame(cmdHeartRequest, 0)); err != nil {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-s.heartResponseCh:
+		return true
+	case <-s.done:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
 func (s *session) writeConn(b []byte) (n int, err error) {
+	return s.writeConnWithDeadline(b, time.Time{})
+}
+
+func (s *session) writeConnWithDeadline(b []byte, deadline time.Time) (n int, err error) {
+	if s.closed.Load() {
+		return 0, net.ErrClosed
+	}
 	s.connLock.Lock()
 	defer s.connLock.Unlock()
+	if s.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	if !deadline.IsZero() {
+		if !deadline.After(time.Now()) {
+			return 0, os.ErrDeadlineExceeded
+		}
+		if err := s.conn.SetWriteDeadline(deadline); err != nil {
+			return 0, err
+		}
+		defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
+	}
+	return s.writeConnLocked(b)
+}
 
-	// calulate & send padding
+func (s *session) writeConnLocked(b []byte) (n int, err error) {
+	// calculate and send padding
 	if s.sendPadding {
 		pkt := s.pktCounter.Add(1)
 		paddingF := s.GetPadding()
@@ -292,11 +431,17 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
 					paddingLen := l - remainPayloadLen - headerOverHeadSize
 					if paddingLen > 0 {
+						if paddingLen > maxFramePayloadSize {
+							paddingLen = maxFramePayloadSize
+						}
 						padding := make([]byte, headerOverHeadSize+paddingLen)
 						padding[0] = cmdWaste
 						binary.BigEndian.PutUint32(padding[1:5], 0)
 						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
-						b = slices.Concat(b, padding)
+						combined := make([]byte, 0, len(b)+len(padding))
+						combined = append(combined, b...)
+						combined = append(combined, padding...)
+						b = combined
 					}
 					_, err = s.conn.Write(b)
 					if err != nil {
@@ -305,6 +450,9 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 					n += remainPayloadLen
 					b = nil
 				} else { // this packet is all padding
+					if l > maxFramePayloadSize {
+						l = maxFramePayloadSize
+					}
 					padding := make([]byte, headerOverHeadSize+l)
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)

@@ -10,10 +10,19 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
+)
+
+const (
+	maxIdleSessions           = 1
+	idleSessionTimeout        = 30 * time.Second
+	idleSessionCheckInterval  = 10 * time.Second
+	idleSessionProbeThreshold = 3 * time.Second
+	idleSessionProbeTimeout   = 2 * time.Second
 )
 
 func init() {
@@ -33,6 +42,7 @@ type Dialer struct {
 	idleSessions    map[uint64]*session
 	sessions        map[uint64]*session
 	closed          bool
+	janitorDone     chan struct{}
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -40,7 +50,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		IsClient: header.IsClient,
 	}
 	sum := sha256.Sum256([]byte(header.Password))
-	return &Dialer{
+	d := &Dialer{
 		proxyAddress: header.ProxyAddress,
 		nextDialer:   nextDialer,
 		metadata:     metadata,
@@ -48,7 +58,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		tlsConfig:    header.TlsConfig,
 		idleSessions: make(map[uint64]*session),
 		sessions:     make(map[uint64]*session),
-	}, nil
+		janitorDone:  make(chan struct{}),
+	}
+	go d.runIdleJanitor()
+	return d, nil
 }
 
 func (d *Dialer) UnwrapDialer() netproxy.Dialer {
@@ -69,16 +82,26 @@ func (d *Dialer) watchSession(s *session) {
 			d.idleSessionLock.Unlock()
 			return
 		case <-s.closeStreamChan:
-			if s.Closed() {
+			if !s.isReusableIdle() {
 				continue
 			}
+			var closeSession bool
 			d.idleSessionLock.Lock()
-			if !d.closed {
+			if d.closed {
+				closeSession = true
+			} else {
 				if _, ok := d.idleSessions[s.seq]; !ok {
-					d.idleSessions[s.seq] = s
+					if len(d.idleSessions) >= maxIdleSessions {
+						closeSession = true
+					} else {
+						d.idleSessions[s.seq] = s
+					}
 				}
 			}
 			d.idleSessionLock.Unlock()
+			if closeSession {
+				_ = s.Close()
+			}
 		}
 	}
 }
@@ -110,36 +133,55 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		}
 		if magicNetwork.Network == "udp" {
 			streamAddr := net.JoinHostPort(mdata.Hostname, strconv.Itoa(int(mdata.Port)))
-			return s.newPacketStream(streamAddr, addr)
+			packetStream, err := s.newPacketStream(streamAddr, addr)
+			if err != nil {
+				_ = s.Close()
+				return nil, err
+			}
+			return packetStream, nil
 		}
-		return s.newStream(addr)
+		stream, err := s.newStream(addr)
+		if err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		return stream, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
 }
 
 func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, error) {
-	d.idleSessionLock.Lock()
-	if d.closed {
-		d.idleSessionLock.Unlock()
-		return nil, net.ErrClosed
-	}
-	for seq := range d.idleSessions {
-		s := d.idleSessions[seq]
-		delete(d.idleSessions, seq)
-		if s.closed.Load() {
+	for {
+		candidate, err := d.popIdleSessionForReuse()
+		if err != nil {
+			return nil, err
+		}
+		if candidate == nil {
+			break
+		}
+
+		now := time.Now()
+		if candidate.idleTimedOut(now, idleSessionTimeout) {
+			_ = candidate.Close()
 			continue
 		}
-		d.idleSessionLock.Unlock()
-		return s, nil
+		if candidate.needsIdleProbe(now, idleSessionProbeThreshold) && !candidate.probeIdleHealth(idleSessionProbeTimeout) {
+			_ = candidate.Close()
+			continue
+		}
+		return candidate, nil
 	}
-	d.idleSessionLock.Unlock()
 
 	rawConn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}
-	conn := rawConn.(net.Conn)
+	conn, ok := rawConn.(net.Conn)
+	if !ok {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("anytls requires net.Conn, got %T", rawConn)
+	}
 
 	tlsConn := tls.Client(conn, d.tlsConfig)
 	if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
@@ -179,6 +221,50 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	return s, nil
 }
 
+func (d *Dialer) popIdleSessionForReuse() (*session, error) {
+	d.idleSessionLock.Lock()
+	defer d.idleSessionLock.Unlock()
+	if d.closed {
+		return nil, net.ErrClosed
+	}
+	for seq, s := range d.idleSessions {
+		delete(d.idleSessions, seq)
+		if s.closed.Load() || s.activeStreams.Load() != 0 || !s.state.CompareAndSwap(sessionStateIdle, sessionStateActive) {
+			continue
+		}
+		return s, nil
+	}
+	return nil, nil
+}
+
+func (d *Dialer) runIdleJanitor() {
+	ticker := time.NewTicker(idleSessionCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			d.closeExpiredIdleSessions(time.Now())
+		case <-d.janitorDone:
+			return
+		}
+	}
+}
+
+func (d *Dialer) closeExpiredIdleSessions(now time.Time) {
+	var expired []*session
+	d.idleSessionLock.Lock()
+	for seq, s := range d.idleSessions {
+		if s.closed.Load() || s.idleTimedOut(now, idleSessionTimeout) {
+			delete(d.idleSessions, seq)
+			expired = append(expired, s)
+		}
+	}
+	d.idleSessionLock.Unlock()
+	for _, s := range expired {
+		_ = s.Close()
+	}
+}
+
 func (d *Dialer) Close() error {
 	d.idleSessionLock.Lock()
 	if d.closed {
@@ -186,6 +272,9 @@ func (d *Dialer) Close() error {
 		return nil
 	}
 	d.closed = true
+	if d.janitorDone != nil {
+		close(d.janitorDone)
+	}
 	sessions := make([]*session, 0, len(d.sessions))
 	for _, s := range d.sessions {
 		sessions = append(sessions, s)
