@@ -72,12 +72,9 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 
 	if config.ServerAddr.Network() == "udphop" {
 		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(_ context.Context) (net.PacketConn, error) {
-				// Use Background() for hop dials because the hop loop runs long
-				// after the original request that triggered connect() has completed.
-				hopCtx := context.Background()
-				dialFunc := func(addr net.Addr) (net.PacketConn, error) {
-					conn, err := nextDialer.DialContext(hopCtx, "udp", addr.String())
+			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
+				dialFunc := func(ctx context.Context, addr net.Addr) (net.PacketConn, error) {
+					conn, err := nextDialer.DialContext(ctx, "udp", addr.String())
 					if err != nil {
 						return nil, err
 					}
@@ -91,7 +88,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 						remoteAddr,
 					), nil
 				}
-				return udphop.NewUDPHopPacketConn(config.ServerAddr.(*udphop.UDPHopAddr), config.UDPHopInterval, dialFunc)
+				return udphop.NewUDPHopPacketConnContext(ctx, config.ServerAddr.(*udphop.UDPHopAddr), config.UDPHopInterval, dialFunc)
 			},
 		}
 	} else {
@@ -175,4 +172,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (netp
 	default:
 		return nil, fmt.Errorf("unsupported network: %s", network)
 	}
+}
+
+func (d *Dialer) Close() error {
+	if d == nil || d.client == nil {
+		return nil
+	}
+	return d.client.Close()
 }

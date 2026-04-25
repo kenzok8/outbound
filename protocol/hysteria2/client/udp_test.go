@@ -2,11 +2,13 @@ package client
 
 import (
 	"bytes"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/frag"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
@@ -81,6 +83,112 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("unexpected SendFunc call count: got %d want 2", got)
+	}
+}
+
+func TestUDPConnSetDeadlineZeroClearsTimer(t *testing.T) {
+	var closes atomic.Int32
+	u := &udpConn{
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+		CloseFunc: func() { closes.Add(1) },
+	}
+
+	if err := u.SetDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+	if err := u.SetDeadline(time.Time{}); err != nil {
+		t.Fatalf("SetDeadline(zero) error = %v", err)
+	}
+	time.Sleep(75 * time.Millisecond)
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("CloseFunc calls after clearing deadline = %d, want 0", got)
+	}
+}
+
+func TestUDPConnCloseStopsDeadlineTimer(t *testing.T) {
+	var closes atomic.Int32
+	u := &udpConn{
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+		CloseFunc: func() { closes.Add(1) },
+	}
+
+	if err := u.SetDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	time.Sleep(75 * time.Millisecond)
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("CloseFunc calls after Close() = %d, want 1", got)
+	}
+}
+
+func TestUDPConnDeadlineClosesSession(t *testing.T) {
+	var closes atomic.Int32
+	var closeOnce sync.Once
+	u := &udpConn{
+		ID:        1,
+		D:         &frag.Defragger{},
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+	}
+	u.CloseFunc = func() {
+		closes.Add(1)
+		closeOnce.Do(func() { close(u.ReceiveCh) })
+	}
+
+	if err := u.SetDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("SetDeadline() error = %v", err)
+	}
+
+	select {
+	case msg := <-u.ReceiveCh:
+		if msg != nil {
+			t.Fatalf("ReceiveCh yielded %v, want closed channel", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deadline did not close UDP session")
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("CloseFunc calls after deadline = %d, want 1", got)
+	}
+}
+
+func TestUDPConnDeadlineCanBeAppliedWhileReadIsPending(t *testing.T) {
+	var closes atomic.Int32
+	var closeOnce sync.Once
+	u := &udpConn{
+		ID:        1,
+		D:         &frag.Defragger{},
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+	}
+	u.CloseFunc = func() {
+		closes.Add(1)
+		closeOnce.Do(func() { close(u.ReceiveCh) })
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64)
+		_, _, err := u.ReadFrom(buf)
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	if err := u.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != io.EOF {
+			t.Fatalf("ReadFrom() error = %T %v, want EOF after close", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrom did not unblock after deadline closed the session")
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("CloseFunc calls after pending read deadline = %d, want 1", got)
 	}
 }
 

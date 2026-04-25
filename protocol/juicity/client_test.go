@@ -81,3 +81,35 @@ func TestGetQuicConnDialFailureDoesNotDeadlock(t *testing.T) {
 		t.Fatal("expected failed dial path to close the underlay UDP socket")
 	}
 }
+
+func TestClientRingCloseCancelsClientsAndClearsRing(t *testing.T) {
+	r := newClientRing(func(func(int64)) *clientImpl { return &clientImpl{} }, 0)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel1()
+	defer cancel2()
+	client1 := &clientImpl{ClientOption: &ClientOption{Ctx: ctx1, Cancel: cancel1}}
+	client2 := &clientImpl{ClientOption: &ClientOption{Ctx: ctx2, Cancel: cancel2}}
+	r._insertAfterCurrent(&clientRingNode{cli: client1, capability: -1})
+	r._insertAfterCurrent(&clientRingNode{cli: client2, capability: -1})
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if r.current != nil || r.ring.Len() != 0 {
+		t.Fatalf("ring not cleared: current=%v len=%d", r.current, r.ring.Len())
+	}
+	select {
+	case <-ctx1.Done():
+	case <-time.After(time.Second):
+		t.Fatal("client1 context was not canceled")
+	}
+	select {
+	case <-ctx2.Done():
+	case <-time.After(time.Second):
+		t.Fatal("client2 context was not canceled")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}

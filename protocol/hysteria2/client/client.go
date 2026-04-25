@@ -29,6 +29,7 @@ const (
 type Client interface {
 	TCP(addr string, ctx context.Context) (netproxy.Conn, error)
 	UDP(addr string, ctx context.Context) (netproxy.Conn, error)
+	Close() error
 }
 
 type HandshakeInfo struct {
@@ -56,7 +57,8 @@ type clientImpl struct {
 
 	udpSM *udpSessionManager
 
-	m sync.Mutex
+	m      sync.Mutex
+	closed bool
 }
 
 // closeExistingLocked closes the old QUIC connection, packet conn, and UDP
@@ -78,6 +80,10 @@ func (c *clientImpl) closeExistingLocked() {
 }
 
 func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
+	if c.closed {
+		return nil, coreErrs.ClosedError{}
+	}
+
 	// Close old resources before creating new ones to prevent goroutine and
 	// socket leaks (especially important for UDPHopPacketConn which spawns
 	// recvLoop + hopLoop goroutines).
@@ -142,8 +148,11 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 		_ = pktConn.Close()
 		return nil, coreErrs.ConnectError{Err: err}
 	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != protocol.StatusAuthOK {
-		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		if conn != nil {
+			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		}
 		_ = pktConn.Close()
 		return nil, coreErrs.AuthError{StatusCode: resp.StatusCode}
 	}
@@ -168,8 +177,6 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 			congestion.UseBBR(conn)
 		}
 	}
-	_ = resp.Body.Close()
-
 	c.pktConn = pktConn
 	c.conn = conn
 	if authResp.UDPEnabled {
@@ -205,9 +212,32 @@ func (c *clientImpl) active() bool {
 	}
 }
 
-// openStream wraps the stream with QStream, which handles Close() properly
-func (c *clientImpl) openStream() (*utils.QStream, error) {
-	stream, err := c.conn.OpenStream()
+func (c *clientImpl) Close() error {
+	c.m.Lock()
+	if c.closed {
+		c.m.Unlock()
+		return nil
+	}
+	c.closed = true
+	udpSM := c.udpSM
+	if udpSM != nil && !udpSM.closeWhenIdle(c.closeExisting) {
+		c.m.Unlock()
+		return nil
+	}
+	c.closeExistingLocked()
+	c.m.Unlock()
+	return nil
+}
+
+func (c *clientImpl) closeExisting() {
+	c.m.Lock()
+	defer c.m.Unlock()
+	c.closeExistingLocked()
+}
+
+// openStream wraps the stream with QStream, which handles Close() properly.
+func (c *clientImpl) openStream(conn quic.Connection) (*utils.QStream, error) {
+	stream, err := conn.OpenStream()
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +252,10 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 		return nil, errors.New("context deadline exceeded")
 	default:
 	}
+	if c.closed {
+		c.m.Unlock()
+		return nil, coreErrs.ClosedError{}
+	}
 	if !c.active() {
 		_, err := c.connect(ctx)
 		if err != nil {
@@ -235,7 +269,7 @@ func (c *clientImpl) TCP(addr string, ctx context.Context) (netproxy.Conn, error
 	connSnapshot := c.conn
 	c.m.Unlock()
 
-	stream, err := c.openStream()
+	stream, err := c.openStream(connSnapshot)
 	if err != nil {
 		c.handleIfConnectionClosed(err, connSnapshot)
 		return nil, err
@@ -289,6 +323,10 @@ func (c *clientImpl) UDP(addr string, ctx context.Context) (netproxy.Conn, error
 		return nil, errors.New("context deadline exceeded")
 	default:
 	}
+	if c.closed {
+		c.m.Unlock()
+		return nil, coreErrs.ClosedError{}
+	}
 	if !c.active() {
 		_, err := c.connect(ctx)
 		if err != nil {
@@ -300,12 +338,13 @@ func (c *clientImpl) UDP(addr string, ctx context.Context) (netproxy.Conn, error
 	// handleIfConnectionClosed can compare against the exact instance
 	// that was active when this call started.
 	connSnapshot := c.conn
+	udpSMSnapshot := c.udpSM
 	c.m.Unlock()
 
-	if c.udpSM == nil {
+	if udpSMSnapshot == nil {
 		return nil, coreErrs.DialError{Message: "UDP not enabled"}
 	}
-	conn, err := c.udpSM.NewUDP(addr)
+	conn, err := udpSMSnapshot.NewUDP(addr)
 	c.handleIfConnectionClosed(err, connSnapshot)
 	return conn, err
 }

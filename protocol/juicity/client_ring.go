@@ -139,3 +139,24 @@ func (r *clientRing) passiveRemove(elem *list.Element) {
 	}
 	r.ring.Remove(elem)
 }
+
+func (r *clientRing) Close() error {
+	r.mu.Lock()
+	clients := make([]*clientImpl, 0, r.ring.Len())
+	for elem := r.ring.Front(); elem != nil; {
+		next := elem.Next()
+		if node, ok := elem.Value.(*clientRingNode); ok && node != nil && node.cli != nil {
+			clients = append(clients, node.cli)
+		}
+		elem.Value = nil
+		r.ring.Remove(elem)
+		elem = next
+	}
+	r.current = nil
+	r.mu.Unlock()
+
+	for _, cli := range clients {
+		_ = cli.Close()
+	}
+	return nil
+}

@@ -1,6 +1,7 @@
 package udphop
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"net"
@@ -20,7 +21,9 @@ type udpHopPacketConn struct {
 	Addr        net.Addr
 	Addrs       []net.Addr
 	HopInterval time.Duration
-	dialFunc    dialFunc
+	dialFunc    contextDialFunc
+	ctx         context.Context
+	cancel      context.CancelFunc
 
 	connMutex   sync.RWMutex
 	prevConn    net.PacketConn
@@ -45,8 +48,18 @@ type udpPacket struct {
 }
 
 type dialFunc = func(addr net.Addr) (net.PacketConn, error)
+type contextDialFunc = func(ctx context.Context, addr net.Addr) (net.PacketConn, error)
 
 func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc dialFunc) (net.PacketConn, error) {
+	return NewUDPHopPacketConnContext(context.Background(), addr, hopInterval, func(_ context.Context, addr net.Addr) (net.PacketConn, error) {
+		return dialFunc(addr)
+	})
+}
+
+func NewUDPHopPacketConnContext(ctx context.Context, addr *UDPHopAddr, hopInterval time.Duration, dialFunc contextDialFunc) (net.PacketConn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if hopInterval == 0 {
 		hopInterval = defaultHopInterval
 	} else if hopInterval < 5*time.Second {
@@ -59,7 +72,7 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 
 	newAddrIndex := rand.Intn(len(addrs))
 	curAddr := addrs[newAddrIndex]
-	curConn, err := dialFunc(curAddr)
+	curConn, err := dialFunc(ctx, curAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -71,11 +84,14 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 			curAddr = actualAddr
 		}
 	}
+	hopCtx, cancel := context.WithCancel(context.Background())
 	hConn := &udpHopPacketConn{
 		Addr:        addr,
 		Addrs:       addrs,
 		HopInterval: hopInterval,
 		dialFunc:    dialFunc,
+		ctx:         hopCtx,
+		cancel:      cancel,
 		prevConn:    nil,
 		currentAddr: curAddr,
 		currentConn: curConn,
@@ -137,20 +153,31 @@ func (u *udpHopPacketConn) hopLoop() {
 }
 
 func (u *udpHopPacketConn) hop() {
-	u.connMutex.Lock()
-	defer u.connMutex.Unlock()
-	if u.closed {
+	u.connMutex.RLock()
+	if u.closed || len(u.Addrs) == 0 {
+		u.connMutex.RUnlock()
 		return
 	}
-	newAddrIndex := rand.Intn(len(u.Addrs))
-	newAddr := u.Addrs[newAddrIndex]
-	newConn, err := u.dialFunc(newAddr)
+	addrs := append([]net.Addr(nil), u.Addrs...)
+	dialFunc := u.dialFunc
+	u.connMutex.RUnlock()
+
+	newAddrIndex := rand.Intn(len(addrs))
+	newAddr := addrs[newAddrIndex]
+	newConn, err := dialFunc(u.context(), newAddr)
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return
 	}
 	if actualAddr := remoteAddrOfPacketConn(newConn); actualAddr != nil {
 		newAddr = actualAddr
+	}
+
+	u.connMutex.Lock()
+	defer u.connMutex.Unlock()
+	if u.closed {
+		_ = newConn.Close()
+		return
 	}
 	// We need to keep receiving packets from the previous connection,
 	// because otherwise there will be packet loss due to the time gap
@@ -174,6 +201,13 @@ func (u *udpHopPacketConn) hop() {
 		_ = trySetWriteBuffer(u.currentConn, u.writeBufferSize)
 	}
 	go u.recvLoop(newConn)
+}
+
+func (u *udpHopPacketConn) context() context.Context {
+	if u.ctx == nil {
+		return context.Background()
+	}
+	return u.ctx
 }
 
 func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
@@ -210,6 +244,9 @@ func (u *udpHopPacketConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
 }
 
 func (u *udpHopPacketConn) Close() error {
+	if u.cancel != nil {
+		u.cancel()
+	}
 	u.connMutex.Lock()
 	defer u.connMutex.Unlock()
 	if u.closed {

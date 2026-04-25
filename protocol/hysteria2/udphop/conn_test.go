@@ -1,6 +1,8 @@
 package udphop
 
 import (
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -191,6 +193,83 @@ func TestUDPHopPacketConnRecvLoopDoesNotBlockOnTimeoutWhenQueueFull(t *testing.T
 	}
 }
 
+func TestNewUDPHopPacketConnContextUsesCallerContextForInitialDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	addr := &UDPHopAddr{
+		Host:    "example.com",
+		Ports:   []uint16{443},
+		PortStr: "443",
+	}
+	called := false
+	_, err := NewUDPHopPacketConnContext(ctx, addr, 5*time.Second, func(ctx context.Context, _ net.Addr) (net.PacketConn, error) {
+		called = true
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			t.Fatal("initial dial did not receive caller context cancellation")
+			return nil, context.DeadlineExceeded
+		}
+	})
+	if !called {
+		t.Fatal("dial function was not called")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewUDPHopPacketConnContext() error = %v, want context canceled", err)
+	}
+}
+
+func TestUDPHopPacketConnCloseDoesNotWaitForInFlightHopDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	dialStarted := make(chan struct{})
+	dialDone := make(chan struct{})
+
+	conn := &udpHopPacketConn{
+		Addrs:       []net.Addr{&net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 443}},
+		HopInterval: 5 * time.Second,
+		dialFunc: func(ctx context.Context, _ net.Addr) (net.PacketConn, error) {
+			close(dialStarted)
+			<-ctx.Done()
+			close(dialDone)
+			return nil, ctx.Err()
+		},
+		ctx:         ctx,
+		cancel:      cancel,
+		currentAddr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 443},
+		currentConn: &stubPacketConn{},
+		closeChan:   make(chan struct{}),
+		recvQueue:   make(chan *udpPacket, 1),
+	}
+
+	go conn.hop()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("hop dial did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- conn.Close()
+	}()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Close blocked behind in-flight hop dial")
+	}
+
+	select {
+	case <-dialDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel in-flight hop dial")
+	}
+}
+
 func TestFreezeAddrsForResolvedIP(t *testing.T) {
 	addr := &UDPHopAddr{
 		Host:    "example.com",
@@ -236,7 +315,7 @@ func TestUDPHopPacketConnFreezesResolvedIPForSubsequentHops(t *testing.T) {
 		}
 		return &stubRemotePacketConn{
 			remoteAddr: &net.UDPAddr{
-				IP:   net.ParseIP("203.0.113.10"),
+				IP: net.ParseIP("203.0.113.10"),
 				Port: func() int {
 					if udpAddr, ok := addr.(*net.UDPAddr); ok {
 						return udpAddr.Port
@@ -281,5 +360,111 @@ func TestUDPHopPacketConnFreezesResolvedIPForSubsequentHops(t *testing.T) {
 	}
 	if got := dialed[len(dialed)-1]; got != "203.0.113.10:443" && got != "203.0.113.10:8443" {
 		t.Fatalf("last hop dial addr = %q, want resolved IP with hop port", got)
+	}
+}
+
+func TestUDPHopPacketConnCloseCancelsBlockedHopDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	conn := &udpHopPacketConn{
+		Addrs:       []net.Addr{&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}},
+		ctx:         ctx,
+		cancel:      cancel,
+		currentAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443},
+		currentConn: &stubPacketConn{},
+		recvQueue:   make(chan *udpPacket, packetQueueSize),
+		closeChan:   make(chan struct{}),
+		dialFunc: func(ctx context.Context, _ net.Addr) (net.PacketConn, error) {
+			close(started)
+			<-ctx.Done()
+			close(cancelSeen)
+			return nil, ctx.Err()
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		conn.hop()
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("hop dial did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- conn.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return while hop dial was blocked")
+	}
+	select {
+	case <-cancelSeen:
+	case <-time.After(time.Second):
+		t.Fatal("blocked hop dial did not observe cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("hop did not return after cancellation")
+	}
+}
+
+func TestUDPHopPacketConnCloseDoesNotWaitForNonCooperativeHopDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	conn := &udpHopPacketConn{
+		Addrs:       []net.Addr{&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}},
+		ctx:         ctx,
+		cancel:      cancel,
+		currentAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443},
+		currentConn: &stubPacketConn{},
+		recvQueue:   make(chan *udpPacket, packetQueueSize),
+		closeChan:   make(chan struct{}),
+		dialFunc: func(context.Context, net.Addr) (net.PacketConn, error) {
+			close(started)
+			<-release
+			return &stubPacketConn{}, nil
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		conn.hop()
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("hop dial did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- conn.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Close waited for non-cooperative hop dial")
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("hop did not return after releasing dial")
 	}
 }

@@ -57,3 +57,30 @@ func TestAcquireUniStreamSlotSucceedsAfterRelease(t *testing.T) {
 		t.Fatal("acquireUniStreamSlot() did not acquire released capacity")
 	}
 }
+
+func TestClientRingCloseClosesClientsAndClearsRing(t *testing.T) {
+	r := newClientRing(func(func(int64)) *clientImpl { return &clientImpl{} }, 0)
+	client1 := &clientImpl{}
+	client2 := &clientImpl{}
+	r._insertAfterCurrent(&clientRingNode{cli: client1, capability: -1})
+	r._insertAfterCurrent(&clientRingNode{cli: client2, capability: -1})
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if r.current != nil || r.ring.Len() != 0 {
+		t.Fatalf("ring not cleared: current=%v len=%d", r.current, r.ring.Len())
+	}
+	client1.connMutex.Lock()
+	client1Closed := client1.closed
+	client1.connMutex.Unlock()
+	client2.connMutex.Lock()
+	client2Closed := client2.closed
+	client2.connMutex.Unlock()
+	if !client1Closed || !client2Closed {
+		t.Fatalf("clients not marked closed: client1=%v client2=%v", client1Closed, client2Closed)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}

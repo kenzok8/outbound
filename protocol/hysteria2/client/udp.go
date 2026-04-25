@@ -128,24 +128,36 @@ func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 }
 
 func (u *udpConn) Close() error {
+	u.stopDeadlineTimer()
 	u.CloseFunc()
 	return nil
+}
+
+func (u *udpConn) stopDeadlineTimer() {
+	u.muTimer.Lock()
+	defer u.muTimer.Unlock()
+	if u.timer != nil {
+		u.timer.Stop()
+		u.timer = nil
+	}
 }
 
 func (u *udpConn) SetDeadline(t time.Time) error {
 	u.muTimer.Lock()
 	defer u.muTimer.Unlock()
-	dur := time.Until(t)
 	if u.timer != nil {
-		u.timer.Reset(dur)
-	} else {
-		u.timer = time.AfterFunc(dur, func() {
-			u.muTimer.Lock()
-			defer u.muTimer.Unlock()
-			_ = u.Close()
-			u.timer = nil
-		})
+		u.timer.Stop()
+		u.timer = nil
 	}
+	if t.IsZero() {
+		return nil
+	}
+	u.timer = time.AfterFunc(time.Until(t), func() {
+		u.muTimer.Lock()
+		u.timer = nil
+		u.muTimer.Unlock()
+		_ = u.Close()
+	})
 	return nil
 }
 
@@ -166,8 +178,10 @@ type udpSessionManager struct {
 	m      map[uint32]*udpConn
 	nextID uint32
 
-	closed bool
-	done   chan struct{}
+	closed   bool
+	draining bool
+	onIdle   func()
+	done     chan struct{}
 }
 
 func newUDPSessionManager(io udpIO) *udpSessionManager {
@@ -194,13 +208,23 @@ func (m *udpSessionManager) run() error {
 
 func (m *udpSessionManager) closeCleanup() {
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
+	var onIdle func()
 	for _, conn := range m.m {
-		m.close(conn)
+		if cb := m.closeLocked(conn); cb != nil {
+			onIdle = cb
+		}
+	}
+	if m.onIdle != nil {
+		onIdle = m.onIdle
+		m.onIdle = nil
 	}
 	m.closed = true
 	close(m.done)
+	m.mutex.Unlock()
+
+	if onIdle != nil {
+		onIdle()
+	}
 }
 
 func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
@@ -226,7 +250,7 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if m.closed {
+	if m.closed || m.draining {
 		return nil, coreErrs.ClosedError{}
 	}
 
@@ -246,8 +270,6 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 		target:  addr,
 	}
 	conn.CloseFunc = func() {
-		m.mutex.Lock()
-		defer m.mutex.Unlock()
 		m.close(conn)
 	}
 	m.m[id] = conn
@@ -256,11 +278,41 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 }
 
 func (m *udpSessionManager) close(conn *udpConn) {
-	if !conn.Closed {
-		conn.Closed = true
-		close(conn.ReceiveCh)
-		delete(m.m, conn.ID)
+	m.mutex.Lock()
+	onIdle := m.closeLocked(conn)
+	m.mutex.Unlock()
+
+	if onIdle != nil {
+		onIdle()
 	}
+}
+
+func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
+	if conn == nil || conn.Closed {
+		return nil
+	}
+	conn.Closed = true
+	conn.stopDeadlineTimer()
+	close(conn.ReceiveCh)
+	delete(m.m, conn.ID)
+	if m.draining && len(m.m) == 0 {
+		onIdle := m.onIdle
+		m.onIdle = nil
+		return onIdle
+	}
+	return nil
+}
+
+func (m *udpSessionManager) closeWhenIdle(onIdle func()) bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.closed || len(m.m) == 0 {
+		return true
+	}
+	m.draining = true
+	m.onIdle = onIdle
+	return false
 }
 
 func (m *udpSessionManager) Count() int {

@@ -31,6 +31,8 @@ type Dialer struct {
 
 	idleSessionLock sync.Mutex
 	idleSessions    map[uint64]*session
+	sessions        map[uint64]*session
+	closed          bool
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -45,6 +47,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		key:          sum[:],
 		tlsConfig:    header.TlsConfig,
 		idleSessions: make(map[uint64]*session),
+		sessions:     make(map[uint64]*session),
 	}, nil
 }
 
@@ -60,6 +63,9 @@ func (d *Dialer) watchSession(s *session) {
 			if current, ok := d.idleSessions[s.seq]; ok && current == s {
 				delete(d.idleSessions, s.seq)
 			}
+			if current, ok := d.sessions[s.seq]; ok && current == s {
+				delete(d.sessions, s.seq)
+			}
 			d.idleSessionLock.Unlock()
 			return
 		case <-s.closeStreamChan:
@@ -67,8 +73,10 @@ func (d *Dialer) watchSession(s *session) {
 				continue
 			}
 			d.idleSessionLock.Lock()
-			if _, ok := d.idleSessions[s.seq]; !ok {
-				d.idleSessions[s.seq] = s
+			if !d.closed {
+				if _, ok := d.idleSessions[s.seq]; !ok {
+					d.idleSessions[s.seq] = s
+				}
 			}
 			d.idleSessionLock.Unlock()
 		}
@@ -112,6 +120,10 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 
 func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, error) {
 	d.idleSessionLock.Lock()
+	if d.closed {
+		d.idleSessionLock.Unlock()
+		return nil, net.ErrClosed
+	}
 	for seq := range d.idleSessions {
 		s := d.idleSessions[seq]
 		delete(d.idleSessions, seq)
@@ -152,9 +164,38 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 
 	seq := d.sessionCounter.Add(1)
 	s := newSession(tlsConn, seq)
+	d.idleSessionLock.Lock()
+	if d.closed {
+		d.idleSessionLock.Unlock()
+		_ = s.Close()
+		return nil, net.ErrClosed
+	}
+	d.sessions[seq] = s
+	d.idleSessionLock.Unlock()
 	go d.watchSession(s)
 
 	go func() { _ = s.run() }()
 
 	return s, nil
+}
+
+func (d *Dialer) Close() error {
+	d.idleSessionLock.Lock()
+	if d.closed {
+		d.idleSessionLock.Unlock()
+		return nil
+	}
+	d.closed = true
+	sessions := make([]*session, 0, len(d.sessions))
+	for _, s := range d.sessions {
+		sessions = append(sessions, s)
+	}
+	d.idleSessions = make(map[uint64]*session)
+	d.sessions = make(map[uint64]*session)
+	d.idleSessionLock.Unlock()
+
+	for _, s := range sessions {
+		_ = s.Close()
+	}
+	return nil
 }

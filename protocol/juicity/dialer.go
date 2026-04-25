@@ -199,3 +199,10 @@ func (d *Dialer) DialCmdMsg(ctx context.Context, cmd protocol.MetadataCmd) (c ne
 	}
 	return conn, nil
 }
+
+func (d *Dialer) Close() error {
+	if d == nil || d.clientRing == nil {
+		return nil
+	}
+	return d.clientRing.Close()
+}
