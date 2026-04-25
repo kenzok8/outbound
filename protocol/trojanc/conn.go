@@ -132,7 +132,7 @@ func (c *Conn) ensureRequestHeader() error {
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	if c.metadata.IsClient && !c.onceWrite {
+	if c.metadata.IsClient && c.metadata.Network == "tcp" && !c.onceWrite {
 		if err = c.ensureRequestHeader(); err != nil {
 			return 0, err
 		}
