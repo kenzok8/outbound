@@ -211,13 +211,7 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 	}
 	quicStream, err := quicConn.OpenStream()
 	if err != nil {
-		t.connMutex.Lock()
-		// Detach it from pool due to bad connection.
-		if t.detachCallback != nil {
-			go t.detachCallback()
-			t.detachCallback = nil
-		}
-		t.connMutex.Unlock()
+		t.handleIfConnectionClosed(err)
 		return nil, fmt.Errorf("OpenStream: %w", err)
 	}
 	stream := NewConn(
@@ -227,6 +221,38 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 		quicConn.Context().Done(),
 	)
 	return stream, nil
+}
+
+// handleIfConnectionClosed detaches the connection from the client pool and
+// closes it when a permanent error (non-temporary) is encountered, matching
+// the recovery pattern proven in hysteria2.
+func (t *clientImpl) handleIfConnectionClosed(err error) {
+	if err == nil {
+		return
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Temporary() { // nolint:staticcheck
+		return
+	}
+	t.connMutex.Lock()
+	defer t.connMutex.Unlock()
+	if t.detachCallback != nil {
+		go t.detachCallback()
+		t.detachCallback = nil
+	}
+	select {
+	case <-t.Ctx.Done():
+		return
+	default:
+		t.Cancel()
+	}
+	if t.quicConn != nil {
+		_ = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
+		t.quicConn = nil
+	}
+	if t.underConn != nil {
+		_ = t.underConn.Close()
+		t.underConn = nil
+	}
 }
 func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
 	select {

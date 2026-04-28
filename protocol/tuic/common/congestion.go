@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	InitialStreamReceiveWindow     = 2 * 1024 * 1024  // 2 MB
-	MaxStreamReceiveWindow         = 32 * 1024 * 1024 // 32 MB
-	InitialConnectionReceiveWindow = 32 * 1024 * 1024 // 32 MB
-	MaxConnectionReceiveWindow     = 64 * 1024 * 1024 // 64 MB
+	InitialStreamReceiveWindow     = 8 * 1024 * 1024  // 8 MB (fast start)
+	MaxStreamReceiveWindow         = 12 * 1024 * 1024 // 12 MB (limits per-stream buffer, still > cross-border BDP ~6MB)
+	InitialConnectionReceiveWindow = 12 * 1024 * 1024 // 12 MB (reduced from 20MB, enough for 1-2 concurrent streams)
+	MaxConnectionReceiveWindow     = 20 * 1024 * 1024 // 20 MB (reduced from 32MB, caps total QUIC buffer)
 )
 
 func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
