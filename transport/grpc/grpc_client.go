@@ -129,6 +129,7 @@ type RecvResp struct {
 func (c *ClientConn) Read(p []byte) (n int, err error) {
 	select {
 	case <-c.ctxRead.Done():
+		c.closer() // Cancel stream context so the Recv goroutine can exit
 		return 0, os.ErrDeadlineExceeded
 	case <-c.ctx.Done():
 		return 0, io.EOF
@@ -161,6 +162,7 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
 	}(readDone)
 	select {
 	case <-c.ctxRead.Done():
+		c.closer() // Cancel stream context so the Recv goroutine can exit
 		return 0, os.ErrDeadlineExceeded
 	case <-c.ctx.Done():
 		return 0, io.EOF
@@ -203,6 +205,7 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
 	}(sendDone)
 	select {
 	case <-c.ctxWrite.Done():
+		c.closer() // Cancel stream context so the Send goroutine can exit
 		return 0, os.ErrDeadlineExceeded
 	case <-c.ctx.Done():
 		return 0, io.EOF

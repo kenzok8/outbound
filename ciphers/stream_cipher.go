@@ -14,7 +14,6 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/dgryski/go-camellia"
 	"github.com/dgryski/go-idea"
-	"github.com/dgryski/go-rc2"
 	"gitlab.com/yawning/chacha20.git"
 	"golang.org/x/crypto/blowfish" // nolint:staticcheck
 	"golang.org/x/crypto/cast5"    // nolint:staticcheck
@@ -159,9 +158,7 @@ func newRC4Stream(key, iv []byte, doe DecOrEnc) (cipher.Stream, error) {
 }
 
 func newSeedStream(key, iv []byte, doe DecOrEnc) (cipher.Stream, error) {
-	// TODO: SEED block cipher implementation is required
-	block, err := rc2.New(key, 16)
-	return newCFBStream(block, err, key, iv, doe)
+	return nil, errors.New("SEED block cipher is not implemented")
 }
 
 type NoneStream struct {
