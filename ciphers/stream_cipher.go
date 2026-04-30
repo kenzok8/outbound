@@ -14,6 +14,7 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/dgryski/go-camellia"
 	"github.com/dgryski/go-idea"
+	"github.com/dgryski/go-rc2"
 	"gitlab.com/yawning/chacha20.git"
 	"golang.org/x/crypto/blowfish" // nolint:staticcheck
 	"golang.org/x/crypto/cast5"    // nolint:staticcheck
