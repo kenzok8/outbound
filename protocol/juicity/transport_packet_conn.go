@@ -2,6 +2,7 @@ package juicity
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -57,7 +58,14 @@ func (c *TransportPacketConn) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	defer toWrite.Put()
-	return c.Transport.WriteTo(toWrite, c.proxyAddr)
+	n, err := c.Transport.WriteTo(toWrite, c.proxyAddr)
+	if err != nil {
+		return 0, err
+	}
+	if n != len(toWrite) {
+		return 0, io.ErrShortWrite
+	}
+	return len(b), nil
 }
 
 func (c *TransportPacketConn) Read(b []byte) (n int, err error) {
@@ -66,7 +74,7 @@ func (c *TransportPacketConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *TransportPacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort, err error) {
-	buf := pool.Get(len(p) + CipherConf.SaltLen)
+	buf := pool.Get(len(p) + CipherConf.SaltLen + CipherConf.TagLen)
 	defer buf.Put()
 	n, _, err = c.ReadNonQUICPacket(context.TODO(), buf)
 	if err != nil {
@@ -84,5 +92,14 @@ func (c *TransportPacketConn) WriteTo(p []byte, addr string) (n int, err error) 
 }
 
 func (c *TransportPacketConn) Close() error {
-	return c.Conn.Close()
+	var err error
+	if c.Transport != nil {
+		err = c.Transport.Close()
+	}
+	if c.Conn != nil {
+		if closeErr := c.Conn.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }

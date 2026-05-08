@@ -2,6 +2,7 @@ package juicity
 
 import (
 	"bytes"
+	"net"
 	"net/netip"
 	"runtime"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/olicesx/quic-go"
 )
 
 func TestOptimizedEncryptDecryptCorrectness(t *testing.T) {
@@ -465,6 +467,53 @@ func TestTransportPacketConnOptimizedPath(t *testing.T) {
 
 	if !bytes.Equal(decrypted, plaintext) {
 		t.Error("TransportPacketConn encryption/decryption mismatch")
+	}
+}
+
+func TestTransportPacketConnWriteReturnsPlaintextLength(t *testing.T) {
+	server, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket server: %v", err)
+	}
+	defer func() { _ = server.Close() }()
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket client: %v", err)
+	}
+
+	conf := CipherConf
+	masterKey := make([]byte, conf.KeyLen)
+	_, _ = fastrand.Read(masterKey)
+	conn := &TransportPacketConn{
+		Transport: &quic.Transport{Conn: client},
+		proxyAddr: server.LocalAddr().(*net.UDPAddr),
+		key: &shadowsocks.Key{
+			CipherConf: conf,
+			MasterKey:  masterKey,
+		},
+	}
+	defer func() { _ = conn.Close() }()
+
+	payload := []byte("plaintext payload")
+	n, err := conn.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("Write returned %d, want plaintext length %d", n, len(payload))
+	}
+
+	buf := make([]byte, 2048)
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	readN, _, err := server.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("server ReadFrom: %v", err)
+	}
+	if readN != len(payload)+conf.SaltLen+conf.TagLen {
+		t.Fatalf("server received %d bytes, want encrypted length %d", readN, len(payload)+conf.SaltLen+conf.TagLen)
 	}
 }
 

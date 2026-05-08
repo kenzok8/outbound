@@ -3,6 +3,7 @@ package juicity
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
@@ -93,6 +95,12 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
 	if t.quicConn != nil {
+		select {
+		case <-t.quicConn.Context().Done():
+			t.closeConnectionLocked(quicContextErr(t.quicConn.Context()))
+			return nil, common.ErrClientClosed
+		default:
+		}
 		return t.quicConn, nil
 	}
 	transport, addr, err := dialFn(ctx, dialer)
@@ -155,6 +163,8 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 		select {
 		case <-t.Ctx.Done():
 			return t.Ctx.Err()
+		case <-quicConn.Context().Done():
+			return quicContextErr(quicConn.Context())
 		case auth = <-t.UnderlayAuth:
 		}
 		buf := auth.PackFromPool()
@@ -167,12 +177,12 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	}
 }
 
-func (t *clientImpl) Close() (err error) {
+func (t *clientImpl) Close() error {
 	t.connMutex.Lock()
 	select {
 	case <-t.Ctx.Done():
 		t.connMutex.Unlock()
-		return
+		return nil
 	default:
 		t.Cancel()
 	}
@@ -186,15 +196,15 @@ func (t *clientImpl) Close() (err error) {
 		t.connMutex.Lock()
 		defer t.connMutex.Unlock()
 		if t.quicConn != nil {
-			err = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
+			_ = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
 			t.quicConn = nil
 		}
 		if t.underConn != nil {
-			err = t.underConn.Close()
+			_ = t.underConn.Close()
 			t.underConn = nil
 		}
 	})
-	return err
+	return nil
 }
 
 func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*Conn, error) {
@@ -207,11 +217,19 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 	}
 	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
 	if err != nil {
+		if errors.Is(err, common.ErrClientClosed) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("getQuicConn: %w", err)
 	}
 	quicStream, err := quicConn.OpenStream()
 	if err != nil {
-		t.handleIfConnectionClosed(err)
+		if isStreamLimitReached(err) {
+			return nil, common.ErrTooManyOpenStreams
+		}
+		if t.handleIfConnectionClosed(err) {
+			return nil, common.ErrClientClosed
+		}
 		return nil, fmt.Errorf("OpenStream: %w", err)
 	}
 	stream := NewConn(
@@ -226,27 +244,51 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 // handleIfConnectionClosed detaches the connection from the client pool and
 // closes it when a permanent error (non-temporary) is encountered, matching
 // the recovery pattern proven in hysteria2.
-func (t *clientImpl) handleIfConnectionClosed(err error) {
+func (t *clientImpl) handleIfConnectionClosed(err error) bool {
 	if err == nil {
-		return
+		return false
 	}
 	if netErr, ok := err.(net.Error); ok && netErr.Temporary() { // nolint:staticcheck
-		return
+		return false
 	}
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
+	t.closeConnectionLocked(err)
+	return true
+}
+
+func quicContextErr(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return common.ErrClientClosed
+}
+
+func (t *clientImpl) closeConnectionLocked(err error) {
 	if t.detachCallback != nil {
 		go t.detachCallback()
 		t.detachCallback = nil
 	}
-	select {
-	case <-t.Ctx.Done():
-		return
-	default:
-		t.Cancel()
+	if t.Cancel != nil {
+		if t.Ctx != nil {
+			select {
+			case <-t.Ctx.Done():
+			default:
+				t.Cancel()
+			}
+		} else {
+			t.Cancel()
+		}
 	}
 	if t.quicConn != nil {
-		_ = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
+		errStr := common.ErrClientClosed.Error()
+		if err != nil {
+			errStr = err.Error()
+		}
+		_ = t.quicConn.CloseWithError(tuic.ProtocolError, errStr)
 		t.quicConn = nil
 	}
 	if t.underConn != nil {
@@ -254,6 +296,16 @@ func (t *clientImpl) handleIfConnectionClosed(err error) {
 		t.underConn = nil
 	}
 }
+
+func isStreamLimitReached(err error) bool {
+	var streamLimitPtr *quic.StreamLimitReachedError
+	if errors.As(err, &streamLimitPtr) {
+		return true
+	}
+	var streamLimit quic.StreamLimitReachedError
+	return errors.As(err, &streamLimit) || outbounderrors.IsStreamExhausted(err)
+}
+
 func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
 	select {
 	case <-t.Ctx.Done():
@@ -262,8 +314,11 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 		return nil, nil, ctx.Err()
 	default:
 	}
-	_, err = t.getQuicConn(ctx, dialer, dialFn)
+	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
 	if err != nil {
+		if errors.Is(err, common.ErrClientClosed) {
+			return nil, nil, err
+		}
 		return nil, nil, fmt.Errorf("getQuicConn: %w", err)
 	}
 	iv = make([]byte, CipherConf.SaltLen)
@@ -271,10 +326,22 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 	iv[0], iv[1] = 0, 0
 	_, _ = fastrand.Read(iv[2:])
 	_, _ = fastrand.Read(psk)
-	t.UnderlayAuth <- &UnderlayAuth{
+	auth := &UnderlayAuth{
 		IV:       iv,
 		Psk:      psk,
 		Metadata: metadata,
+	}
+	select {
+	case t.UnderlayAuth <- auth:
+	case <-quicConn.Context().Done():
+		if t.handleIfConnectionClosed(quicContextErr(quicConn.Context())) {
+			return nil, nil, common.ErrClientClosed
+		}
+		return nil, nil, quicContextErr(quicConn.Context())
+	case <-t.Ctx.Done():
+		return nil, nil, common.ErrClientClosed
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
 	}
 	return iv, psk, nil
 }

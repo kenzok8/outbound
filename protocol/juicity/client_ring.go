@@ -3,6 +3,7 @@ package juicity
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -90,9 +91,9 @@ func (r *clientRing) _tryNext(current **list.Element, f func(cli *clientRingNode
 
 	if *current == r.current {
 		// Clients are exhausted.
-		if err == common.ErrTooManyOpenStreams ||
-			err == common.ErrClientClosed ||
-			err == common.ErrHoldOn {
+		if errors.Is(err, common.ErrTooManyOpenStreams) ||
+			errors.Is(err, common.ErrClientClosed) ||
+			errors.Is(err, common.ErrHoldOn) {
 			goto getNew
 		}
 		// Not the expected error.
