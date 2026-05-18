@@ -186,6 +186,92 @@ func TestDialerCloseClosesTrackedSessions(t *testing.T) {
 	}
 }
 
+func TestDialerCloseStopsIdleJanitor(t *testing.T) {
+	d := &Dialer{
+		idleSessions: make(map[uint64]*session),
+		sessions:     make(map[uint64]*session),
+		janitorDone:  make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		d.runIdleJanitor()
+		close(done)
+	}()
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle janitor did not exit after Dialer.Close")
+	}
+}
+
+func TestPacketStreamTransportDoneFollowsStreamClose(t *testing.T) {
+	s := newSession(&recordingConn{}, 1)
+	stream := newStream(s, 1)
+	if err := s.addStream(stream); err != nil {
+		t.Fatalf("addStream() error = %v", err)
+	}
+	packet := &packetStream{
+		stream: stream,
+		addr:   "127.0.0.1:53",
+	}
+
+	lifecycle, ok := any(packet).(interface{ TransportDone() <-chan struct{} })
+	if !ok {
+		t.Fatalf("packetStream does not implement TransportDone")
+	}
+	if lifecycle.TransportDone() != packet.closeCh {
+		t.Fatal("TransportDone should expose the packet stream close channel")
+	}
+
+	select {
+	case <-lifecycle.TransportDone():
+		t.Fatal("TransportDone closed before stream close")
+	default:
+	}
+
+	if err := packet.remoteClose(); err != nil {
+		t.Fatalf("remoteClose() error = %v", err)
+	}
+	select {
+	case <-lifecycle.TransportDone():
+	case <-time.After(time.Second):
+		t.Fatal("TransportDone did not close after stream close")
+	}
+	select {
+	case <-s.Done():
+		t.Fatal("remote stream close should not close the reusable session")
+	default:
+	}
+}
+
+func TestPacketStreamTransportDoneClosesOnSessionClose(t *testing.T) {
+	s := newSession(&recordingConn{}, 1)
+	stream := newStream(s, 1)
+	if err := s.addStream(stream); err != nil {
+		t.Fatalf("addStream() error = %v", err)
+	}
+	packet := &packetStream{
+		stream: stream,
+		addr:   "127.0.0.1:53",
+	}
+	lifecycle := any(packet).(interface{ TransportDone() <-chan struct{} })
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-lifecycle.TransportDone():
+	case <-time.After(time.Second):
+		t.Fatal("TransportDone did not close after session close")
+	}
+}
+
 func TestStreamWriteSplitsOversizedPayload(t *testing.T) {
 	conn := &recordingConn{}
 	s := newSession(conn, 1)

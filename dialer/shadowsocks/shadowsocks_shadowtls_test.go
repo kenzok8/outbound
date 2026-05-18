@@ -92,3 +92,49 @@ func TestParseSSURL_DecodesPercentEncodedPassword(t *testing.T) {
 		t.Fatalf("unexpected password: got %q want %q", parsed.Password, password)
 	}
 }
+
+func TestParseSSURL_AcceptsPlainPasswordWithSlash(t *testing.T) {
+	password := "RCF/0OOYmo6crue3LwlEyD8izLAbuUuyPic/vasJH/o="
+	link := "ss://2022-blake3-aes-256-gcm:" + password + "@127.0.0.1:443#test"
+
+	parsed, err := ParseSSURL(link)
+	if err != nil {
+		t.Fatalf("ParseSSURL failed: %v", err)
+	}
+	if parsed.Cipher != "2022-blake3-aes-256-gcm" {
+		t.Fatalf("unexpected cipher: %q", parsed.Cipher)
+	}
+	if parsed.Password != password {
+		t.Fatalf("unexpected password: got %q want %q", parsed.Password, password)
+	}
+	if parsed.Server != "127.0.0.1" || parsed.Port != 443 {
+		t.Fatalf("unexpected endpoint: %s:%d", parsed.Server, parsed.Port)
+	}
+	if parsed.Name != "test" {
+		t.Fatalf("unexpected name: %q", parsed.Name)
+	}
+}
+
+func TestParseSSURL_AcceptsPlainPasswordWithSlashAndPlugin(t *testing.T) {
+	link := "ss://aes-128-gcm:pa/ss@127.0.0.1:443/?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com#test"
+
+	parsed, err := ParseSSURL(link)
+	if err != nil {
+		t.Fatalf("ParseSSURL failed: %v", err)
+	}
+	if parsed.Password != "pa/ss" {
+		t.Fatalf("unexpected password: %q", parsed.Password)
+	}
+	if parsed.Plugin.Name != "simple-obfs" {
+		t.Fatalf("unexpected plugin name: %q", parsed.Plugin.Name)
+	}
+	if parsed.Plugin.Opts.Obfs != "http" {
+		t.Fatalf("unexpected plugin obfs: %q", parsed.Plugin.Opts.Obfs)
+	}
+	if parsed.Plugin.Opts.Host != "example.com" {
+		t.Fatalf("unexpected plugin host: %q", parsed.Plugin.Opts.Host)
+	}
+	if parsed.UDP {
+		t.Fatal("expected UDP to be disabled when plugin is configured")
+	}
+}

@@ -34,8 +34,8 @@ const (
 
 var (
 	Aead2022CiphersConf = map[string]*CipherConf2022{
-		"2022-blake3-aes-256-gcm": {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
-		"2022-blake3-aes-128-gcm": {KeyLen: 16, SaltLen: 16, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
+		"2022-blake3-aes-256-gcm":       {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
+		"2022-blake3-aes-128-gcm":       {KeyLen: 16, SaltLen: 16, NonceLen: 12, TagLen: 16, NewCipher: NewGcm, NewBlockCipher: aes.NewCipher, IdentityHeaderBlockSize: aes.BlockSize},
 		"2022-blake3-chacha20-poly1305": {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: chacha20poly1305.New, IdentityHeaderBlockSize: 16},
 	}
 )
@@ -46,7 +46,7 @@ func ValidateBase64PSK(pskBase64 string, expectedKeyLen int) ([]byte, error) {
 		return nil, fmt.Errorf("PSK cannot be empty for SIP022 methods")
 	}
 
-	psk, err := base64.StdEncoding.DecodeString(pskBase64)
+	psk, err := decodeBase64PSK(pskBase64)
 	if err != nil {
 		return nil, fmt.Errorf("PSK must be valid base64 for SIP022 methods: %w", err)
 	}
@@ -56,6 +56,20 @@ func ValidateBase64PSK(pskBase64 string, expectedKeyLen int) ([]byte, error) {
 	}
 
 	return psk, nil
+}
+
+func decodeBase64PSK(pskBase64 string) ([]byte, error) {
+	psk, err := base64.StdEncoding.DecodeString(pskBase64)
+	if err == nil {
+		return psk, nil
+	}
+	stdErr := err
+
+	psk, err = base64.RawStdEncoding.DecodeString(pskBase64)
+	if err == nil {
+		return psk, nil
+	}
+	return nil, stdErr
 }
 
 // SlidingWindowFilter implements a sliding window filter for packet ID replay protection

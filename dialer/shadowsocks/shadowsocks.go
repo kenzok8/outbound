@@ -222,6 +222,9 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 	content := u
 	// try to parse the ss:// link, if it fails, base64 decode first
 	if v, ok = parse(content); !ok {
+		if v, ok = parsePlainSSURL(content); ok {
+			return v, nil
+		}
 		// Decode base64 and unmarshal to VmessInfo
 		t := content[5:]
 		var l, r string
@@ -248,6 +251,104 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 		return nil, fmt.Errorf("%w: unrecognized ss address", dialer.InvalidParameterErr)
 	}
 	return v, nil
+}
+
+func parsePlainSSURL(content string) (v *Shadowsocks, ok bool) {
+	scheme, body, found := strings.Cut(content, "://")
+	if !found {
+		return nil, false
+	}
+	switch strings.ToLower(scheme) {
+	case "ss", "shadowsocks":
+	default:
+		return nil, false
+	}
+
+	var fragment string
+	if i := strings.IndexByte(body, '#'); i >= 0 {
+		fragment = body[i+1:]
+		body = body[:i]
+		if unescapedFragment, err := url.PathUnescape(fragment); err == nil {
+			fragment = unescapedFragment
+		}
+	}
+
+	at := strings.LastIndexByte(body, '@')
+	if at <= 0 || at == len(body)-1 {
+		return nil, false
+	}
+	userinfo, hostPart := body[:at], body[at+1:]
+
+	var rawQuery string
+	if i := strings.IndexByte(hostPart, '?'); i >= 0 {
+		rawQuery = hostPart[i+1:]
+		hostPart = hostPart[:i]
+	}
+	if i := strings.IndexByte(hostPart, '/'); i >= 0 {
+		hostPart = hostPart[:i]
+	}
+
+	host, portText, err := net.SplitHostPort(hostPart)
+	if err != nil {
+		return nil, false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil, false
+	}
+
+	cipher, password, ok := parseSSUserinfo(userinfo)
+	if !ok {
+		return nil, false
+	}
+
+	var sip003 Sip003
+	if rawQuery != "" {
+		q, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			return nil, false
+		}
+		if plugin := q.Get("plugin"); plugin != "" {
+			sip003 = ParseSip003(plugin)
+		}
+	}
+
+	return &Shadowsocks{
+		Cipher:   strings.ToLower(cipher),
+		Password: password,
+		Server:   host,
+		Port:     port,
+		Name:     fragment,
+		Plugin:   sip003,
+		UDP:      sip003.Name == "",
+		Protocol: "shadowsocks",
+	}, true
+}
+
+func parseSSUserinfo(userinfo string) (cipher, password string, ok bool) {
+	if strings.Contains(userinfo, ":") {
+		cipher, password, _ = strings.Cut(userinfo, ":")
+		var err error
+		cipher, err = url.PathUnescape(cipher)
+		if err != nil {
+			return "", "", false
+		}
+		password, err = url.PathUnescape(password)
+		if err != nil {
+			return "", "", false
+		}
+		return cipher, password, cipher != ""
+	}
+
+	decoded, err := common.Base64UrlDecode(userinfo)
+	if err != nil {
+		decoded, err = common.Base64StdDecode(userinfo)
+		if err != nil {
+			return "", "", false
+		}
+	}
+	cipher, password, ok = strings.Cut(decoded, ":")
+	return cipher, password, ok && cipher != ""
 }
 
 type Sip003 struct {

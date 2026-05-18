@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/common/url"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
@@ -34,13 +33,13 @@ func NewNetproxyDialerFromLink(d netproxy.Dialer, gOption *ExtraOption, link str
 	}
 	for i := len(links) - 1; i >= 0; i-- {
 		link := strings.TrimSpace(links[i])
-		u, err := url.Parse(link)
+		scheme, err := linkScheme(link)
 		if err != nil {
 			return nil, nil, err
 		}
-		creator, ok := fromLinkCreators[u.Scheme]
+		creator, ok := fromLinkCreators[scheme]
 		if !ok {
-			return nil, nil, fmt.Errorf("unexpected link type: %v", u.Scheme)
+			return nil, nil, fmt.Errorf("unexpected link type: %v", scheme)
 		}
 		var _property *Property
 		d, _property, err = creator(gOption, d, link)
@@ -67,4 +66,25 @@ func NewNetproxyDialerFromLink(d netproxy.Dialer, gOption *ExtraOption, link str
 		p.Name = overwrittenName
 	}
 	return d, p, nil
+}
+
+func linkScheme(link string) (string, error) {
+	i := strings.IndexByte(link, ':')
+	if i <= 0 || !isSchemeStart(link[0]) {
+		return "", fmt.Errorf("missing link scheme")
+	}
+	for _, c := range link[1:i] {
+		if !isSchemeChar(byte(c)) {
+			return "", fmt.Errorf("invalid link scheme: %q", link[:i])
+		}
+	}
+	return strings.ToLower(link[:i]), nil
+}
+
+func isSchemeStart(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+func isSchemeChar(c byte) bool {
+	return isSchemeStart(c) || '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.'
 }

@@ -17,8 +17,9 @@ import (
 )
 
 var (
-	_ netproxy.Conn       = (*stream)(nil)
-	_ netproxy.PacketConn = (*packetStream)(nil)
+	_ netproxy.Conn               = (*stream)(nil)
+	_ netproxy.PacketConn         = (*packetStream)(nil)
+	_ netproxy.TransportLifecycle = (*packetStream)(nil)
 )
 
 type stream struct {
@@ -225,6 +226,10 @@ type packetStream struct {
 
 	addr         string
 	udpWriteAddr atomic.Bool
+}
+
+func (ps *packetStream) TransportDone() <-chan struct{} {
+	return ps.closeCh
 }
 
 func (ps *packetStream) Read(p []byte) (n int, err error) {

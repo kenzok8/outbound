@@ -1,6 +1,10 @@
 package ciphers
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+)
 
 func TestAead2022CiphersConf_IncludesChacha20(t *testing.T) {
 	conf := Aead2022CiphersConf["2022-blake3-chacha20-poly1305"]
@@ -12,6 +16,26 @@ func TestAead2022CiphersConf_IncludesChacha20(t *testing.T) {
 	}
 	if conf.NewCipher == nil {
 		t.Fatal("missing AEAD constructor for chacha20 cipher config")
+	}
+}
+
+func TestValidateBase64PSK_AcceptsUnpaddedStandardBase64(t *testing.T) {
+	key := []byte("1234567890abcdef")
+	padded := base64.StdEncoding.EncodeToString(key)
+	unpadded := strings.TrimRight(padded, "=")
+
+	got, err := ValidateBase64PSK(unpadded, len(key))
+	if err != nil {
+		t.Fatalf("ValidateBase64PSK failed: %v", err)
+	}
+	if string(got) != string(key) {
+		t.Fatalf("unexpected decoded key: got %q want %q", got, key)
+	}
+}
+
+func TestValidateBase64PSK_RejectsInvalidBase64(t *testing.T) {
+	if _, err := ValidateBase64PSK("not%%%base64", 16); err == nil {
+		t.Fatal("expected invalid base64 to be rejected")
 	}
 }
 
