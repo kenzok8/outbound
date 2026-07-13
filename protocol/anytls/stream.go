@@ -25,8 +25,9 @@ var (
 type stream struct {
 	*session
 
-	inbound chan []byte
-	readBuf []byte
+	inbound   chan []byte
+	readBuf   []byte
+	readBufPB pool.PB // pool buffer backing readBuf; nil when readBuf is empty or not pool-backed
 
 	writeMutex sync.Mutex
 	readMutex  sync.Mutex
@@ -57,14 +58,16 @@ func (c *stream) enqueue(b []byte) error {
 	if c.closed.Load() {
 		return io.ErrClosedPipe
 	}
-	chunk := make([]byte, len(b))
+	chunk := pool.Get(len(b))
 	copy(chunk, b)
 	select {
 	case c.inbound <- chunk:
 		return nil
 	case <-c.closeCh:
+		pool.Put(chunk)
 		return io.ErrClosedPipe
 	case <-c.session.done:
+		pool.Put(chunk)
 		return net.ErrClosed
 	}
 }
@@ -90,14 +93,24 @@ func (c *stream) Read(b []byte) (n int, err error) {
 
 func (c *stream) readLocked(b []byte) (n int, err error) {
 	if len(c.readBuf) == 0 {
+		// Return the previous pool buffer before getting a new chunk.
+		if c.readBufPB != nil {
+			pool.Put(c.readBufPB)
+			c.readBufPB = nil
+		}
 		chunk, err := c.nextChunkLocked()
 		if err != nil {
 			return 0, err
 		}
 		c.readBuf = chunk
+		c.readBufPB = pool.PB(chunk)
 	}
 	n = copy(b, c.readBuf)
 	c.readBuf = c.readBuf[n:]
+	if len(c.readBuf) == 0 && c.readBufPB != nil {
+		pool.Put(c.readBufPB)
+		c.readBufPB = nil
+	}
 	return n, nil
 }
 
@@ -168,16 +181,39 @@ func (c *stream) Close() error {
 }
 
 func (c *stream) closeLocal(sendFIN bool, err error) error {
-	if c.closed.CompareAndSwap(false, true) {
-		c.closeMu.Lock()
-		c.closeErr = err
-		close(c.closeCh)
-		c.closeMu.Unlock()
-		c.removeStream(c.id)
-		if sendFIN && !c.session.closed.Load() {
-			frame := newFrame(cmdFIN, c.id)
-			_, _ = writeFrame(c.session, frame)
+	if !c.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	c.closeMu.Lock()
+	c.closeErr = err
+	close(c.closeCh)
+	c.closeMu.Unlock()
+
+	// Return pool-backed read buffer held by a partial read.
+	c.readMutex.Lock()
+	if c.readBufPB != nil {
+		pool.Put(c.readBufPB)
+		c.readBufPB = nil
+		c.readBuf = nil
+	}
+	c.readMutex.Unlock()
+
+	// Drain inbound to return pool-backed chunks.
+	// After closeCh is closed, enqueue cannot add new chunks.
+drainLoop:
+	for {
+		select {
+		case chunk := <-c.inbound:
+			pool.Put(pool.PB(chunk))
+		default:
+			break drainLoop
 		}
+	}
+
+	c.removeStream(c.id)
+	if sendFIN && !c.session.closed.Load() {
+		frame := newFrame(cmdFIN, c.id)
+		_, _ = writeFrame(c.session, frame)
 	}
 	return nil
 }
