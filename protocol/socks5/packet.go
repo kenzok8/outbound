@@ -30,6 +30,43 @@ type PktConn struct {
 	addrCache common.LastStringValue[socks.Addr]
 }
 
+var _ netproxy.PacketReceiver = (*PktConn)(nil)
+
+func (pc *PktConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	receiver, ok := pc.PacketConn.(netproxy.PacketReceiver)
+	if !ok {
+		return nil, false
+	}
+	return netproxy.RegisterMappedPacketReceiver(receiver, handler, pc.mapReceivedPacket)
+}
+
+func (pc *PktConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.ReceivedPacket, bool) {
+	if packet.Err != nil {
+		return packet, true
+	}
+	data := packet.Data
+	if len(data) < 3 {
+		packet.Err = errors.New("not enough size to get addr")
+		packet.Data = nil
+		return packet, true
+	}
+	tgtAddr := socks.SplitAddr(data[3:])
+	if tgtAddr == nil {
+		packet.Err = errors.New("can not get target addr")
+		packet.Data = nil
+		return packet, true
+	}
+	target, err := net.ResolveUDPAddr("udp", tgtAddr.String())
+	if err != nil {
+		packet.Err = errors.New("wrong target addr")
+		packet.Data = nil
+		return packet, true
+	}
+	packet.Data = data[3+len(tgtAddr):]
+	packet.From = target.AddrPort()
+	return packet, true
+}
+
 var parseSocksAddr = socks.ParseAddr
 
 // NewPktConn returns a PktConn, the writeAddr must be *net.UDPAddr or *net.UnixAddr.

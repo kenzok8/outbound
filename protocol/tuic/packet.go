@@ -24,7 +24,13 @@ type Packets struct {
 	list             *list.List
 	isEmptyState     context.Context
 	cancelEmptyState func()
+	receiver         *packetHandlerRegistration
 	closed           atomic.Bool
+}
+
+type packetHandlerRegistration struct {
+	active  atomic.Bool
+	handler func(*Packet) bool
 }
 
 func NewPackets() *Packets {
@@ -39,8 +45,15 @@ func NewPackets() *Packets {
 
 func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed.Load() {
+		p.mu.Unlock()
+		return
+	}
+	if receiver := p.receiver; receiver != nil {
+		p.mu.Unlock()
+		if receiver.active.Load() && receiver.handler(packet) {
+			return
+		}
 		return
 	}
 	p.list.PushBack(packet)
@@ -49,6 +62,47 @@ func (p *Packets) PushBack(packet *Packet) {
 	default:
 		p.cancelEmptyState()
 	}
+	p.mu.Unlock()
+}
+
+func (p *Packets) registerPacketHandler(handler func(*Packet) bool) (func(), bool) {
+	if handler == nil {
+		return nil, false
+	}
+	registration := &packetHandlerRegistration{handler: handler}
+	registration.active.Store(true)
+
+	p.mu.Lock()
+	if p.closed.Load() || p.receiver != nil {
+		p.mu.Unlock()
+		return nil, false
+	}
+	p.receiver = registration
+	queued := make([]*Packet, 0, p.list.Len())
+	for elem := p.list.Front(); elem != nil; elem = elem.Next() {
+		queued = append(queued, elem.Value.(*Packet))
+	}
+	p.list.Init()
+	p.setEmpty()
+	p.mu.Unlock()
+
+	for _, packet := range queued {
+		if !registration.active.Load() || !handler(packet) {
+			continue
+		}
+	}
+
+	var unregisterOnce sync.Once
+	return func() {
+		unregisterOnce.Do(func() {
+			registration.active.Store(false)
+			p.mu.Lock()
+			if p.receiver == registration {
+				p.receiver = nil
+			}
+			p.mu.Unlock()
+		})
+	}, true
 }
 
 func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
@@ -75,17 +129,22 @@ func (p *Packets) setEmpty() {
 
 func (p *Packets) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed.Load() {
+		p.mu.Unlock()
 		return nil
 	}
 	p.closed.Store(true)
+	if p.receiver != nil {
+		p.receiver.active.Store(false)
+		p.receiver = nil
+	}
 	p.list.Init()
 	select {
 	case <-p.isEmptyState.Done():
 	default:
 		p.cancelEmptyState()
 	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -368,6 +427,67 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 	}
 }
 
+// RegisterPacketReceiver uses the TUIC transport reader's existing packet
+// demultiplexing loop instead of requiring one blocking ReadFrom goroutine for
+// every logical UDP association.
+func (q *quicStreamPacketConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	if handler == nil || q.closed.Load() {
+		return nil, false
+	}
+
+	q.mu.Lock()
+	incomingPackets := q.incomingPackets
+	q.mu.Unlock()
+	if incomingPackets == nil {
+		return nil, false
+	}
+
+	unregister, ok := incomingPackets.registerPacketHandler(func(packet *Packet) bool {
+		return q.deliverPacket(handler, packet)
+	})
+	return unregister, ok
+}
+
+func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandler, packet *Packet) bool {
+	if packet == nil || q.closed.Load() {
+		return false
+	}
+	if packet.FRAG_TOTAL <= 1 {
+		if packet.ADDR == nil {
+			return true
+		}
+		received := netproxy.NewReceivedPacket(
+			packet.DATA,
+			packet.ADDR.UDPAddr().AddrPort(),
+			nil,
+			nil,
+		)
+		if handler(received) {
+			return true
+		}
+		received.Release()
+		return false
+	}
+
+	nowNano := time.Now().UnixNano()
+	q.maybeCleanupDeFraggers(nowNano)
+	bucketAny, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFraggerBucket{})
+	bucket := bucketAny.(*deFraggerBucket)
+	buffer := pool.GetFullCap(1 << 16)
+	n, addr, assembled := bucket.feed(packet, buffer, nowNano)
+	if !assembled {
+		buffer.Put()
+		return true
+	}
+	q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
+	received := netproxy.NewReceivedPacket(buffer[:n], addr, nil, buffer.Put)
+	if handler(received) {
+		return true
+	}
+	received.Release()
+	return false
+}
+
 func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 	if len(p) > 0xffff { // uint16 max
 		return 0, &quic.DatagramTooLargeError{MaxDataLen: 0xffff}
@@ -458,6 +578,7 @@ func (conn *quicStreamPacketConn) Write(b []byte) (n int, err error) {
 }
 
 var _ netproxy.PacketConn = (*quicStreamPacketConn)(nil)
+var _ netproxy.PacketReceiver = (*quicStreamPacketConn)(nil)
 
 // TransportDone implements netproxy.TransportLifecycle.
 // The returned channel is closed when the QUIC transport backing this

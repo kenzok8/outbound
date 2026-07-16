@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/frag"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
@@ -83,6 +84,88 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("unexpected SendFunc call count: got %d want 2", got)
+	}
+}
+
+func TestUDPConnPacketReceiverDrainsQueuedMessage(t *testing.T) {
+	u := &udpConn{
+		ID:        1,
+		D:         &frag.Defragger{},
+		ReceiveCh: make(chan *protocol.UDPMessage, 2),
+	}
+	u.ReceiveCh <- &protocol.UDPMessage{
+		SessionID: 1,
+		FragCount: 1,
+		Addr:      "192.0.2.10:5353",
+		Data:      []byte("queued"),
+	}
+
+	packets := make(chan *netproxy.ReceivedPacket, 1)
+	unregister, ok := u.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		packets <- packet
+		return true
+	})
+	if !ok || unregister == nil {
+		t.Fatal("expected packet receiver registration")
+	}
+	defer unregister()
+
+	select {
+	case packet := <-packets:
+		if string(packet.Data) != "queued" {
+			t.Fatalf("packet data = %q, want queued", packet.Data)
+		}
+		if packet.From.String() != "192.0.2.10:5353" {
+			t.Fatalf("packet address = %v", packet.From)
+		}
+		packet.Release()
+	case <-time.After(time.Second):
+		t.Fatal("packet receiver did not drain queued message")
+	}
+}
+
+func TestUDPSessionManagerUsesPacketReceiverForNewMessages(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.20:443")
+	if err != nil {
+		t.Fatalf("NewUDP returned error: %v", err)
+	}
+	u := connRaw.(*udpConn)
+	packets := make(chan *netproxy.ReceivedPacket, 1)
+	unregister, ok := u.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		packets <- packet
+		return true
+	})
+	if !ok {
+		t.Fatal("expected packet receiver registration")
+	}
+	defer func() {
+		unregister()
+		_ = u.Close()
+	}()
+
+	m.feed(&protocol.UDPMessage{
+		SessionID: u.ID,
+		FragCount: 1,
+		Addr:      "198.51.100.8:443",
+		Data:      []byte("transport-owned"),
+	})
+	select {
+	case packet := <-packets:
+		if string(packet.Data) != "transport-owned" {
+			t.Fatalf("packet data = %q, want transport-owned", packet.Data)
+		}
+		packet.Release()
+	case <-time.After(time.Second):
+		t.Fatal("session manager did not use registered packet receiver")
+	}
+	if got := len(u.ReceiveCh); got != 0 {
+		t.Fatalf("ReceiveCh length = %d, want 0 when receiver is registered", got)
 	}
 }
 

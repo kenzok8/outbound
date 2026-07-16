@@ -15,6 +15,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -430,6 +431,43 @@ func (c *UdpConn) targetAddrInfo(addr string) (socks5.AddressInfo, error) {
 	return *addrInfo, nil
 }
 
+var _ netproxy.PacketReceiver = (*UdpConn)(nil)
+
+func (c *UdpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	receiver, ok := c.Conn.(netproxy.PacketReceiver)
+	if !ok {
+		return nil, false
+	}
+	return netproxy.RegisterMappedPacketReceiver(receiver, handler, c.mapReceivedPacket)
+}
+
+func (c *UdpConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.ReceivedPacket, bool) {
+	if packet.Err != nil {
+		return packet, true
+	}
+	if !c.checkContextAndSetReadDeadline() {
+		packet.Err = io.EOF
+		packet.Data = nil
+		return packet, true
+	}
+	var payload []byte
+	var addr netip.AddrPort
+	var err error
+	if c.IsUsingBlockCipher() {
+		payload, addr, err = c.decodeBlockPacket(packet.Data, time.Now())
+	} else {
+		payload, addr, err = c.decodeChachaPacket(packet.Data, time.Now())
+	}
+	if err != nil {
+		packet.Err = err
+		packet.Data = nil
+		return packet, true
+	}
+	packet.Data = payload
+	packet.From = addr
+	return packet, true
+}
+
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	if !c.IsUsingBlockCipher() {
 		return c.readFromChacha(b)
@@ -444,81 +482,40 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	// Check context after read
 	select {
 	case <-c.getContext().Done():
 		return 0, netip.AddrPort{}, c.getContext().Err()
 	default:
 	}
-	if n < 16 {
-		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+	payload, addr, err := c.decodeBlockPacket(buf[:n], time.Now())
+	if err != nil {
+		return 0, netip.AddrPort{}, err
 	}
+	return copy(b, payload), addr, nil
+}
 
+func (c *UdpConn) decodeBlockPacket(buf []byte, now time.Time) ([]byte, netip.AddrPort, error) {
+	if len(buf) < 16 {
+		return nil, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+	}
 	c.BlockCipherDecrypt().Decrypt(buf[:16], buf[:16])
 	var sessionID [8]byte
 	copy(sessionID[:], buf[:8])
 	packetID := binary.BigEndian.Uint64(buf[8:16])
-	now := time.Now()
 	if !c.checkAndUpdateReplay(sessionID, packetID, now) {
-		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+		return nil, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
-	payload := buf[16:n]
+	payload := buf[16:]
 	sessionCipher, err := c.decryptCipherFor(sessionID)
 	if err != nil {
-		return 0, netip.AddrPort{}, err
+		return nil, netip.AddrPort{}, err
 	}
 	payload, err = sessionCipher.Open(payload[:0], buf[4:16], payload, nil)
 	if err != nil {
-		return 0, netip.AddrPort{}, err
+		return nil, netip.AddrPort{}, err
 	}
-
-	reader := bytes.NewReader(payload)
-
-	var typ uint8
-	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
-	}
-
-	var timestampRaw uint64
-	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
-	}
-	timestamp := time.Unix(int64(timestampRaw), 0)
-
-	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
-	}
-
-	var paddingLength uint16
-	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
-	}
-
-	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
-	}
-
-	if typ != HeaderTypeServerStream {
-		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
-	}
-
-	if err := validateTimestamp(timestamp, now); err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-
-	netAddr, err := socks5.ReadAddr(reader)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-
-	if udpAddr, ok := netAddr.(*net.UDPAddr); ok {
-		ipAddr, _ := netip.AddrFromSlice(udpAddr.IP)
-		addr = netip.AddrPortFrom(ipAddr, uint16(udpAddr.Port))
-	}
-
-	n, err = reader.Read(b)
-	return
+	return c.decodePacketPayload(buf, payload, now)
 }
 
 func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err error) {
@@ -528,7 +525,6 @@ func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err erro
 
 	buf := pool.Get(len(b) + udpPacketNonceSize + c.CipherConf().TagLen + 320)
 	defer pool.Put(buf)
-
 	if !c.checkContextAndSetReadDeadline() {
 		return 0, netip.AddrPort{}, io.EOF
 	}
@@ -536,90 +532,90 @@ func (c *UdpConn) readFromChacha(b []byte) (n int, addr netip.AddrPort, err erro
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	// Check context after read
 	select {
 	case <-c.getContext().Done():
 		return 0, netip.AddrPort{}, c.getContext().Err()
 	default:
 	}
-	if n < udpPacketNonceSize+c.CipherConf().TagLen+16 {
-		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
-	}
-
-	nonce := buf[:udpPacketNonceSize]
-	payload := buf[udpPacketNonceSize:n]
-	payload, err = c.cipher.Open(payload[:0], nonce, payload, nil)
+	payload, addr, err := c.decodeChachaPacket(buf[:n], time.Now())
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
+	return copy(b, payload), addr, nil
+}
 
+func (c *UdpConn) decodeChachaPacket(buf []byte, now time.Time) ([]byte, netip.AddrPort, error) {
+	if err := c.ensureCipher(); err != nil {
+		return nil, netip.AddrPort{}, err
+	}
+	if len(buf) < udpPacketNonceSize+c.CipherConf().TagLen+16 {
+		return nil, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
+	}
+	nonce := buf[:udpPacketNonceSize]
+	payload := buf[udpPacketNonceSize:]
+	var err error
+	payload, err = c.cipher.Open(payload[:0], nonce, payload, nil)
+	if err != nil {
+		return nil, netip.AddrPort{}, err
+	}
 	reader := bytes.NewReader(payload)
-
-	// Skip EIH if present (for multi-PSK chacha)
 	eihLen := c.IdentityHeaderLen()
 	if eihLen > 0 {
 		if _, err := reader.Seek(int64(eihLen), io.SeekCurrent); err != nil {
-			return 0, netip.AddrPort{}, fmt.Errorf("failed to skip EIH: %w", err)
+			return nil, netip.AddrPort{}, fmt.Errorf("failed to skip EIH: %w", err)
 		}
 	}
-
 	var sessionID [8]byte
 	if _, err := io.ReadFull(reader, sessionID[:]); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read session ID: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to read session ID: %w", err)
 	}
-
 	var packetID uint64
 	if err := binary.Read(reader, binary.BigEndian, &packetID); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read packet ID: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to read packet ID: %w", err)
 	}
-
-	now := time.Now()
 	if !c.checkAndUpdateReplay(sessionID, packetID, now) {
-		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+		return nil, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
+	return c.decodePacketPayload(buf, payload[reader.Size()-int64(reader.Len()):], now)
+}
 
+func (c *UdpConn) decodePacketPayload(buf, payload []byte, now time.Time) ([]byte, netip.AddrPort, error) {
+	reader := bytes.NewReader(payload)
 	var typ uint8
 	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
 	}
-
 	var timestampRaw uint64
 	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
 	}
 	timestamp := time.Unix(int64(timestampRaw), 0)
-
 	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
 	}
-
 	var paddingLength uint16
 	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
 	}
-
 	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
+		return nil, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
 	}
-
 	if typ != HeaderTypeServerStream {
-		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
+		return nil, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
 	}
-
 	if err := validateTimestamp(timestamp, now); err != nil {
-		return 0, netip.AddrPort{}, err
+		return nil, netip.AddrPort{}, err
 	}
-
 	netAddr, err := socks5.ReadAddr(reader)
 	if err != nil {
-		return 0, netip.AddrPort{}, err
+		return nil, netip.AddrPort{}, err
 	}
-
+	var addr netip.AddrPort
 	if udpAddr, ok := netAddr.(*net.UDPAddr); ok {
 		ipAddr, _ := netip.AddrFromSlice(udpAddr.IP)
 		addr = netip.AddrPortFrom(ipAddr, uint16(udpAddr.Port))
 	}
-
-	n, err = reader.Read(b)
-	return
+	out := buf[:reader.Len()]
+	n, err := reader.Read(out)
+	return out[:n], addr, err
 }

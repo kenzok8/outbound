@@ -43,11 +43,16 @@ type udpConn struct {
 	// to detect transport death without waiting for ReadFrom/WriteTo errors.
 	transportDone <-chan struct{}
 
-	writeMu sync.Mutex
-	muTimer sync.Mutex
-	timer   *time.Timer
-	target  string
+	writeMu    sync.Mutex
+	receiveMu  sync.Mutex
+	muTimer    sync.Mutex
+	timer      *time.Timer
+	target     string
+	receiverMu sync.Mutex
+	receiver   netproxy.PacketReceiveHandler
 }
+
+var _ netproxy.PacketReceiver = (*udpConn)(nil)
 
 // TransportDone implements netproxy.TransportLifecycle.
 // The returned channel is closed when the QUIC transport backing this
@@ -76,7 +81,9 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 			// Closed
 			return 0, netip.AddrPort{}, io.EOF
 		}
+		u.receiveMu.Lock()
 		dfMsg := u.D.Feed(msg)
+		u.receiveMu.Unlock()
 		if dfMsg == nil {
 			// Incomplete message, wait for more
 			continue
@@ -87,6 +94,86 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 		}
 		return copy(p, dfMsg.Data), netipAddr, nil
 	}
+}
+
+// RegisterPacketReceiver lets dae consume packets from the session manager's
+// existing transport reader without adding a blocking ReadFrom goroutine for
+// this logical UDP session.
+func (u *udpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	if handler == nil {
+		return nil, false
+	}
+	u.receiverMu.Lock()
+	if u.receiver != nil {
+		u.receiverMu.Unlock()
+		return nil, false
+	}
+	u.receiver = handler
+	u.receiverMu.Unlock()
+
+	var unregisterOnce sync.Once
+	unregister := func() {
+		unregisterOnce.Do(func() {
+			u.receiverMu.Lock()
+			u.receiver = nil
+			u.receiverMu.Unlock()
+		})
+	}
+
+	// Preserve messages that arrived between session creation and registration.
+	for {
+		select {
+		case msg, ok := <-u.ReceiveCh:
+			if !ok {
+				unregister()
+				return unregister, true
+			}
+			u.deliverMessage(msg)
+		default:
+			return unregister, true
+		}
+	}
+}
+
+func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
+	u.receiverMu.Lock()
+	handler := u.receiver
+	u.receiverMu.Unlock()
+	if handler == nil {
+		return false
+	}
+	u.receiveMu.Lock()
+	msg = u.D.Feed(msg)
+	u.receiveMu.Unlock()
+	if msg == nil {
+		return true
+	}
+	addr, err := netip.ParseAddrPort(msg.Addr)
+	if err != nil {
+		return true
+	}
+	packet := netproxy.NewReceivedPacket(msg.Data, addr, nil, nil)
+	if handler(packet) {
+		return true
+	}
+	packet.Release()
+	return true
+}
+
+// queueIfNoReceiver queues a message only while the receiver state is held
+// stable. A false result means the caller should retry transport delivery.
+func (u *udpConn) queueIfNoReceiver(msg *protocol.UDPMessage) bool {
+	u.receiverMu.Lock()
+	defer u.receiverMu.Unlock()
+	if u.receiver != nil {
+		return false
+	}
+	select {
+	case u.ReceiveCh <- msg:
+	default:
+		// Channel full, drop the message.
+	}
+	return true
 }
 
 func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
@@ -229,19 +316,33 @@ func (m *udpSessionManager) closeCleanup() {
 
 func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-
 	conn, ok := m.m[msg.SessionID]
+	m.mutex.RUnlock()
 	if !ok {
 		// Ignore message from unknown session
 		return
 	}
+	if conn.deliverMessage(msg) {
+		return
+	}
 
-	select {
-	case conn.ReceiveCh <- msg:
-		// OK
-	default:
-		// Channel full, drop the message
+	for {
+		// A receiver may be registered or unregistered concurrently with this
+		// lookup. Recheck the session under the manager read lock before
+		// touching ReceiveCh so closeLocked cannot race a channel send.
+		m.mutex.RLock()
+		if current, exists := m.m[msg.SessionID]; !exists || current != conn {
+			m.mutex.RUnlock()
+			return
+		}
+		if conn.queueIfNoReceiver(msg) {
+			m.mutex.RUnlock()
+			return
+		}
+		m.mutex.RUnlock()
+		if conn.deliverMessage(msg) {
+			return
+		}
 	}
 }
 
@@ -292,6 +393,9 @@ func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
 		return nil
 	}
 	conn.Closed = true
+	conn.receiverMu.Lock()
+	conn.receiver = nil
+	conn.receiverMu.Unlock()
 	conn.stopDeadlineTimer()
 	close(conn.ReceiveCh)
 	delete(m.m, conn.ID)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,57 @@ type PacketConn interface {
 	SetDeadline(t time.Time) error
 	SetReadDeadline(t time.Time) error
 	SetWriteDeadline(t time.Time) error
+}
+
+// ReceivedPacket is one complete datagram delivered by an optional
+// transport-owned packet receiver. The receiver owns the packet after a
+// handler accepts it and must call Release exactly once.
+type ReceivedPacket struct {
+	Data []byte
+	From netip.AddrPort
+	Err  error
+
+	releaseOnce sync.Once
+	release     func()
+}
+
+// NewReceivedPacket constructs a packet whose storage can be returned to the
+// transport after the consumer finishes processing it.
+func NewReceivedPacket(data []byte, from netip.AddrPort, err error, release func()) *ReceivedPacket {
+	return &ReceivedPacket{
+		Data:    data,
+		From:    from,
+		Err:     err,
+		release: release,
+	}
+}
+
+// Release returns packet storage to its producer. It is safe to call more
+// than once, which lets queue rejection and shutdown cleanup share ownership
+// paths without double returning a buffer.
+func (p *ReceivedPacket) Release() {
+	if p == nil {
+		return
+	}
+	p.releaseOnce.Do(func() {
+		if p.release != nil {
+			p.release()
+		}
+		p.Data = nil
+	})
+}
+
+// PacketReceiveHandler is called by a transport-owned receive loop. Returning
+// true transfers packet ownership to the handler; returning false asks the
+// transport to release the packet immediately.
+type PacketReceiveHandler func(packet *ReceivedPacket) bool
+
+// PacketReceiver is an optional packet-delivery boundary for transports that
+// already own a shared receive loop. It avoids adding a blocking ReadFrom
+// goroutine in every logical flow while leaving PacketConn compatibility
+// unchanged for transports without this capability.
+type PacketReceiver interface {
+	RegisterPacketReceiver(handler PacketReceiveHandler) (unregister func(), ok bool)
 }
 
 // TransportLifecycle is an optional interface that PacketConn implementations
@@ -139,6 +191,16 @@ func (conn *fakeNetPacketConn) TransportDone() <-chan struct{} {
 		return nil
 	}
 	return lifecycle.TransportDone()
+}
+
+// RegisterPacketReceiver forwards the optional transport-owned delivery
+// boundary through the net.Conn compatibility wrapper.
+func (conn *fakeNetPacketConn) RegisterPacketReceiver(handler PacketReceiveHandler) (func(), bool) {
+	receiver, ok := conn.PacketConn.(PacketReceiver)
+	if !ok {
+		return nil, false
+	}
+	return receiver.RegisterPacketReceiver(handler)
 }
 func (conn *fakeNetPacketConn) SetWriteBuffer(size int) error {
 	c, ok := conn.PacketConn.(interface{ SetWriteBuffer(int) error })

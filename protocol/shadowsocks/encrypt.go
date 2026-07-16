@@ -57,6 +57,12 @@ func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (sha
 
 func DecryptUDPFromPool(key *Key, shadowBytes []byte, reusedInfo []byte) (buf pool.PB, err error) {
 	buf = pool.Get(len(shadowBytes))
+	if buf.HeadOverlap(shadowBytes) {
+		// The caller may still own the encrypted packet. Do not let pooled
+		// output alias it, or AEAD Open will reject the overlap and the input
+		// packet will be corrupted on successful decrypt.
+		buf = pool.PB(make([]byte, len(shadowBytes)))
+	}
 	n, err := DecryptUDP(buf[:0], key, shadowBytes, reusedInfo)
 	if err != nil {
 		buf.Put()

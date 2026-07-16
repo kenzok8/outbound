@@ -6,10 +6,12 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -18,6 +20,23 @@ import (
 type udpReadBufferConn struct {
 	packet []byte
 	read   bool
+}
+
+type udpReceiverConn struct {
+	*udpReadBufferConn
+	handler netproxy.PacketReceiveHandler
+}
+
+func (c *udpReceiverConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	c.handler = handler
+	return func() { c.handler = nil }, true
+}
+
+func (c *udpReceiverConn) emit(packet *netproxy.ReceivedPacket) bool {
+	if c.handler == nil {
+		return false
+	}
+	return c.handler(packet)
 }
 
 func (c *udpReadBufferConn) Read(p []byte) (int, error) {
@@ -293,6 +312,84 @@ func TestUdpConn_ReadFromChacha2022(t *testing.T) {
 	}
 	if got := string(buf[:n]); got != string(wantPayload) {
 		t.Fatalf("unexpected payload: got %q want %q", got, string(wantPayload))
+	}
+}
+
+func TestUdpConnPacketReceiverDecodesBlockAndChachaPackets(t *testing.T) {
+	tests := []struct {
+		name       string
+		cipherName string
+		serverID   [8]byte
+		clientID   [8]byte
+		addr       string
+		payload    []byte
+		build      func(*testing.T, *SS2022Core, [8]byte, [8]byte, uint64, string, []byte) []byte
+	}{
+		{
+			name:       "block",
+			cipherName: "2022-blake3-aes-256-gcm",
+			serverID:   [8]byte{8, 7, 6, 5, 4, 3, 2, 1},
+			clientID:   [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
+			addr:       "203.0.113.9:853",
+			payload:    []byte("receiver-block"),
+			build:      buildServerPacket,
+		},
+		{
+			name:       "chacha",
+			cipherName: "2022-blake3-chacha20-poly1305",
+			serverID:   [8]byte{2, 4, 6, 8, 10, 12, 14, 16},
+			clientID:   [8]byte{1, 3, 5, 7, 9, 11, 13, 15},
+			addr:       "198.51.100.7:443",
+			payload:    []byte("receiver-chacha"),
+			build:      buildServerPacketChacha,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := ciphers.Aead2022CiphersConf[tc.cipherName]
+			if conf == nil {
+				t.Fatalf("missing cipher config %q", tc.cipherName)
+			}
+			psk := make([]byte, conf.KeyLen)
+			for i := range psk {
+				psk[i] = byte(i + 0x20)
+			}
+			core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packet := tc.build(t, core, tc.serverID, tc.clientID, 1, tc.addr, tc.payload)
+			receiver := &udpReceiverConn{udpReadBufferConn: &udpReadBufferConn{}}
+			conn, err := NewUdpConn(receiver, core, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn.sessionID = tc.clientID
+
+			var got *netproxy.ReceivedPacket
+			stop, ok := conn.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+				got = packet
+				return true
+			})
+			if !ok || stop == nil {
+				t.Fatal("RegisterPacketReceiver() did not register")
+			}
+			var released atomic.Int32
+			if !receiver.emit(netproxy.NewReceivedPacket(append([]byte(nil), packet...), netip.AddrPort{}, nil, func() {
+				released.Add(1)
+			})) {
+				t.Fatal("receiver did not consume packet")
+			}
+			if got == nil || string(got.Data) != string(tc.payload) || got.From != netip.MustParseAddrPort(tc.addr) {
+				t.Fatalf("decoded packet = %+v, want payload %q from %s", got, tc.payload, tc.addr)
+			}
+			got.Release()
+			if released.Load() != 1 {
+				t.Fatalf("raw release count = %d, want 1", released.Load())
+			}
+			stop()
+		})
 	}
 }
 

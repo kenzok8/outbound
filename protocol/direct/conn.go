@@ -14,14 +14,38 @@ var resolveUDPAddr = common.ResolveUDPAddr
 
 type directPacketConn struct {
 	*net.UDPConn
-	FullCone      bool
-	dialTgt       string
-	cachedDialTgt atomic.Value // stores netip.AddrPort
-	writeTgtCache common.LastStringValue[netip.AddrPort]
-	cacheOnce     sync.Once
-	cacheMu       sync.Mutex // protects cacheErr
-	cacheErr      error
-	resolver      *net.Resolver
+	FullCone           bool
+	dialTgt            string
+	receiver           *packetReceiverRegistry
+	receiverMu         sync.Mutex
+	receiverStop       func()
+	receiverGeneration uint64
+	cachedDialTgt      atomic.Value // stores netip.AddrPort
+	writeTgtCache      common.LastStringValue[netip.AddrPort]
+	cacheOnce          sync.Once
+	cacheMu            sync.Mutex // protects cacheErr
+	cacheErr           error
+	resolver           *net.Resolver
+}
+
+// Close unregisters the socket from the shared packet receiver before closing
+// its underlying UDP descriptor.
+func (c *directPacketConn) Close() error {
+	c.stopPacketReceiver()
+	if c.UDPConn == nil {
+		return nil
+	}
+	return c.UDPConn.Close()
+}
+
+func (c *directPacketConn) stopPacketReceiver() {
+	c.receiverMu.Lock()
+	stop := c.receiverStop
+	c.receiverStop = nil
+	c.receiverMu.Unlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 func (c *directPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {

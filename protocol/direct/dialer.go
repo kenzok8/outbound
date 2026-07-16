@@ -72,6 +72,7 @@ type directDialer struct {
 	tcpDialer      *net.Dialer
 	tcpDialerMptcp *net.Dialer
 	udpLocalAddr   *net.UDPAddr
+	receiver       *packetReceiverRegistry
 	Option         Option
 }
 
@@ -89,6 +90,7 @@ func NewDirectDialerLaddr(lAddr netip.Addr, option Option) netproxy.Dialer {
 		tcpDialer:      tcpDialer,
 		tcpDialerMptcp: tcpDialerMptcp,
 		udpLocalAddr:   udpLocalAddr,
+		receiver:       newPacketReceiverRegistry(),
 		Option:         option,
 	}
 
@@ -157,7 +159,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, ipVer
 			if err != nil {
 				return nil, err
 			}
-			return &directPacketConn{UDPConn: conn, FullCone: true, dialTgt: addr, resolver: resolver}, nil
+			return &directPacketConn{UDPConn: conn, FullCone: true, dialTgt: addr, resolver: resolver, receiver: d.receiver}, nil
 		} else {
 			dialer := net.Dialer{
 				LocalAddr: d.udpLocalAddr,
@@ -167,7 +169,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, ipVer
 			if err != nil {
 				return nil, err
 			}
-			return &directPacketConn{UDPConn: conn.(*net.UDPConn), FullCone: false, dialTgt: addr, resolver: resolver}, nil
+			return &directPacketConn{UDPConn: conn.(*net.UDPConn), FullCone: false, dialTgt: addr, resolver: resolver, receiver: d.receiver}, nil
 		}
 
 	} else {
@@ -213,7 +215,7 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, ipVer
 				}
 				return dialer.DialContext(ctx, network, address)
 			},
-		}}, nil
+		}, receiver: d.receiver}, nil
 	}
 }
 

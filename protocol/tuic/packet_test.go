@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -112,6 +113,71 @@ func TestPacketsPushPop(t *testing.T) {
 		t.Errorf("expected 'test data', got '%s'", packet.DATA)
 	}
 	_ = p.Close()
+}
+
+func TestQuicStreamPacketConnPacketReceiverDeliversQueuedDatagram(t *testing.T) {
+	packets := NewPackets()
+	packets.PushBack(&Packet{
+		FRAG_TOTAL: 1,
+		DATA:       []byte("queued payload"),
+		ADDR:       &Address{TYPE: AtypIPv4, ADDR: []byte{192, 0, 2, 7}, PORT: 5353},
+	})
+	q := &quicStreamPacketConn{incomingPackets: packets}
+	delivered := make(chan *netproxy.ReceivedPacket, 1)
+	unregister, ok := q.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		delivered <- packet
+		return true
+	})
+	if !ok || unregister == nil {
+		t.Fatal("expected packet receiver registration")
+	}
+	defer unregister()
+
+	select {
+	case packet := <-delivered:
+		if string(packet.Data) != "queued payload" {
+			t.Fatalf("packet data = %q, want queued payload", packet.Data)
+		}
+		if packet.From != netip.MustParseAddrPort("192.0.2.7:5353") {
+			t.Fatalf("packet address = %v", packet.From)
+		}
+		packet.Release()
+	case <-time.After(time.Second):
+		t.Fatal("packet receiver did not drain queued datagram")
+	}
+	_ = q.Close()
+}
+
+func TestQuicStreamPacketConnPacketReceiverAssemblesFragments(t *testing.T) {
+	packets := NewPackets()
+	q := &quicStreamPacketConn{incomingPackets: packets}
+	delivered := make(chan *netproxy.ReceivedPacket, 1)
+	unregister, ok := q.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		delivered <- packet
+		return true
+	})
+	if !ok {
+		t.Fatal("expected packet receiver registration")
+	}
+	defer unregister()
+
+	addr := &Address{TYPE: AtypIPv4, ADDR: []byte{198, 51, 100, 9}, PORT: 443}
+	packets.PushBack(&Packet{PKT_ID: 42, FRAG_TOTAL: 2, FRAG_ID: 0, ADDR: addr, DATA: []byte("frag-")})
+	packets.PushBack(&Packet{PKT_ID: 42, FRAG_TOTAL: 2, FRAG_ID: 1, ADDR: &Address{TYPE: AtypNone}, DATA: []byte("mented")})
+
+	select {
+	case packet := <-delivered:
+		if string(packet.Data) != "frag-mented" {
+			t.Fatalf("assembled data = %q, want frag-mented", packet.Data)
+		}
+		if packet.From != netip.MustParseAddrPort("198.51.100.9:443") {
+			t.Fatalf("assembled address = %v", packet.From)
+		}
+		packet.Release()
+	case <-time.After(time.Second):
+		t.Fatal("packet receiver did not assemble fragments")
+	}
+	_ = q.Close()
 }
 
 func TestConcurrentPushClose(t *testing.T) {

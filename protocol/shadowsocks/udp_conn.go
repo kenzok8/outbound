@@ -49,6 +49,76 @@ type UdpConn struct {
 	target  common.LastStringValue[protocol.Metadata]
 }
 
+var _ netproxy.PacketReceiver = (*UdpConn)(nil)
+
+func (c *UdpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) (func(), bool) {
+	receiver, ok := c.PacketConn.(netproxy.PacketReceiver)
+	if !ok {
+		return nil, false
+	}
+	return netproxy.RegisterMappedPacketReceiver(receiver, handler, c.mapReceivedPacket)
+}
+
+func (c *UdpConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.ReceivedPacket, bool) {
+	if packet.Err != nil {
+		return packet, true
+	}
+	key := &Key{
+		CipherConf: c.cipherConf,
+		MasterKey:  c.masterKey,
+	}
+	decoded := pool.Get(len(packet.Data))
+	n, err := DecryptUDP(decoded[:0], key, packet.Data, ShadowsocksReusedInfo)
+	if err != nil {
+		decoded.Put()
+		packet.Err = err
+		packet.Data = nil
+		return packet, true
+	}
+
+	if c.bloom != nil {
+		if exist := c.bloom.ExistOrAdd(packet.Data[:c.cipherConf.SaltLen]); exist {
+			decoded.Put()
+			packet.Err = protocol.ErrReplayAttack
+			packet.Data = nil
+			return packet, true
+		}
+	}
+	sizeMetadata, err := BytesSizeForMetadata(decoded[:n])
+	if err != nil {
+		decoded.Put()
+		packet.Err = err
+		packet.Data = nil
+		return packet, true
+	}
+	mdata, err := NewMetadata(decoded[:n])
+	if err != nil {
+		decoded.Put()
+		packet.Err = err
+		packet.Data = nil
+		return packet, true
+	}
+	if mdata.Type != protocol.MetadataTypeIPv4 && mdata.Type != protocol.MetadataTypeIPv6 {
+		decoded.Put()
+		packet.Err = fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
+		packet.Data = nil
+		return packet, true
+	}
+	ip, err := netip.ParseAddr(mdata.Hostname)
+	if err != nil {
+		decoded.Put()
+		packet.Err = err
+		packet.Data = nil
+		return packet, true
+	}
+	return netproxy.NewReceivedPacket(
+		decoded[sizeMetadata:n],
+		netip.AddrPortFrom(ip, mdata.Port),
+		nil,
+		func() { decoded.Put() },
+	), true
+}
+
 var parseMetadata = protocol.ParseMetadata
 
 func NewUdpConn(conn netproxy.PacketConn, proxyAddress string, metadata protocol.Metadata, masterKey []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
