@@ -60,30 +60,64 @@ func writeFrame(session *session, frame frame) (int, error) {
 }
 
 func writeFrameWithDeadline(session *session, frame frame, deadline time.Time) (int, error) {
+	size, err := encodedFrameSize(frame)
+	if err != nil {
+		return 0, err
+	}
+	buffer := pool.Get(size)
+	defer pool.Put(buffer)
+
+	encodeFrame(buffer, frame)
+	if _, err := session.writeConnWithDeadline(buffer, deadline); err != nil {
+		return 0, err
+	}
+	return len(frame.data), nil
+}
+
+func writeFrames(session *session, frames ...frame) (int, error) {
+	totalSize := 0
+	totalData := 0
+	for _, frame := range frames {
+		size, err := encodedFrameSize(frame)
+		if err != nil {
+			return 0, err
+		}
+		totalSize += size
+		totalData += len(frame.data)
+	}
+
+	buffer := pool.Get(totalSize)
+	defer pool.Put(buffer)
+	offset := 0
+	for _, frame := range frames {
+		offset += encodeFrame(buffer[offset:], frame)
+	}
+	if _, err := session.writeConn(buffer); err != nil {
+		return 0, err
+	}
+	return totalData, nil
+}
+
+func encodedFrameSize(frame frame) (int, error) {
 	dataLen := len(frame.data)
 	if dataLen > maxFramePayloadSize {
 		return 0, fmt.Errorf("anytls frame payload too large: %d > %d", dataLen, maxFramePayloadSize)
 	}
+	return headerOverHeadSize + dataLen, nil
+}
 
-	buffer := pool.Get(dataLen + headerOverHeadSize)
-	defer pool.Put(buffer)
-
-	buffer[0] = frame.cmd
-	binary.BigEndian.PutUint32(buffer[1:], frame.sid)
-	binary.BigEndian.PutUint16(buffer[5:], uint16(dataLen))
-	copy(buffer[7:], frame.data)
-	_, err := session.writeConnWithDeadline(buffer, deadline)
-	if err != nil {
-		return 0, err
-	}
-
-	return dataLen, nil
+func encodeFrame(dst []byte, frame frame) int {
+	dataLen := len(frame.data)
+	dst[0] = frame.cmd
+	binary.BigEndian.PutUint32(dst[1:], frame.sid)
+	binary.BigEndian.PutUint16(dst[5:], uint16(dataLen))
+	copy(dst[headerOverHeadSize:], frame.data)
+	return headerOverHeadSize + dataLen
 }
 
 func writeDataFrames(session *session, sid uint32, data []byte, deadline time.Time) (int, error) {
 	if len(data) == 0 {
-		_, err := writeFrameWithDeadline(session, newFrame(cmdPSH, sid), deadline)
-		return 0, err
+		return 0, nil
 	}
 
 	written := 0

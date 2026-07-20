@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 type stubConn struct {
@@ -21,6 +23,8 @@ func (c *stubConn) Close() error                       { c.closed = true; return
 func (c *stubConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *stubConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *stubConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (c *stubConn) LocalAddr() net.Addr                { return testAddr("local") }
+func (c *stubConn) RemoteAddr() net.Addr               { return testAddr("remote") }
 
 type recordingConn struct {
 	mu                 sync.Mutex
@@ -316,7 +320,9 @@ func TestPacketReadFromDrainsShortBuffer(t *testing.T) {
 	}
 	packetBytes := appendLengthPrefixed(nil, []byte("abcd"))
 	packetBytes = appendLengthPrefixed(packetBytes, []byte("ef"))
-	if err := packet.enqueue(packetBytes); err != nil {
+	chunk := pool.Get(len(packetBytes))
+	copy(chunk, packetBytes)
+	if err := packet.enqueue(chunk); err != nil {
 		t.Fatalf("enqueue() error = %v", err)
 	}
 

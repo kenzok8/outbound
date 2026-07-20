@@ -35,6 +35,7 @@ type Dialer struct {
 	metadata     protocol.Metadata
 	key          []byte
 	tlsConfig    *tls.Config
+	padding      atomic.Pointer[paddingFactory]
 
 	sessionCounter atomic.Uint64
 
@@ -60,6 +61,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		sessions:     make(map[uint64]*session),
 		janitorDone:  make(chan struct{}),
 	}
+	d.padding.Store(DefaultPaddingFactory.Load().(*paddingFactory))
 	go d.runIdleJanitor()
 	return d, nil
 }
@@ -189,10 +191,12 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		return nil, err
 	}
 
-	buf := pool.Get(len(d.key) + 2)
+	buf, err := buildAuthenticationPacket(d.key, d.padding.Load())
+	if err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
 	defer pool.Put(buf)
-	copy(buf, d.key)
-	binary.BigEndian.PutUint16(buf[len(d.key):], uint16(0))
 	restoreDeadline, err := netproxy.ApplyConnDeadlineFromContext(ctx, tlsConn)
 	if err != nil {
 		_ = tlsConn.Close()
@@ -205,7 +209,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	}
 
 	seq := d.sessionCounter.Add(1)
-	s := newSession(tlsConn, seq)
+	s := newSessionWithPadding(tlsConn, seq, &d.padding)
 	d.idleSessionLock.Lock()
 	if d.closed {
 		d.idleSessionLock.Unlock()
@@ -219,6 +223,22 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	go func() { _ = s.run() }()
 
 	return s, nil
+}
+
+func buildAuthenticationPacket(key []byte, padding *paddingFactory) (pool.PB, error) {
+	paddingLen := 0
+	if sizes := padding.GenerateRecordPayloadSizes(0); len(sizes) > 0 {
+		paddingLen = sizes[0]
+	}
+	if paddingLen < 0 || paddingLen > maxFramePayloadSize {
+		return nil, fmt.Errorf("invalid anytls authentication padding length: %d", paddingLen)
+	}
+
+	buffer := pool.Get(len(key) + 2 + paddingLen)
+	copy(buffer, key)
+	binary.BigEndian.PutUint16(buffer[len(key):], uint16(paddingLen))
+	clear(buffer[len(key)+2:])
+	return buffer, nil
 }
 
 func (d *Dialer) popIdleSessionForReuse() (*session, error) {

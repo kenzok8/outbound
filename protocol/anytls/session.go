@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
@@ -27,14 +26,14 @@ const (
 )
 
 type session struct {
-	conn     netproxy.Conn
+	conn     net.Conn
 	connLock sync.Mutex
 	probeMu  sync.Mutex
 
 	streams    map[uint32]*stream
 	streamLock sync.RWMutex
 
-	padding     atomic.Value
+	padding     *atomic.Pointer[paddingFactory]
 	sendPadding bool
 	pktCounter  atomic.Uint32
 	peerVersion byte
@@ -51,10 +50,17 @@ type session struct {
 	heartResponseCh chan struct{}
 }
 
-func newSession(conn netproxy.Conn, seq uint64) *session {
+func newSession(conn net.Conn, seq uint64) *session {
+	padding := &atomic.Pointer[paddingFactory]{}
+	padding.Store(DefaultPaddingFactory.Load().(*paddingFactory))
+	return newSessionWithPadding(conn, seq, padding)
+}
+
+func newSessionWithPadding(conn net.Conn, seq uint64, padding *atomic.Pointer[paddingFactory]) *session {
 	s := &session{
 		conn:            conn,
 		streams:         map[uint32]*stream{},
+		padding:         padding,
 		seq:             seq,
 		done:            make(chan struct{}),
 		closeStreamChan: make(chan uint32, 2),
@@ -62,7 +68,6 @@ func newSession(conn netproxy.Conn, seq uint64) *session {
 		sendPadding:     true,
 	}
 	s.state.Store(sessionStateActive)
-	s.padding.Store(DefaultPaddingFactory.Load())
 	return s
 }
 
@@ -87,21 +92,23 @@ func (s *session) newStream(addr string) (*stream, error) {
 		}
 	}()
 
-	frame := newFrame(cmdSettings, sid)
-	frame.data = settingsBytes(s.GetPadding())
-	if _, err := writeFrame(s, frame); err != nil {
-		return nil, err
-	}
+	settings := newFrame(cmdSettings, 0)
+	settings.data = settingsBytes(s.GetPadding())
+	syn := newFrame(cmdSYN, sid)
+	initialData := newFrame(cmdPSH, sid)
+	initialData.data = tgtAddr
 
-	frame = newFrame(cmdSYN, sid)
-	if _, err := writeFrame(s, frame); err != nil {
-		return nil, err
-	}
-
-	frame = newFrame(cmdPSH, sid)
-	frame.data = tgtAddr
-	if _, err := writeFrame(s, frame); err != nil {
-		return nil, err
+	if sid == 1 {
+		if _, err := writeFrames(s, settings, syn, initialData); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := writeFrame(s, syn); err != nil {
+			return nil, err
+		}
+		if _, err := writeFrame(s, initialData); err != nil {
+			return nil, err
+		}
 	}
 
 	created = true
@@ -181,29 +188,27 @@ func (s *session) run() error {
 		if s.Closed() {
 			return net.ErrClosed
 		}
-		// Use a goroutine so we can also select on s.done to avoid
-		// leaking the run() goroutine when the session is abandoned.
-		headerReady := make(chan error, 1)
-		go func() {
-			_, err := io.ReadFull(s.conn, header[:])
-			headerReady <- err
-		}()
-		select {
-		case <-s.done:
-			return net.ErrClosed
-		case err := <-headerReady:
-			if err != nil {
-				return err
-			}
+		if _, err := io.ReadFull(s.conn, header[:]); err != nil {
+			return err
 		}
 		sid := header.StreamID()
 		length := int(header.Length())
-		switch header.Cmd() {
+		cmd := header.Cmd()
+		if length != 0 {
+			switch cmd {
+			case cmdFIN, cmdHeartRequest, cmdHeartResponse:
+				return fmt.Errorf("invalid payload length %d for cmd %d", length, cmd)
+			}
+		}
+		switch cmd {
 		case cmdWaste:
 			if _, err := io.CopyN(io.Discard, s.conn, int64(length)); err != nil {
 				return err
 			}
 		case cmdPSH:
+			if length == 0 {
+				continue
+			}
 			buf := pool.Get(length)
 			if _, err := io.ReadFull(s.conn, buf); err != nil {
 				pool.Put(buf)
@@ -212,13 +217,14 @@ func (s *session) run() error {
 			s.streamLock.RLock()
 			stream, ok := s.streams[sid]
 			s.streamLock.RUnlock()
-			if ok {
-				if err := stream.enqueue(buf); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-					pool.Put(buf)
-					return err
-				}
+			if !ok {
+				pool.Put(buf)
+				continue
 			}
-			pool.Put(buf)
+			// enqueue takes ownership of buf on every return path.
+			if err := stream.enqueue(buf); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				return err
+			}
 		case cmdAlert:
 			buf := pool.Get(length)
 			if _, err := io.ReadFull(s.conn, buf); err != nil {
@@ -241,7 +247,9 @@ func (s *session) run() error {
 					pool.Put(buf)
 					return err
 				}
-				updatePaddingScheme(buf)
+				if padding := NewPaddingFactory(buf); padding != nil {
+					s.SetPadding(padding)
+				}
 				pool.Put(buf)
 			}
 		case cmdSYNACK:
@@ -285,7 +293,7 @@ func (s *session) run() error {
 			default:
 			}
 		default:
-			return fmt.Errorf("invalid cmd: %d", header.Cmd())
+			return fmt.Errorf("invalid cmd: %d", cmd)
 		}
 	}
 }
@@ -325,7 +333,7 @@ func (s *session) SetPadding(padding *paddingFactory) {
 }
 
 func (s *session) GetPadding() *paddingFactory {
-	return s.padding.Load().(*paddingFactory)
+	return s.padding.Load()
 }
 
 func (s *session) isReusableIdle() bool {
@@ -434,16 +442,14 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 						if paddingLen > maxFramePayloadSize {
 							paddingLen = maxFramePayloadSize
 						}
-						padding := make([]byte, headerOverHeadSize+paddingLen)
-						padding[0] = cmdWaste
-						binary.BigEndian.PutUint32(padding[1:5], 0)
-						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
-						combined := make([]byte, 0, len(b)+len(padding))
-						combined = append(combined, b...)
-						combined = append(combined, padding...)
-						b = combined
+						combined := pool.Get(len(b) + headerOverHeadSize + paddingLen)
+						copy(combined, b)
+						fillWasteFrame(combined[len(b):], paddingLen)
+						_, err = s.conn.Write(combined)
+						pool.Put(combined)
+					} else {
+						_, err = s.conn.Write(b)
 					}
-					_, err = s.conn.Write(b)
 					if err != nil {
 						return 0, err
 					}
@@ -453,11 +459,10 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 					if l > maxFramePayloadSize {
 						l = maxFramePayloadSize
 					}
-					padding := make([]byte, headerOverHeadSize+l)
-					padding[0] = cmdWaste
-					binary.BigEndian.PutUint32(padding[1:5], 0)
-					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
+					padding := pool.Get(headerOverHeadSize + l)
+					fillWasteFrame(padding, l)
 					_, err = s.conn.Write(padding)
+					pool.Put(padding)
 					if err != nil {
 						return 0, err
 					}
@@ -477,4 +482,11 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 	}
 
 	return s.conn.Write(b)
+}
+
+func fillWasteFrame(frame []byte, payloadLen int) {
+	clear(frame)
+	frame[0] = cmdWaste
+	binary.BigEndian.PutUint32(frame[1:5], 0)
+	binary.BigEndian.PutUint16(frame[5:7], uint16(payloadLen))
 }

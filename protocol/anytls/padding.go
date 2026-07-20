@@ -61,6 +61,7 @@ func stringMapFromBytes(b []byte) map[string]string {
 }
 
 func NewPaddingFactory(rawScheme []byte) *paddingFactory {
+	rawScheme = append([]byte(nil), rawScheme...)
 	p := &paddingFactory{
 		RawScheme: rawScheme,
 		Md5:       fmt.Sprintf("%x", md5.Sum(rawScheme)),

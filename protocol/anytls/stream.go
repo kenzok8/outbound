@@ -25,12 +25,13 @@ var (
 type stream struct {
 	*session
 
-	inbound   chan []byte
+	inbound   chan pool.PB
 	readBuf   []byte
 	readBufPB pool.PB // pool buffer backing readBuf; nil when readBuf is empty or not pool-backed
 
 	writeMutex sync.Mutex
 	readMutex  sync.Mutex
+	enqueueMu  sync.RWMutex
 
 	closed   atomic.Bool
 	closeCh  chan struct{}
@@ -47,19 +48,28 @@ type stream struct {
 func newStream(session *session, id uint32) *stream {
 	return &stream{
 		session:         session,
-		inbound:         make(chan []byte, 16),
+		inbound:         make(chan pool.PB, 16),
 		closeCh:         make(chan struct{}),
 		deadlineChanged: make(chan struct{}, 1),
 		id:              id,
 	}
 }
 
-func (c *stream) enqueue(b []byte) error {
+// enqueue takes ownership of chunk, including when it returns an error.
+func (c *stream) enqueue(chunk pool.PB) error {
+	c.enqueueMu.RLock()
+	defer c.enqueueMu.RUnlock()
+
 	if c.closed.Load() {
+		pool.Put(chunk)
 		return io.ErrClosedPipe
 	}
-	chunk := pool.Get(len(b))
-	copy(chunk, b)
+	select {
+	case <-c.session.done:
+		pool.Put(chunk)
+		return net.ErrClosed
+	default:
+	}
 	select {
 	case c.inbound <- chunk:
 		return nil
@@ -76,8 +86,14 @@ func (c *stream) Write(b []byte) (n int, err error) {
 	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
+	if len(b) == 0 {
+		return 0, nil
+	}
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
 
 	return writeDataFrames(c.session, c.id, b, unixNanoToTime(c.writeDeadline.Load()))
 }
@@ -92,7 +108,7 @@ func (c *stream) Read(b []byte) (n int, err error) {
 }
 
 func (c *stream) readLocked(b []byte) (n int, err error) {
-	if len(c.readBuf) == 0 {
+	for len(c.readBuf) == 0 {
 		// Return the previous pool buffer before getting a new chunk.
 		if c.readBufPB != nil {
 			pool.Put(c.readBufPB)
@@ -102,8 +118,12 @@ func (c *stream) readLocked(b []byte) (n int, err error) {
 		if err != nil {
 			return 0, err
 		}
+		if len(chunk) == 0 {
+			pool.Put(chunk)
+			continue
+		}
 		c.readBuf = chunk
-		c.readBufPB = pool.PB(chunk)
+		c.readBufPB = chunk
 	}
 	n = copy(b, c.readBuf)
 	c.readBuf = c.readBuf[n:]
@@ -114,7 +134,7 @@ func (c *stream) readLocked(b []byte) (n int, err error) {
 	return n, nil
 }
 
-func (c *stream) nextChunkLocked() ([]byte, error) {
+func (c *stream) nextChunkLocked() (pool.PB, error) {
 	for {
 		select {
 		case chunk := <-c.inbound:
@@ -181,15 +201,18 @@ func (c *stream) Close() error {
 }
 
 func (c *stream) closeLocal(sendFIN bool, err error) error {
+	c.closeMu.Lock()
 	if !c.closed.CompareAndSwap(false, true) {
+		c.closeMu.Unlock()
 		return nil
 	}
-	c.closeMu.Lock()
 	c.closeErr = err
 	close(c.closeCh)
 	c.closeMu.Unlock()
 
-	// Return pool-backed read buffer held by a partial read.
+	// Closing closeCh releases blocked enqueues. The write lock then ensures
+	// every admitted enqueue finishes before the inbound queue is drained.
+	c.enqueueMu.Lock()
 	c.readMutex.Lock()
 	if c.readBufPB != nil {
 		pool.Put(c.readBufPB)
@@ -198,23 +221,29 @@ func (c *stream) closeLocal(sendFIN bool, err error) error {
 	}
 	c.readMutex.Unlock()
 
-	// Drain inbound to return pool-backed chunks.
-	// After closeCh is closed, enqueue cannot add new chunks.
 drainLoop:
 	for {
 		select {
 		case chunk := <-c.inbound:
-			pool.Put(pool.PB(chunk))
+			pool.Put(chunk)
 		default:
 			break drainLoop
 		}
 	}
+	c.enqueueMu.Unlock()
 
-	c.removeStream(c.id)
-	if sendFIN && !c.session.closed.Load() {
-		frame := newFrame(cmdFIN, c.id)
-		_, _ = writeFrame(c.session, frame)
+	// A locally generated FIN must follow every write that started before Close.
+	// Session and remote closes skip this lock so a blocked transport write cannot
+	// prevent the underlying connection from being closed.
+	if sendFIN {
+		c.writeMutex.Lock()
+		if !c.session.closed.Load() {
+			frame := newFrame(cmdFIN, c.id)
+			_, _ = writeFrame(c.session, frame)
+		}
+		c.writeMutex.Unlock()
 	}
+	c.removeStream(c.id)
 	return nil
 }
 
@@ -231,11 +260,11 @@ func (c *stream) closedError() error {
 }
 
 func (c *stream) LocalAddr() net.Addr {
-	return c.session.conn.(net.Conn).LocalAddr()
+	return c.session.conn.LocalAddr()
 }
 
 func (c *stream) RemoteAddr() net.Addr {
-	return c.session.conn.(net.Conn).RemoteAddr()
+	return c.session.conn.RemoteAddr()
 }
 
 func (c *stream) SetDeadline(t time.Time) error {
@@ -336,6 +365,9 @@ func (ps *packetStream) WriteTo(p []byte, addr string) (n int, err error) {
 	}
 	ps.writeMutex.Lock()
 	defer ps.writeMutex.Unlock()
+	if ps.closed.Load() {
+		return 0, net.ErrClosed
+	}
 
 	if ps.udpWriteAddr.CompareAndSwap(false, true) {
 		tgtAddr, err := socks.ParseAddr(addr)
