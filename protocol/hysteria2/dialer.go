@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
@@ -29,6 +30,16 @@ type Feature1 struct {
 	UDPHopInterval  time.Duration
 }
 
+func toClientTLSConfig(config *tls.Config) client.TLSConfig {
+	return client.TLSConfig{
+		ServerName:                     config.ServerName,
+		InsecureSkipVerify:             config.InsecureSkipVerify,
+		VerifyPeerCertificate:          config.VerifyPeerCertificate,
+		RootCAs:                        config.RootCAs,
+		EncryptedClientHelloConfigList: config.EncryptedClientHelloConfigList,
+	}
+}
+
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	host, port, hostPort := parseServerAddrString(header.ProxyAddress)
 
@@ -37,14 +48,9 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 
 	config := &client.Config{
-		TLSConfig: client.TLSConfig{
-			ServerName:            header.TlsConfig.ServerName,
-			InsecureSkipVerify:    header.TlsConfig.InsecureSkipVerify,
-			VerifyPeerCertificate: header.TlsConfig.VerifyPeerCertificate,
-			RootCAs:               header.TlsConfig.RootCAs,
-		},
-		Auth:     header.User,
-		FastOpen: true,
+		TLSConfig: toClientTLSConfig(header.TlsConfig),
+		Auth:      header.User,
+		FastOpen:  true,
 	}
 	if header.SNI == "" {
 		config.TLSConfig.ServerName = host

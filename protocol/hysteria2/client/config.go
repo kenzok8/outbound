@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"net"
 	"time"
@@ -92,10 +93,21 @@ func (f *UdpConnFactory) New(ctx context.Context) (net.PacketConn, error) {
 
 // TLSConfig contains the TLS configuration fields that we want to expose to the user.
 type TLSConfig struct {
-	ServerName            string
-	InsecureSkipVerify    bool
-	VerifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
-	RootCAs               *x509.CertPool
+	ServerName                     string
+	InsecureSkipVerify             bool
+	VerifyPeerCertificate          func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	RootCAs                        *x509.CertPool
+	EncryptedClientHelloConfigList []byte
+}
+
+func (c TLSConfig) toTLSConfig() *tls.Config {
+	return &tls.Config{
+		ServerName:                     c.ServerName,
+		InsecureSkipVerify:             c.InsecureSkipVerify,
+		VerifyPeerCertificate:          c.VerifyPeerCertificate,
+		RootCAs:                        c.RootCAs,
+		EncryptedClientHelloConfigList: c.EncryptedClientHelloConfigList,
+	}
 }
 
 // QUICConfig contains the QUIC configuration fields that we want to expose to the user.

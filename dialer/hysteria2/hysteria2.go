@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -25,16 +26,17 @@ func init() {
 }
 
 type Hysteria2 struct {
-	Name      string
-	User      string
-	Password  string
-	Server    string
-	Insecure  bool
-	Sni       string
-	PinSHA256 string
-	CA        string
-	MaxTx     uint64
-	MaxRx     uint64
+	Name          string
+	User          string
+	Password      string
+	Server        string
+	Insecure      bool
+	Sni           string
+	PinSHA256     string
+	CA            string
+	ECHConfigList []byte
+	MaxTx         uint64
+	MaxRx         uint64
 }
 
 func NewHysteria2(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -52,8 +54,9 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 	// verification; the pin callback handles all trust decisions.
 	skipVerify := s.Insecure || option.AllowInsecure || s.PinSHA256 != ""
 	tlsConfig := &tls.Config{
-		ServerName:         s.Sni,
-		InsecureSkipVerify: skipVerify,
+		ServerName:                     s.Sni,
+		InsecureSkipVerify:             skipVerify,
+		EncryptedClientHelloConfigList: s.ECHConfigList,
 	}
 	if s.CA != "" {
 		rootCAs, err := loadCustomRootCAs(s.CA)
@@ -172,16 +175,24 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 			return nil, dialer.InvalidParameterErr
 		}
 	}
+	var echConfigList []byte
+	if ech := q.Get("ech"); ech != "" {
+		echConfigList, err = decodeECHConfigList(ech)
+		if err != nil {
+			return nil, fmt.Errorf("%w: ech: %v", dialer.InvalidParameterErr, err)
+		}
+	}
 	conf := &Hysteria2{
-		Name:      u.Fragment,
-		User:      u.User.Username(),
-		Server:    u.Host,
-		Insecure:  insecure,
-		Sni:       q.Get("sni"),
-		PinSHA256: q.Get("pinSHA256"),
-		CA:        q.Get("ca"),
-		MaxTx:     maxTx,
-		MaxRx:     maxRx,
+		Name:          u.Fragment,
+		User:          u.User.Username(),
+		Server:        u.Host,
+		Insecure:      insecure,
+		Sni:           q.Get("sni"),
+		PinSHA256:     q.Get("pinSHA256"),
+		CA:            q.Get("ca"),
+		ECHConfigList: echConfigList,
+		MaxTx:         maxTx,
+		MaxRx:         maxRx,
 	}
 	conf.Password, _ = u.User.Password()
 	return conf, nil
@@ -209,6 +220,9 @@ func (s *Hysteria2) ExportToURL() string {
 	}
 	if s.CA != "" {
 		q.Set("ca", s.CA)
+	}
+	if len(s.ECHConfigList) > 0 {
+		q.Set("ech", base64.StdEncoding.EncodeToString(s.ECHConfigList))
 	}
 	if s.MaxTx > 0 && s.MaxRx > 0 {
 		q.Set("maxTx", strconv.FormatUint(s.MaxTx, 10))

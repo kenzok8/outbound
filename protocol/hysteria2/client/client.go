@@ -95,12 +95,7 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	}
 	serverAddr := quicRemoteAddr(pktConn, c.config.ServerAddr)
 	// Convert config to TLS config & QUIC config
-	tlsConfig := &tls.Config{
-		ServerName:            c.config.TLSConfig.ServerName,
-		InsecureSkipVerify:    c.config.TLSConfig.InsecureSkipVerify,
-		VerifyPeerCertificate: c.config.TLSConfig.VerifyPeerCertificate,
-		RootCAs:               c.config.TLSConfig.RootCAs,
-	}
+	tlsConfig := c.config.TLSConfig.toTLSConfig()
 	quicConfig := &quic.Config{
 		InitialStreamReceiveWindow:     c.config.QUICConfig.InitialStreamReceiveWindow,
 		MaxStreamReceiveWindow:         c.config.QUICConfig.MaxStreamReceiveWindow,
