@@ -1,11 +1,14 @@
 package v2ray
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/outbound/common"
@@ -15,6 +18,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/http"
 	"github.com/daeuniverse/outbound/transport/grpc"
+	"github.com/daeuniverse/outbound/transport/httpheader"
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
 	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/outbound/transport/tls"
@@ -48,6 +52,57 @@ type V2Ray struct {
 	SpiderX       string `json:"spx,omitempty"`
 	V             string `json:"v"`
 	Protocol      string `json:"protocol"`
+}
+
+func (s *V2Ray) UnmarshalJSON(data []byte) error {
+	type plain V2Ray
+	decoded := struct {
+		*plain
+		Port json.RawMessage `json:"port"`
+		Aid  json.RawMessage `json:"aid"`
+		V    json.RawMessage `json:"v"`
+	}{
+		plain: (*plain)(s),
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	fields := []struct {
+		name string
+		raw  json.RawMessage
+		dst  *string
+	}{
+		{name: "port", raw: decoded.Port, dst: &s.Port},
+		{name: "aid", raw: decoded.Aid, dst: &s.Aid},
+		{name: "v", raw: decoded.V, dst: &s.V},
+	}
+	for _, field := range fields {
+		value, err := stringOrUint(field.raw)
+		if err != nil {
+			return fmt.Errorf("V2Ray.%s: %w", field.name, err)
+		}
+		*field.dst = value
+	}
+	return nil
+}
+
+func stringOrUint(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", nil
+	}
+	if raw[0] == '"' {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return "", err
+		}
+		return value, nil
+	}
+	if _, err := strconv.ParseUint(string(raw), 10, 64); err != nil {
+		return "", fmt.Errorf("expects a string or unsigned integer: %w", err)
+	}
+	return string(raw), nil
 }
 
 func NewV2Ray(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -149,7 +204,14 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			}
 
 		}
-		if s.Type != "none" && s.Type != "" {
+		switch strings.ToLower(s.Type) {
+		case "none", "":
+		case "http":
+			d, err = httpheader.NewDialer(d, s.Host, s.Path)
+			if err != nil {
+				return nil, nil, err
+			}
+		default:
 			return nil, nil, fmt.Errorf("%w: type: %v", dialer.UnexpectedFieldErr, s.Type)
 		}
 	case "grpc":
