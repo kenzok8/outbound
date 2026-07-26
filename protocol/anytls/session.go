@@ -52,7 +52,7 @@ type session struct {
 
 func newSession(conn net.Conn, seq uint64) *session {
 	padding := &atomic.Pointer[paddingFactory]{}
-	padding.Store(DefaultPaddingFactory.Load().(*paddingFactory))
+	padding.Store(DefaultPaddingFactory.Load())
 	return newSessionWithPadding(conn, seq, padding)
 }
 

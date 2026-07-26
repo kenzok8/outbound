@@ -61,7 +61,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		sessions:     make(map[uint64]*session),
 		janitorDone:  make(chan struct{}),
 	}
-	d.padding.Store(DefaultPaddingFactory.Load().(*paddingFactory))
+	d.padding.Store(DefaultPaddingFactory.Load())
 	go d.runIdleJanitor()
 	return d, nil
 }

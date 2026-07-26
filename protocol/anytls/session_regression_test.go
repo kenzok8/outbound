@@ -264,7 +264,7 @@ func TestNewStreamBatchesInitialSessionFrames(t *testing.T) {
 
 func TestAuthenticationPacketUsesPaddingRuleZero(t *testing.T) {
 	key := bytes.Repeat([]byte{0x5a}, 32)
-	packet, err := buildAuthenticationPacket(key, DefaultPaddingFactory.Load().(*paddingFactory))
+	packet, err := buildAuthenticationPacket(key, DefaultPaddingFactory.Load())
 	if err != nil {
 		t.Fatalf("buildAuthenticationPacket() error = %v", err)
 	}
