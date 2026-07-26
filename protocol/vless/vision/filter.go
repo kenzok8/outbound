@@ -26,6 +26,44 @@ const (
 )
 
 func (vc *Conn) FilterTLS(buffer []byte) (index int) {
+	vc.filterMu.Lock()
+	defer vc.filterMu.Unlock()
+	return vc.filterTLSLocked(buffer)
+}
+
+// stopFilteringLocked marks the sniffer as done. Called from the write path
+// once it has decided TLS filtering is no longer needed (non-TLS traffic or
+// direct mode engaged). Acquires filterMu so the state is consistent with
+// any concurrent FilterTLS invocation from the read path.
+func (vc *Conn) stopFilteringLocked() {
+	vc.filterMu.Lock()
+	vc.packetsToFilter = 0
+	vc.filterMu.Unlock()
+}
+
+// filterSnapshot returns a point-in-time copy of the sniffing state for the
+// write path to make padding decisions on. Callers must not hold filterMu.
+type filterSnapshot struct {
+	packetsToFilter int
+	isTLS           bool
+	enableXTLS      bool
+}
+
+// filterSnapshot returns a consistent snapshot of the fields the write path
+// reads after calling FilterTLS. Taking the snapshot under filterMu closes
+// the TOCTOU window between FilterTLS updating the state machine and the
+// write path reading it to pick a padding command.
+func (vc *Conn) filterSnapshot() filterSnapshot {
+	vc.filterMu.Lock()
+	defer vc.filterMu.Unlock()
+	return filterSnapshot{
+		packetsToFilter: vc.packetsToFilter,
+		isTLS:           vc.isTLS,
+		enableXTLS:      vc.enableXTLS,
+	}
+}
+
+func (vc *Conn) filterTLSLocked(buffer []byte) (index int) {
 	if vc.packetsToFilter <= 0 {
 		return 0
 	}

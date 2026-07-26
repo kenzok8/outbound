@@ -62,12 +62,6 @@ type Conn struct {
 	rawInput *bytes.Buffer
 
 	needHandshake              bool
-	packetsToFilter            int
-	isTLS                      bool
-	isTLS12orAbove             bool
-	enableXTLS                 bool
-	cipher                     uint16
-	remainingServerHello       uint16
 	readRemainingContent       int
 	readRemainingPadding       int
 	readFilterUUID             bool
@@ -80,6 +74,19 @@ type Conn struct {
 
 	muWrite sync.Mutex
 	muRead  sync.Mutex
+
+	// filterMu guards the TLS-sniffing state machine below. FilterTLS mutates
+	// these fields and is invoked from both the read path (under muRead) and
+	// the write path (under muWrite); without a dedicated lock the two paths
+	// race on the shared state. Acquired only inside FilterTLS/filterSnapshot,
+	// never nested with muRead/muWrite, so lock ordering is single-level.
+	filterMu                  sync.Mutex
+	packetsToFilter           int
+	isTLS                     bool
+	isTLS12orAbove            bool
+	enableXTLS                bool
+	cipher                    uint16
+	remainingServerHello      uint16
 }
 
 func (vc *Conn) Read(b []byte) (int, error) {
@@ -328,7 +335,7 @@ func (vc *Conn) write(p []byte) (err error) {
 		} else {
 			vc.FilterTLS(p)
 			// logrus.Println("isTLS", vc.isTLS)
-			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, vc.isTLS)
+			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, vc.filterSnapshot().isTLS)
 		}
 		defer prefix.Put()
 		defer suffix.Put()
@@ -355,24 +362,25 @@ func (vc *Conn) write(p []byte) (err error) {
 		p, p2 := ReshapeBytes(p)
 		vc.FilterTLS(p)
 		// logrus.Println("isTLS2:", vc.isTLS, len(p), len(p2))
+		sn := vc.filterSnapshot()
 		command := commandPaddingContinue
-		if !vc.isTLS {
+		if !sn.isTLS {
 			command = commandPaddingEnd
 
 			// disable XTLS
 			//vc.readProcess = false
 			vc.writeFilterApplicationData = false
-			vc.packetsToFilter = 0
-		} else if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || vc.packetsToFilter <= 0 {
+			vc.stopFilteringLocked()
+		} else if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || sn.packetsToFilter <= 0 {
 			command = commandPaddingEnd
-			if vc.enableXTLS {
+			if sn.enableXTLS {
 				command = commandPaddingDirect
 				vc.toWriteDirect = true
 			}
 			vc.writeFilterApplicationData = false
 		}
 		// logrus.Println("command", commandPaddingDirect, "vc.writer.toWriteDirect", vc.writer.toWriteDirect)
-		prefix, suffix := ApplyPaddingFromPool(p, command, nil, vc.isTLS)
+		prefix, suffix := ApplyPaddingFromPool(p, command, nil, sn.isTLS)
 		defer prefix.Put()
 		defer suffix.Put()
 		_, err = iout.MultiWrite(vc.writer, prefix, p, suffix)
@@ -387,23 +395,24 @@ func (vc *Conn) write(p []byte) (err error) {
 			// 	//time.Sleep(5 * time.Millisecond)
 		}
 		if p2 != nil {
-			if vc.toWriteDirect || !vc.isTLS {
+			if vc.toWriteDirect || !sn.isTLS {
 				_, err = vc.writer.Write(p2)
 				return err
 			}
 			vc.FilterTLS(p)
 			// logrus.Println("isTLS3", vc.isTLS)
+			sn = vc.filterSnapshot()
 			command = commandPaddingContinue
-			if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || vc.packetsToFilter <= 0 {
+			if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || sn.packetsToFilter <= 0 {
 				command = commandPaddingEnd
-				if vc.enableXTLS {
+				if sn.enableXTLS {
 					command = commandPaddingDirect
 					vc.toWriteDirect = true
 				}
 				vc.writeFilterApplicationData = false
 			}
 			// logrus.Println("command", commandPaddingDirect)
-			prefix2, suffix2 := ApplyPaddingFromPool(p2, command, nil, vc.isTLS)
+			prefix2, suffix2 := ApplyPaddingFromPool(p2, command, nil, sn.isTLS)
 			defer prefix2.Put()
 			defer suffix2.Put()
 			_, err = iout.MultiWrite(vc.writer, prefix2, p2, suffix2)
