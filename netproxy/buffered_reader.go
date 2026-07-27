@@ -55,6 +55,20 @@ func (b *BufferedReaderConn) SetReadDeadline(t time.Time) error {
 	return b.Conn.SetReadDeadline(t)
 }
 
+// IntrinsicConn unwraps the buffered layer so callers that need direct
+// access to the underlying TLS/REALITY connection (notably XTLS/Vision,
+// which reflects on *tls.Conn / *utls.UConn / *RealityUConn fields) can
+// reach it. Without this method, Vision's intrinsicConn type assertion
+// fails with "XTLS only supports TLS and REALITY directly for now".
+// If the underlying Conn is itself a wrapper exposing IntrinsicConn,
+// forward to it so nested wrappers compose correctly.
+func (b *BufferedReaderConn) IntrinsicConn() Conn {
+	if ic, ok := b.Conn.(interface{ IntrinsicConn() Conn }); ok {
+		return ic.IntrinsicConn()
+	}
+	return b.Conn
+}
+
 // UnderlyingConn returns the wrapped Conn for callers (e.g. dae's relay
 // unwrap path) that need direct access to the raw socket.
 func (b *BufferedReaderConn) UnderlyingConn() net.Conn {
