@@ -35,7 +35,17 @@ func visionIntrinsicConn(conn netproxy.Conn) (net.Conn, netproxy.Conn, reflect.T
 	if !ok {
 		return nil, nil, nil, nil, fmt.Errorf("XTLS only supports TLS and REALITY directly for now: %T", conn)
 	}
+	// Recursively unwrap intermediate wrappers (such as BufferedReaderConn)
+	// until we reach the actual TLS/REALITY connection. Each wrapper exposes
+	// IntrinsicConn() that returns its child; TLS types are the terminal
+	// leaves and do not implement intrinsicConn.
 	ic := iconn.IntrinsicConn()
+	for {
+		if _, ok := ic.(intrinsicConn); !ok {
+			break
+		}
+		ic = ic.(intrinsicConn).IntrinsicConn()
+	}
 	switch tlsConn := ic.(type) {
 	case *gotls.Conn:
 		return tlsConn.NetConn(), tlsConn, reflect.TypeOf(tlsConn).Elem(), unsafe.Pointer(tlsConn), nil
