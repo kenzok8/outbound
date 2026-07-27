@@ -83,6 +83,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if err != nil {
 			return nil, err
 		}
+		// Buffer reads so vless length-prefixed reads (io.ReadFull on small
+		// length headers + payload) do not each trigger a syscall.
+		conn = netproxy.NewBufferedReaderConn(conn, 0)
 		conn, err = NewConn(conn, Metadata{
 			Metadata: vmess.Metadata{Metadata: mdata, Network: magicNetwork.Network},
 			Flow:     d.flow,

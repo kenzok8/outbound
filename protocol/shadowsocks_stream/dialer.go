@@ -101,6 +101,9 @@ func (d *Dialer) DialTcpTransport(ctx context.Context, magicNetwork string) (net
 		return nil, fmt.Errorf("dial to %v error: %w", d.addr, err)
 	}
 
+	// Buffer reads: TcpConn.Read issues io.ReadAtLeast on c.Conn for the
+	// IV and subsequent data; without buffering each may be its own syscall.
+	c = netproxy.NewBufferedReaderConn(c, 0)
 	conn := NewTcpConn(c, ciph)
 
 	return conn, err

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/bufferred_conn"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 )
@@ -191,6 +192,11 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		return nil, err
 	}
 
+	// Wrap with a buffered reader so the many io.ReadFull calls in
+	// session.recvLoop (frame headers, lengths, payloads) do not each
+	// trigger their own syscall on the underlying TLS/TCP socket.
+	bufferedConn := bufferred_conn.NewBufferedConnSize(tlsConn, 32<<10)
+
 	buf, err := buildAuthenticationPacket(d.key, d.padding.Load())
 	if err != nil {
 		_ = tlsConn.Close()
@@ -209,7 +215,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	}
 
 	seq := d.sessionCounter.Add(1)
-	s := newSessionWithPadding(tlsConn, seq, &d.padding)
+	s := newSessionWithPadding(bufferedConn, seq, &d.padding)
 	d.idleSessionLock.Lock()
 	if d.closed {
 		d.idleSessionLock.Unlock()

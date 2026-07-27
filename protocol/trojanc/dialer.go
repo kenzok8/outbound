@@ -58,6 +58,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if err != nil {
 			return nil, err
 		}
+		// Buffer the underlying conn: trojan's header/chunk reads use
+		// io.ReadFull on small buffers and benefit from coalescing.
+		conn = netproxy.NewBufferedReaderConn(conn, 0)
 
 		tcpConn, err := NewConn(conn, Metadata{
 			Metadata: mdata,

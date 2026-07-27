@@ -105,6 +105,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		if err != nil {
 			return nil, err
 		}
+		// Wrap with a buffered reader so the salt/header/payload reads done
+		// via io.ReadFull do not each trigger their own syscall.
+		if npc, ok := conn.(netproxy.Conn); ok {
+			conn = netproxy.NewBufferedReaderConn(npc, 0)
+		}
 		return NewTCPConnWithContext(ctx, conn.(net.Conn), d.core, d.sg, addrInfo, nil), nil
 	case "udp":
 		conn, err := d.ListenPacket(ctx, network, d.proxyAddress)

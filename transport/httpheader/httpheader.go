@@ -16,6 +16,14 @@ const (
 	defaultHost       = "www.baidu.com"
 	defaultUserAgent  = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36"
 	maxResponseHeader = 8192
+
+	// bufioBufferSize is the read buffer size for the wrapped connection.
+	// It is decoupled from maxResponseHeader (which only bounds the HTTP
+	// response header parsing) because downstream protocols (e.g. vmess)
+	// issue io.ReadFull calls of up to ~16KB per chunk. A small bufio buffer
+	// splits those reads into multiple syscalls, inflating write count in the
+	// relay loop by ~1.5x and wasting CPU on syscall overhead.
+	bufioBufferSize = 32 << 10
 )
 
 var errResponseHeaderTooLarge = errors.New("HTTP response header is too large")
@@ -87,7 +95,7 @@ type conn struct {
 func newConn(raw netproxy.Conn, host, path string) *conn {
 	return &conn{
 		Conn:   raw,
-		reader: bufio.NewReaderSize(raw, maxResponseHeader+1),
+		reader: bufio.NewReaderSize(raw, bufioBufferSize),
 		host:   host,
 		path:   path,
 	}

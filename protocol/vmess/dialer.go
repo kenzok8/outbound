@@ -106,6 +106,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if err != nil {
 			return nil, err
 		}
+		// Buffer reads: vmess issues many small io.ReadFull calls per chunk
+		// (size header, nonce, payload). Without buffering each costs a syscall.
+		conn = netproxy.NewBufferedReaderConn(conn, 0)
 
 		return NewConn(conn, Metadata{
 			Metadata: mdata,
