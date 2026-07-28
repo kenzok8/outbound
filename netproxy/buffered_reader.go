@@ -55,6 +55,28 @@ func (b *BufferedReaderConn) SetReadDeadline(t time.Time) error {
 	return b.Conn.SetReadDeadline(t)
 }
 
+// LocalAddr exposes the underlying connection's local address so that
+// BufferedReaderConn satisfies the net.Conn interface. Callers such as the
+// Shadowsocks-2022 dialer type-assert the wrapped connection to net.Conn
+// (its TCPConn embeds net.Conn); without these accessors the assertion
+// panics even though the underlying socket carries the address. If the
+// wrapped Conn does not expose address information, nil is returned.
+func (b *BufferedReaderConn) LocalAddr() net.Addr {
+	if a, ok := b.Conn.(interface{ LocalAddr() net.Addr }); ok {
+		return a.LocalAddr()
+	}
+	return nil
+}
+
+// RemoteAddr exposes the underlying connection's remote address. See
+// LocalAddr for the rationale.
+func (b *BufferedReaderConn) RemoteAddr() net.Addr {
+	if a, ok := b.Conn.(interface{ RemoteAddr() net.Addr }); ok {
+		return a.RemoteAddr()
+	}
+	return nil
+}
+
 // IntrinsicConn unwraps the buffered layer so callers that need direct
 // access to the underlying TLS/REALITY connection (notably XTLS/Vision,
 // which reflects on *tls.Conn / *utls.UConn / *RealityUConn fields) can
