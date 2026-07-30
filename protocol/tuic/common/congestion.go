@@ -7,9 +7,9 @@ import (
 
 const (
 	InitialStreamReceiveWindow     = 8 * 1024 * 1024  // 8 MB (fast start)
-	MaxStreamReceiveWindow         = 12 * 1024 * 1024 // 12 MB (limits per-stream buffer, still > cross-border BDP ~6MB)
+	MaxStreamReceiveWindow         = 32 * 1024 * 1024 // 32MB - netem sweep peak (same quic-go engine as hysteria2)
 	InitialConnectionReceiveWindow = 12 * 1024 * 1024 // 12 MB (reduced from 20MB, enough for 1-2 concurrent streams)
-	MaxConnectionReceiveWindow     = 20 * 1024 * 1024 // 20 MB (reduced from 32MB, caps total QUIC buffer)
+	MaxConnectionReceiveWindow     = 64 * 1024 * 1024 // 64MB - stream x2, measured peak combo
 )
 
 func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
