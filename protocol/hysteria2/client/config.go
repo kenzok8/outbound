@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultStreamReceiveWindow = 8388608                            // 8MB
-	defaultConnReceiveWindow   = defaultStreamReceiveWindow * 5 / 2 // 20MB
+	defaultStreamReceiveWindow = 32 * 1024 * 1024 // 32MB - netem sweep peak (1Gbps x 200ms BDP: 16->773, 32->808, 64->699 Mbps)
+	defaultConnReceiveWindow   = 64 * 1024 * 1024 // 64MB - stream x2, measured peak combo
 	defaultMaxIdleTimeout      = 30 * time.Second
 	defaultKeepAlivePeriod     = 10 * time.Second
 )
