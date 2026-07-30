@@ -301,43 +301,36 @@ func ReadPacket(reader BufferedReader) (c *Packet, err error) {
 }
 
 func (c Packet) WriteTo(writer BufferedWriter) (err error) {
-	err = c.CommandHead.WriteTo(writer)
-	if err != nil {
-		return
-	}
-	err = binary.Write(writer, binary.BigEndian, c.ASSOC_ID)
-	if err != nil {
-		return
-	}
-	err = binary.Write(writer, binary.BigEndian, c.PKT_ID)
-	if err != nil {
-		return
-	}
-	err = binary.Write(writer, binary.BigEndian, c.FRAG_TOTAL)
-	if err != nil {
-		return
-	}
-	err = binary.Write(writer, binary.BigEndian, c.FRAG_ID)
-	if err != nil {
-		return
-	}
-	err = binary.Write(writer, binary.BigEndian, c.SIZE)
-	if err != nil {
-		return
-	}
-	err = c.ADDR.WriteTo(writer)
-	if err != nil {
-		return
-	}
-	_, err = writer.Write(c.DATA)
-	if err != nil {
-		return
-	}
+	buf := make([]byte, c.BytesLen())
+	n := c.WriteToBytes(buf)
+	_, err = writer.Write(buf[:n])
 	return
 }
 
+// WriteToBytes serializes the Packet into a caller-provided buffer using
+// direct binary.BigEndian writes, avoiding the per-field binary.Write
+// reflection allocations of WriteTo. The buffer must be at least
+// c.BytesLen() bytes long.
+func (c Packet) WriteToBytes(b []byte) (n int) {
+	n += c.CommandHead.WriteToBytes(b)
+	binary.BigEndian.PutUint16(b[n:], c.ASSOC_ID)
+	n += 2
+	binary.BigEndian.PutUint16(b[n:], c.PKT_ID)
+	n += 2
+	b[n] = c.FRAG_TOTAL
+	n += 1
+	b[n] = c.FRAG_ID
+	n += 1
+	binary.BigEndian.PutUint16(b[n:], c.SIZE)
+	n += 2
+	n += c.ADDR.WriteToBytes(b[n:])
+	n += copy(b[n:], c.DATA)
+	return n
+}
+
 func (c Packet) BytesLen() int {
-	return c.CommandHead.BytesLen() + 4 + 2 + c.ADDR.BytesLen() + len(c.DATA)
+	// Fixed fields: ASSOC_ID(2) + PKT_ID(2) + FRAG_TOTAL(1) + FRAG_ID(1) + SIZE(2) = 8
+	return c.CommandHead.BytesLen() + 8 + c.ADDR.BytesLen() + len(c.DATA)
 }
 
 var PacketOverHead = NewPacket(0, 0, 0, 0, 0, NewAddressAddrPort(netip.AddrPortFrom(netip.IPv6Unspecified(), 0)), nil, 0).BytesLen()

@@ -1,8 +1,6 @@
 package tuic
 
 import (
-	"container/list"
-	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -19,13 +17,16 @@ import (
 	"github.com/olicesx/quic-go"
 )
 
+// packetChanCap bounds the per-association UDP packet queue. 2048 covers
+// bursty game ticks / DNS floods; when full, PushBack blocks (backpressure)
+// instead of growing unbounded like the previous container/list design.
+const packetChanCap = 2048
+
 type Packets struct {
-	mu               sync.Mutex
-	list             *list.List
-	isEmptyState     context.Context
-	cancelEmptyState func()
-	receiver         *packetHandlerRegistration
-	closed           atomic.Bool
+	mu       sync.Mutex
+	ch       chan *Packet
+	receiver *packetHandlerRegistration
+	closed   atomic.Bool
 }
 
 type packetHandlerRegistration struct {
@@ -34,12 +35,8 @@ type packetHandlerRegistration struct {
 }
 
 func NewPackets() *Packets {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Packets{
-		mu:               sync.Mutex{},
-		list:             list.New().Init(),
-		isEmptyState:     ctx,
-		cancelEmptyState: cancel,
+		ch: make(chan *Packet, packetChanCap),
 	}
 }
 
@@ -56,12 +53,9 @@ func (p *Packets) PushBack(packet *Packet) {
 		}
 		return
 	}
-	p.list.PushBack(packet)
-	select {
-	case <-p.isEmptyState.Done():
-	default:
-		p.cancelEmptyState()
-	}
+	// Channel send while holding mu so a concurrent Close cannot close the
+	// channel underneath us (Close also acquires mu before close).
+	p.ch <- packet
 	p.mu.Unlock()
 }
 
@@ -78,12 +72,16 @@ func (p *Packets) registerPacketHandler(handler func(*Packet) bool) (func(), boo
 		return nil, false
 	}
 	p.receiver = registration
-	queued := make([]*Packet, 0, p.list.Len())
-	for elem := p.list.Front(); elem != nil; elem = elem.Next() {
-		queued = append(queued, elem.Value.(*Packet))
+	queued := make([]*Packet, 0, len(p.ch))
+drainLoop:
+	for {
+		select {
+		case pkt := <-p.ch:
+			queued = append(queued, pkt)
+		default:
+			break drainLoop
+		}
 	}
-	p.list.Init()
-	p.setEmpty()
 	p.mu.Unlock()
 
 	for _, packet := range queued {
@@ -106,31 +104,17 @@ func (p *Packets) registerPacketHandler(handler func(*Packet) bool) (func(), boo
 }
 
 func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
-	<-p.isEmptyState.Done()
-	if p.closed.Load() {
+	packet, ok := <-p.ch
+	if !ok {
 		return nil, true
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	front := p.list.Front()
-	if front == nil {
-		return nil, p.closed.Load()
-	}
-	packet = p.list.Remove(front).(*Packet)
-	if p.list.Len() == 0 {
-		p.setEmpty()
 	}
 	return packet, false
 }
 
-func (p *Packets) setEmpty() {
-	p.isEmptyState, p.cancelEmptyState = context.WithCancel(context.Background())
-}
-
 func (p *Packets) Close() error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed.Load() {
-		p.mu.Unlock()
 		return nil
 	}
 	p.closed.Store(true)
@@ -138,13 +122,13 @@ func (p *Packets) Close() error {
 		p.receiver.active.Store(false)
 		p.receiver = nil
 	}
-	p.list.Init()
-	select {
-	case <-p.isEmptyState.Done():
-	default:
-		p.cancelEmptyState()
+	// Drain buffered packets so PopFrontBlock returns closed immediately,
+	// matching the previous list.Init() drop-on-close semantics. No new
+	// PushBack can run concurrently — it would block on p.mu.
+	for len(p.ch) > 0 {
+		<-p.ch
 	}
-	p.mu.Unlock()
+	close(p.ch)
 	return nil
 }
 

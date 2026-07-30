@@ -2,7 +2,6 @@ package tuic
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -223,32 +222,25 @@ func (t *clientImpl) processDatagram(quicConn quic.Connection, message []byte) {
 			}
 		}
 	}()
-	reader := bytes.NewReader(message)
-	commandHead, err := ReadCommandHead(reader)
-	if err != nil {
-		return // Ignore ReadFrom errors
+	if len(message) < 2 {
+		return
 	}
-	switch commandHead.TYPE {
+	switch CommandType(message[1]) {
 	case PacketType:
-		var packet *Packet
-		packet, err = ReadPacketWithHead(commandHead, reader)
-		if err != nil {
-			return // Ignore ReadFrom errors
+		packet, parseErr := readPacketFromMessage(message)
+		if parseErr != nil {
+			err = parseErr
+			return
 		}
 		if t.udp && t.UdpRelayMode == common.NATIVE {
 			assocId = packet.ASSOC_ID
 			if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
-				incomingPackets := val.(*Packets)
-				incomingPackets.PushBack(packet)
+				val.(*Packets).PushBack(packet)
 			}
 		}
 	case HeartbeatType:
-		_, err = ReadHeartbeatWithHead(commandHead, reader)
-		if err != nil {
-			return // Ignore ReadFrom errors
-		}
+		// Fixed 2-byte command (VER+TYPE); no further bytes to consume.
 	}
-	_ = err
 }
 
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {

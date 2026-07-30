@@ -260,7 +260,7 @@ func TestPacketsPushBackAfterCloseIsIgnored(t *testing.T) {
 
 	p.PushBack(&Packet{DATA: []byte("test")})
 
-	if got := p.list.Len(); got != 0 {
+	if got := len(p.ch); got != 0 {
 		t.Fatalf("closed packet queue length = %d, want 0", got)
 	}
 }
