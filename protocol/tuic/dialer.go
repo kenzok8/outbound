@@ -36,7 +36,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		return nil, fmt.Errorf("parse UUID: %w", err)
 	}
 	// ensure server's incoming stream can handle correctly, increase to 1.1x
-	maxDatagramFrameSize := 1400
+	maxDatagramFrameSize := 1452 // = quic-go MaxPacketBufferSize (Ethernet PMTU)
 	udpRelayMode := common.NATIVE
 	if header.Flags&protocol.Flags_Tuic_UdpRelayModeQuic > 0 {
 		_ = header // avoid empty branch warning
@@ -67,7 +67,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					Password:              header.Password,
 					UdpRelayMode:          udpRelayMode,
 					CongestionController:  header.Feature1.(string),
-					ReduceRtt:             false,
+					ReduceRtt:             true,  // 0-RTT cuts cold-start RTT
 					CWND:                  10,
 					MaxUdpRelayPacketSize: maxDatagramFrameSize,
 				},
