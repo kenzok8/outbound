@@ -54,8 +54,8 @@ github.com/mzz2017/disk-bloom v1.0.1 h1:rEF9MiXd9qMW3ibRpqcerLXULoTgRlM21yqqJl1B
 github.com/mzz2017/disk-bloom v1.0.1/go.mod h1:JLHETtUu44Z6iBmsqzkOtFlRvXSlKnxjwiBRDapizDI=
 github.com/oklog/ulid/v2 v2.1.1 h1:suPZ4ARWLOJLegGFiZZ1dFAkqzhMjL3J1TzI+5wHz8s=
 github.com/oklog/ulid/v2 v2.1.1/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
-github.com/olicesx/quic-go v0.0.0-20260428161614-e0d255ff807c h1:XvI7EiHeJiW+bzgvXHpVmObpesgmKyFoIO/GiewctQk=
-github.com/olicesx/quic-go v0.0.0-20260428161614-e0d255ff807c/go.mod h1:4i75wxoxXaebP2bt5TFzSx9zf3+M7g8NQJ8PZIaIuIQ=
+github.com/olicesx/quic-go v0.0.0-20260731110322-6e2cee47210c h1:TbeEe8tPs1K8DVcMRIHKF3+WzUXawjw8gY0+Y/76S3g=
+github.com/olicesx/quic-go v0.0.0-20260731110322-6e2cee47210c/go.mod h1:4i75wxoxXaebP2bt5TFzSx9zf3+M7g8NQJ8PZIaIuIQ=
 github.com/onsi/ginkgo/v2 v2.22.2 h1:/3X8Panh8/WwhU/3Ssa6rCKqPLuAkVY2I0RoyDLySlU=
 github.com/onsi/ginkgo/v2 v2.22.2/go.mod h1:oeMosUL+8LtarXBHu/c0bx2D/K9zyQ6uX3cTyztHwsk=
 github.com/onsi/gomega v1.36.2 h1:koNYke6TVk6ZmnyHrCXba/T/MoLBXFjeC1PtvYgw0A8=

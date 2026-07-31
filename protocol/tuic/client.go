@@ -207,7 +207,11 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 			}
 			return err
 		}
+		// processDatagram copies everything it keeps (packet DATA is
+		// copied by readPacketFromMessage), so the datagram buffer can be
+		// returned to the pool immediately after processing.
 		t.processDatagram(quicConn, message)
+		quicConn.ReleaseDatagram(message)
 	}
 }
 

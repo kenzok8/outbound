@@ -162,6 +162,8 @@ func (c *closeTrackingQuicConn) ReceiveDatagram(context.Context) ([]byte, error)
 	return nil, net.ErrClosed
 }
 
+func (c *closeTrackingQuicConn) ReleaseDatagram([]byte) {}
+
 func (c *closeTrackingQuicConn) SetCongestionControl(congestion.CongestionControl) {}
 
 func TestClientCloseReleasesActiveResourcesAndRejectsFutureDials(t *testing.T) {

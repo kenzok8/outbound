@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"io"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,10 +89,13 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 }
 
 func TestUDPConnPacketReceiverDrainsQueuedMessage(t *testing.T) {
+	targetAddr := netip.MustParseAddrPort("192.0.2.10:5353")
 	u := &udpConn{
-		ID:        1,
-		D:         &frag.Defragger{},
-		ReceiveCh: make(chan *protocol.UDPMessage, 2),
+		ID:         1,
+		D:          &frag.Defragger{},
+		ReceiveCh:  make(chan *protocol.UDPMessage, 2),
+		target:     targetAddr.String(),
+		targetAddr: targetAddr,
 	}
 	u.ReceiveCh <- &protocol.UDPMessage{
 		SessionID: 1,
@@ -360,7 +364,9 @@ func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
 	}
 	conn := connRaw.(*udpConn)
 
-	const burst = 1536
+	// 3/4 of the queue depth: large enough to prove burst absorption, small
+	// enough to leave headroom for the concurrent feed path.
+	const burst = udpMessageChanSize * 3 / 4
 	if burst >= udpMessageChanSize {
 		t.Fatalf("burst = %d must stay below queue size %d", burst, udpMessageChanSize)
 	}

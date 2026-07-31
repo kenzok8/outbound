@@ -47,10 +47,15 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 	}
 	if m.FragID >= m.FragCount {
 		// wtf is this?
+		if m.Release != nil {
+			m.Release()
+		}
 		return nil
 	}
 	if m.PacketID != d.pktID || m.FragCount != uint8(len(d.frags)) {
-		// new message, clear previous state
+		// new message, clear previous state: release the buffers of any
+		// fragments that were still pending reassembly.
+		d.releasePending()
 		d.pktID = m.PacketID
 		d.frags = make([]*protocol.UDPMessage, m.FragCount)
 		d.frags[m.FragID] = m
@@ -67,6 +72,10 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			for _, frag := range d.frags {
 				off += copy(data[off:], frag.Data)
 			}
+			// The assembled payload lives in the freshly allocated data
+			// slice; every fragment's backing buffer can now be returned
+			// to its pool.
+			d.releaseAll()
 			m.Data = data
 			m.FragID = 0
 			m.FragCount = 1
@@ -74,4 +83,30 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 		}
 	}
 	return nil
+}
+
+// releasePending returns the pooled storage of fragments that are still held
+// for reassembly. Used when a new message supersedes an incomplete one.
+func (d *Defragger) releasePending() {
+	for _, frag := range d.frags {
+		if frag != nil && frag.Release != nil {
+			frag.Release()
+		}
+	}
+	d.frags = nil
+	d.count = 0
+	d.size = 0
+}
+
+// releaseAll returns the pooled storage of every fragment that contributed to
+// a completed reassembly, including the fragment that triggered it.
+func (d *Defragger) releaseAll() {
+	for _, frag := range d.frags {
+		if frag != nil && frag.Release != nil {
+			frag.Release()
+		}
+	}
+	d.frags = nil
+	d.count = 0
+	d.size = 0
 }

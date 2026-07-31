@@ -21,8 +21,20 @@ const (
 	// Keep enough headroom for short scheduler stalls and bursty game ticks.
 	// dae already backpressures its own reply path, so the remaining drop window
 	// is mainly pre-drain bursts before this session goroutine gets CPU time.
-	udpMessageChanSize = 2048
+	// udpMessageChanSize bounds the per-session receive queue. 128 slots is
+	// enough to absorb bursty game ticks / DNS floods (~512KB of 4KB packets)
+	// while keeping the steady-state channel footprint at 1KB per session
+	// instead of 16KB. QUIC flow control (window-update suppression) provides
+	// backpressure beyond the queue, so no packets are lost.
+	udpMessageChanSize = 128
 )
+
+// sendBufPool recycles the per-session MaxUDPSize send buffer. Sessions are
+// created/closed frequently (game ticks, DNS), so pooling avoids a 4KB
+// allocation churn and its GC pressure on each session churn.
+var sendBufPool = sync.Pool{
+	New: func() any { return make([]byte, protocol.MaxUDPSize) },
+}
 
 type udpIO interface {
 	ReceiveMessage() (*protocol.UDPMessage, error)
@@ -48,6 +60,7 @@ type udpConn struct {
 	muTimer    sync.Mutex
 	timer      *time.Timer
 	target     string
+	targetAddr netip.AddrPort // parsed once at session creation
 	receiverMu sync.Mutex
 	receiver   netproxy.PacketReceiveHandler
 }
@@ -88,11 +101,14 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 			// Incomplete message, wait for more
 			continue
 		}
-		netipAddr, err := netip.ParseAddrPort(dfMsg.Addr)
-		if err != nil {
-			return 0, netipAddr, err
+		// The session is bound to a single target address, so the parsed
+		// AddrPort cached at creation time applies to every datagram on this
+		// session - no per-datagram ParseAddrPort needed.
+		n := copy(p, dfMsg.Data)
+		if dfMsg.Release != nil {
+			dfMsg.Release()
 		}
-		return copy(p, dfMsg.Data), netipAddr, nil
+		return n, u.targetAddr, nil
 	}
 }
 
@@ -148,11 +164,10 @@ func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
 	if msg == nil {
 		return true
 	}
-	addr, err := netip.ParseAddrPort(msg.Addr)
-	if err != nil {
-		return true
-	}
-	packet := netproxy.NewReceivedPacket(msg.Data, addr, nil, nil)
+	// Session target is constant; use the cached AddrPort instead of
+	// re-parsing msg.Addr on every datagram. The release callback (if any)
+	// returns the pooled datagram buffer once the consumer is done with it.
+	packet := netproxy.NewReceivedPacket(msg.Data, u.targetAddr, nil, msg.Release)
 	if handler(packet) {
 		return true
 	}
@@ -358,17 +373,27 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 	id := m.nextID
 	m.nextID++
 
+	// Parse the session target once at creation. A hy2 UDP session is bound
+	// to a single target address, so the parsed AddrPort is constant for the
+	// session lifetime and can be handed to consumers directly, avoiding a
+	// per-datagram ParseAddrPort on the receive hot path.
+	targetAddr, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	conn := &udpConn{
 		ID:            id,
 		D:             &frag.Defragger{},
 		ReceiveCh:     make(chan *protocol.UDPMessage, udpMessageChanSize),
-		SendBuf:       make([]byte, protocol.MaxUDPSize),
+		SendBuf:       sendBufPool.Get().([]byte),
 		SendFunc:      m.io.SendMessage,
 		transportDone: m.done,
 
-		writeMu: sync.Mutex{},
-		muTimer: sync.Mutex{},
-		target:  addr,
+		writeMu:    sync.Mutex{},
+		muTimer:    sync.Mutex{},
+		target:     addr,
+		targetAddr: targetAddr,
 	}
 	conn.CloseFunc = func() {
 		m.close(conn)
@@ -399,6 +424,10 @@ func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
 	conn.stopDeadlineTimer()
 	close(conn.ReceiveCh)
 	delete(m.m, conn.ID)
+	// Return the per-session send buffer to the pool for reuse by the next
+	// session. Buffers are not shared while in use (one per udpConn), so
+	// pooling them here is safe.
+	sendBufPool.Put(conn.SendBuf)
 	if m.draining && len(m.m) == 0 {
 		onIdle := m.onIdle
 		m.onIdle = nil

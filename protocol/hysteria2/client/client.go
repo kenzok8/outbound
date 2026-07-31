@@ -442,18 +442,23 @@ type udpIOImpl struct {
 
 func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 	for {
-		msg, err := io.Conn.ReceiveDatagram(context.Background())
+		buf, err := io.Conn.ReceiveDatagram(context.Background())
 		if err != nil {
 			if !outbounderrors.IsTemporaryError(err) {
 				return nil, err
 			}
 			continue
 		}
-		udpMsg, err := protocol.ParseUDPMessage(msg)
+		udpMsg, err := protocol.ParseUDPMessage(buf)
 		if err != nil {
-			// Invalid message, this is fine - just wait for the next
+			// Invalid message - return the pooled buffer before waiting for
+			// the next datagram.
+			io.Conn.ReleaseDatagram(buf)
 			continue
 		}
+		// Attach the buffer release so the consumer can return storage to
+		// the quic-go pool once it is done with Data (which aliases buf).
+		udpMsg.Release = func() { io.Conn.ReleaseDatagram(buf) }
 		return udpMsg, nil
 	}
 }

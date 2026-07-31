@@ -160,6 +160,11 @@ type UDPMessage struct {
 	FragCount uint8  // 1
 	Addr      string // varint + bytes
 	Data      []byte
+	// Release returns the backing datagram buffer (when the message was
+	// obtained via a pooled transport such as quic-go's ReceiveDatagram)
+	// to its pool. Must be called exactly once when Data is no longer
+	// referenced; nil when the message owns no pooled storage.
+	Release func()
 }
 
 func (m *UDPMessage) HeaderSize() int {

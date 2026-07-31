@@ -12,10 +12,16 @@ import (
 )
 
 const (
-	defaultStreamReceiveWindow = 32 * 1024 * 1024 // 32MB - netem sweep peak (1Gbps x 200ms BDP: 16->773, 32->808, 64->699 Mbps)
-	defaultConnReceiveWindow   = 64 * 1024 * 1024 // 64MB - stream x2, measured peak combo
-	defaultMaxIdleTimeout      = 30 * time.Second
-	defaultKeepAlivePeriod     = 10 * time.Second
+	// Initial windows start small so idle/low-traffic connections keep a low
+	// memory footprint; quic-go's BDP auto-tuning doubles them up to the Max
+	// values below when the measured RTTxbandwidth actually needs it. This
+	// keeps the steady-state memory floor small without capping peak speed.
+	defaultStreamReceiveWindow    = 8 * 1024 * 1024  // 8MB initial (upstream default)
+	defaultConnReceiveWindow      = 20 * 1024 * 1024 // 20MB initial (stream x2.5)
+	defaultMaxStreamReceiveWindow = 32 * 1024 * 1024 // 32MB ceiling - netem sweep peak (1Gbps x 200ms BDP)
+	defaultMaxConnReceiveWindow   = 64 * 1024 * 1024 // 64MB ceiling - stream x2, measured peak combo
+	defaultMaxIdleTimeout         = 30 * time.Second
+	defaultKeepAlivePeriod        = 10 * time.Second
 )
 
 type Config struct {
@@ -49,7 +55,7 @@ func (c *Config) verifyAndFill() error {
 		return errors.ConfigError{Field: "QUICConfig.InitialStreamReceiveWindow", Reason: "must be at least 16384"}
 	}
 	if c.QUICConfig.MaxStreamReceiveWindow == 0 {
-		c.QUICConfig.MaxStreamReceiveWindow = defaultStreamReceiveWindow
+		c.QUICConfig.MaxStreamReceiveWindow = defaultMaxStreamReceiveWindow
 	} else if c.QUICConfig.MaxStreamReceiveWindow < 16384 {
 		return errors.ConfigError{Field: "QUICConfig.MaxStreamReceiveWindow", Reason: "must be at least 16384"}
 	}
@@ -59,7 +65,7 @@ func (c *Config) verifyAndFill() error {
 		return errors.ConfigError{Field: "QUICConfig.InitialConnectionReceiveWindow", Reason: "must be at least 16384"}
 	}
 	if c.QUICConfig.MaxConnectionReceiveWindow == 0 {
-		c.QUICConfig.MaxConnectionReceiveWindow = defaultConnReceiveWindow
+		c.QUICConfig.MaxConnectionReceiveWindow = defaultMaxConnReceiveWindow
 	} else if c.QUICConfig.MaxConnectionReceiveWindow < 16384 {
 		return errors.ConfigError{Field: "QUICConfig.MaxConnectionReceiveWindow", Reason: "must be at least 16384"}
 	}
