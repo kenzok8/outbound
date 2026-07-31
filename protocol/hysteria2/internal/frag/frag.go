@@ -74,11 +74,16 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			}
 			// The assembled payload lives in the freshly allocated data
 			// slice; every fragment's backing buffer can now be returned
-			// to its pool.
+			// to its pool. The trigger fragment's Release must be cleared:
+			// its buffer was already released by releaseAll, and the
+			// caller will (correctly) invoke Release on the returned
+			// message - double-returning the same buffer to the pool
+			// would hand one buffer to two consumers.
 			d.releaseAll()
 			m.Data = data
 			m.FragID = 0
 			m.FragCount = 1
+			m.Release = nil
 			return m
 		}
 	}
@@ -109,4 +114,12 @@ func (d *Defragger) releaseAll() {
 	d.frags = nil
 	d.count = 0
 	d.size = 0
+}
+
+// Close returns any fragments still held for reassembly to their pools.
+// Called when the owning session dies with an incomplete message in flight;
+// without this, those pooled datagram buffers would be retained until the
+// session object itself is garbage collected.
+func (d *Defragger) Close() {
+	d.releasePending()
 }

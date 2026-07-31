@@ -186,7 +186,11 @@ func (u *udpConn) queueIfNoReceiver(msg *protocol.UDPMessage) bool {
 	select {
 	case u.ReceiveCh <- msg:
 	default:
-		// Channel full, drop the message.
+		// Channel full, drop the message. Return the pooled datagram
+		// buffer to quic-go now: nobody will ever consume it.
+		if msg.Release != nil {
+			msg.Release()
+		}
 	}
 	return true
 }
@@ -422,6 +426,9 @@ func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
 	conn.receiver = nil
 	conn.receiverMu.Unlock()
 	conn.stopDeadlineTimer()
+	// Return any partially-reassembled fragments to the quic-go pool; the
+	// session is dead and nobody will complete the reassembly.
+	conn.D.Close()
 	close(conn.ReceiveCh)
 	delete(m.m, conn.ID)
 	// Return the per-session send buffer to the pool for reuse by the next
