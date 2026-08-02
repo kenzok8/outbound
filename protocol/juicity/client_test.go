@@ -82,6 +82,8 @@ func (c *juicityTestQUICConn) ReceiveDatagram(context.Context) ([]byte, error) {
 
 func (c *juicityTestQUICConn) SetCongestionControl(congestion.CongestionControl) {}
 
+func (c *juicityTestQUICConn) ReleaseDatagram([]byte) {}
+
 type juicityTestStream struct {
 	ctx context.Context
 }

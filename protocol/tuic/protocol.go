@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strconv"
 
+	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/google/uuid"
 	"github.com/olicesx/quic-go"
@@ -238,6 +239,21 @@ type Packet struct {
 	SIZE       uint16
 	ADDR       *Address
 	DATA       []byte
+
+	// dataFromPool marks DATA as pool-backed; only set for unfragmented packets
+	// parsed on the hot slice-based path so consumers can return it via releaseData.
+	dataFromPool bool
+}
+
+// releaseData returns DATA to the pool if pool-backed; no-op otherwise and on
+// repeat calls. Call once the consumer is done with DATA.
+func (p *Packet) releaseData() {
+	if p == nil || !p.dataFromPool {
+		return
+	}
+	p.dataFromPool = false
+	pool.Put(p.DATA)
+	p.DATA = nil
 }
 
 func NewPacket(ASSOC_ID uint16, PKT_ID uint16, FRGA_TOTAL uint8, FRAG_ID uint8, SIZE uint16, ADDR *Address, DATA []byte, VER byte) *Packet {

@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 // readPacketFromMessage parses a TUIC Packet command from its wire-format
@@ -44,23 +46,34 @@ func readPacketFromMessage(msg []byte) (*Packet, error) {
 	off += n
 
 	var data []byte
+	dataFromPool := false
 	if size > 0 {
 		if len(msg[off:]) < int(size) {
 			return nil, fmt.Errorf("tuic: data truncated: need %d have %d", size, len(msg[off:]))
 		}
-		data = make([]byte, size)
+		// Unfragmented packets take DATA from the pool to avoid a per-datagram
+		// heap allocation scaling with payload size. Fragmented packets keep make:
+		// their DATA is sliced during reassembly (frag.go) and outlives the parse,
+		// which the pool cannot track safely.
+		if fragTotal <= 1 {
+			data = pool.Get(int(size))
+			dataFromPool = true
+		} else {
+			data = make([]byte, size)
+		}
 		copy(data, msg[off:off+int(size)])
 	}
 
 	return &Packet{
-		CommandHead: &CommandHead{VER: ver, TYPE: PacketType},
-		ASSOC_ID:    assocId,
-		PKT_ID:      pktId,
-		FRAG_TOTAL:  fragTotal,
-		FRAG_ID:     fragId,
-		SIZE:        size,
-		ADDR:        addr,
-		DATA:        data,
+		CommandHead:  &CommandHead{VER: ver, TYPE: PacketType},
+		ASSOC_ID:     assocId,
+		PKT_ID:       pktId,
+		FRAG_TOTAL:   fragTotal,
+		FRAG_ID:      fragId,
+		SIZE:         size,
+		ADDR:         addr,
+		DATA:         data,
+		dataFromPool: dataFromPool,
 	}, nil
 }
 

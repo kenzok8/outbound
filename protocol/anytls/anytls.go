@@ -25,8 +25,14 @@ const ( // cmds
 )
 
 const (
-	headerOverHeadSize  = 1 + 4 + 2
-	maxFramePayloadSize = math.MaxUint16
+	headerOverHeadSize = 1 + 4 + 2
+	// maxFramePayloadSize caps a single frame's data so the encoded frame
+	// (headerOverHeadSize + data) stays within pool's largest bucket (65536).
+	// At math.MaxUint16 a frame encodes to 65542 bytes, overflowing the pool
+	// and forcing a heap allocation per write — a ~67x slowdown near 64KB.
+	// The receiver reads by the wire Length field, so the sender's chunking
+	// choice does not affect protocol compatibility.
+	maxFramePayloadSize = 32768
 	maxUDPPayloadSize   = math.MaxUint16
 )
 

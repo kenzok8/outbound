@@ -240,8 +240,12 @@ func (t *clientImpl) processDatagram(quicConn quic.Connection, message []byte) {
 			assocId = packet.ASSOC_ID
 			if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
 				val.(*Packets).PushBack(packet)
+				return
 			}
 		}
+		// Dropped (no matching association / not datagram mode): return the
+		// pool-backed DATA so the buffer is not leaked.
+		packet.releaseData()
 	case HeartbeatType:
 		// Fixed 2-byte command (VER+TYPE); no further bytes to consume.
 	}

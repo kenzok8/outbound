@@ -44,13 +44,20 @@ func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
+		// Queue torn down: return the pooled DATA so the buffer is not lost.
+		packet.releaseData()
 		return
 	}
 	if receiver := p.receiver; receiver != nil {
 		p.mu.Unlock()
-		if receiver.active.Load() && receiver.handler(packet) {
+		if receiver.active.Load() {
+			// handler owns the packet on true; on false deliverPacket has
+			// already released DATA (or the packet was not pool-backed).
+			receiver.handler(packet)
 			return
 		}
+		// active=false (unregister race): handler never ran, release here.
+		packet.releaseData()
 		return
 	}
 	// Channel send while holding mu so a concurrent Close cannot close the
@@ -126,7 +133,9 @@ func (p *Packets) Close() error {
 	// matching the previous list.Init() drop-on-close semantics. No new
 	// PushBack can run concurrently — it would block on p.mu.
 	for len(p.ch) > 0 {
-		<-p.ch
+		if pkt := <-p.ch; pkt != nil {
+			pkt.releaseData()
+		}
 	}
 	close(p.ch)
 	return nil
@@ -395,7 +404,10 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			return
 		}
 		if packet.FRAG_TOTAL <= 1 {
-			return copy(p, packet.DATA), packet.ADDR.UDPAddr().AddrPort(), nil
+			n := copy(p, packet.DATA)
+			addr := packet.ADDR.UDPAddr().AddrPort()
+			packet.releaseData()
+			return n, addr, nil
 		}
 		nowNano := time.Now().UnixNano()
 		q.maybeCleanupDeFraggers(nowNano)
@@ -438,13 +450,14 @@ func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandl
 	}
 	if packet.FRAG_TOTAL <= 1 {
 		if packet.ADDR == nil {
+			packet.releaseData()
 			return true
 		}
 		received := netproxy.NewReceivedPacket(
 			packet.DATA,
 			packet.ADDR.UDPAddr().AddrPort(),
 			nil,
-			nil,
+			packet.releaseData,
 		)
 		if handler(received) {
 			return true
