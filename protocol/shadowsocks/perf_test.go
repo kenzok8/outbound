@@ -266,3 +266,50 @@ func benchmarkEncryptSize(b *testing.B, size int) {
 		shadowBytes.Put()
 	}
 }
+
+// BenchmarkDeriveSubKey measures the inline HKDF key schedule that replaced the
+// hkdf.Reader wrapper (17 allocs/op) on the per-packet UDP hot path.
+func BenchmarkDeriveSubKey(b *testing.B) {
+	masterKey := make([]byte, 32)
+	salt := make([]byte, 32)
+	subKey := make([]byte, 32)
+	reusedInfo := []byte("ss-subkey")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		deriveSubKey(subKey, masterKey, salt, reusedInfo)
+	}
+}
+
+// BenchmarkDecryptUDP_Standard is the pre-optimization DecryptUDP key schedule
+// (hkdf.New + io.ReadFull), kept here for same-process A/B against the inline
+// deriveSubKey version in BenchmarkDecryptUDP_Inline.
+func BenchmarkDecryptUDP_Standard(b *testing.B) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	masterKey := make([]byte, conf.KeyLen)
+	subKey := make([]byte, conf.KeyLen)
+	reusedInfo := []byte("juicity-reused-info")
+	salt := make([]byte, conf.SaltLen)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		kdf := hkdf.New(sha1.New, masterKey, salt, reusedInfo)
+		if _, err := io.ReadFull(kdf, subKey); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkDecryptUDP_Inline measures the current inline key schedule.
+func BenchmarkDecryptUDP_Inline(b *testing.B) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	masterKey := make([]byte, conf.KeyLen)
+	subKey := make([]byte, conf.KeyLen)
+	reusedInfo := []byte("juicity-reused-info")
+	salt := make([]byte, conf.SaltLen)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		deriveSubKey(subKey, masterKey, salt, reusedInfo)
+	}
+}
