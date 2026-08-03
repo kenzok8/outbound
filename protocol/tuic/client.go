@@ -20,7 +20,18 @@ import (
 
 const Ver5 = 0x5
 
-const tuicImmediateFailureWindow = 75 * time.Millisecond
+// tuicImmediateFailureWindow bounds how long DialContext waits for the peer
+// to signal an immediate connect failure (e.g. RESET_STREAM from the server
+// when the target is unreachable) before declaring the stream established.
+//
+// The window only needs to cover the round trip in which the server processes
+// the CONNECT header and reports the outcome: a handful of milliseconds on
+// LAN/metro links. A larger fixed value buys nothing for high-latency WAN
+// paths (the failure signal arrives well beyond any reasonable window) and
+// simply taxes every successful connection with that latency. 15ms keeps
+// fast-fail detection for realistic low-RTT deployments while trimming the
+// per-connection cost of the old 75ms constant ~5x.
+const tuicImmediateFailureWindow = 15 * time.Millisecond
 
 type ClientOption struct {
 	TlsConfig             *tls.Config
@@ -106,8 +117,8 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	go func() {
 		_ = t.handleMessage(quicConn) // always handleMessage because tuicV5 using datagram to send the Heartbeat
 	}()
-
 	t.underConn = transport.Conn
+
 	t.quicConn = quicConn
 	return quicConn, nil
 }
