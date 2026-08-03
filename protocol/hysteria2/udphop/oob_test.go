@@ -77,7 +77,7 @@ func TestReadBatchDrainsQueueInOneCall(t *testing.T) {
 		currentAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
 		recvQueue:   make(chan *udpPacket, 8),
 		closeChan:   make(chan struct{}),
-		bufPool: testBufPool(),
+		bufPool:     testBufPool(),
 	}
 	for i := 0; i < 3; i++ {
 		conn.recvQueue <- &udpPacket{
@@ -269,4 +269,57 @@ func bytesEqual(a, b []byte) bool {
 // when draining queued packets.
 func testBufPool() sync.Pool {
 	return sync.Pool{New: func() interface{} { return make([]byte, udpBufferSize) }}
+}
+
+// TestReadBatchRecyclesBuffersExactlyOnce guards the buffer ownership
+// invariant on the batch receive path: every packet queued by recvLoop is
+// owned by exactly one consumer, which must recycle it exactly once. A lost
+// Put leaks the buffer (the pool keeps allocating), so refilling the queue
+// after a full drain must hit the pool with zero new allocations.
+func TestReadBatchRecyclesBuffersExactlyOnce(t *testing.T) {
+	var newCalls int
+	conn := &udpHopPacketConn{
+		currentAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
+		recvQueue:   make(chan *udpPacket, 16),
+		closeChan:   make(chan struct{}),
+		bufPool: sync.Pool{New: func() interface{} {
+			newCalls++
+			return make([]byte, udpBufferSize)
+		}},
+	}
+
+	// Batch 1: recvLoop transfers ownership of 16 fresh pool buffers to the queue.
+	const n = 16
+	for i := 0; i < n; i++ {
+		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get().([]byte), N: 8, Addr: conn.currentAddr}
+	}
+	if newCalls != n {
+		t.Fatalf("seed allocations = %d, want %d", newCalls, n)
+	}
+
+	// Drain batch 1 through ReadBatch; every buffer must be recycled.
+	msgs := make([]ipv4.Message, 8)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, 16)}
+	}
+	for drained := 0; drained < n; {
+		got, err := conn.ReadBatch(msgs, 0)
+		if err != nil {
+			t.Fatalf("ReadBatch: %v", err)
+		}
+		if got == 0 {
+			t.Fatal("ReadBatch returned 0 with packets queued")
+		}
+		drained += got
+	}
+
+	// Batch 2: if every buffer was recycled exactly once, refilling the queue
+	// hits the pool and allocates nothing.
+	for i := 0; i < n; i++ {
+		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get().([]byte), N: 8, Addr: conn.currentAddr}
+	}
+	if newCalls != n {
+		t.Fatalf("pool reallocated %d buffers after a full recycle (want 0); "+
+			"a Put path was lost (%d total allocations)", newCalls-n, newCalls)
+	}
 }

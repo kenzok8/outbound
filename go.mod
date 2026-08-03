@@ -13,7 +13,7 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/json-iterator/go v1.1.12
 	github.com/mzz2017/disk-bloom v1.0.1
-	github.com/olicesx/quic-go v0.0.0-20260226044315-bb65418d151a
+	github.com/olicesx/quic-go v0.0.0-20260803000957-dff8aaa58e14
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sagernet/sing v0.6.0
 	github.com/sagernet/sing-shadowtls v0.2.0
@@ -60,4 +60,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/olicesx/quic-go => github.com/olicesx/quic-go v0.0.0-20260731110322-6e2cee47210c
+replace github.com/olicesx/quic-go => github.com/olicesx/quic-go v0.0.0-20260803000957-dff8aaa58e14
