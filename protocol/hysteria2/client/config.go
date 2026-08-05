@@ -33,6 +33,7 @@ type Config struct {
 	BandwidthConfig BandwidthConfig
 	UDPHopInterval  time.Duration
 	FastOpen        bool
+	ObfsPassword    string
 
 	filled bool // whether the fields have been verified and filled
 }
@@ -132,3 +133,7 @@ type BandwidthConfig struct {
 	MaxTx uint64
 	MaxRx uint64
 }
+
+// ObfsPassword, when non-empty, enables Salamander packet obfuscation with
+// this pre-shared key (must match the server-side obfs password).
+type ObfsPassword string

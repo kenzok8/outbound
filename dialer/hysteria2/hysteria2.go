@@ -37,6 +37,7 @@ type Hysteria2 struct {
 	ECHConfigList []byte
 	MaxTx         uint64
 	MaxRx         uint64
+	ObfsPassword  string
 }
 
 func NewHysteria2(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -76,6 +77,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 
 	feature1 := &hysteria2.Feature1{
 		UDPHopInterval: option.UDPHopInterval,
+		ObfsPassword:   s.ObfsPassword,
 	}
 	if s.MaxTx > 0 && s.MaxRx > 0 {
 		feature1.BandwidthConfig = client.BandwidthConfig{
@@ -175,6 +177,20 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 			return nil, dialer.InvalidParameterErr
 		}
 	}
+	var obfsPassword string
+	if obfsType := q.Get("obfs"); obfsType != "" {
+		switch strings.ToLower(obfsType) {
+		case "salamander":
+			obfsPassword = q.Get("obfs-password")
+			if obfsPassword == "" {
+				return nil, fmt.Errorf("%w: obfs=salamander requires obfs-password", dialer.InvalidParameterErr)
+			}
+		case "gecko":
+			return nil, fmt.Errorf("%w: obfs=gecko is not supported yet", dialer.InvalidParameterErr)
+		default:
+			return nil, fmt.Errorf("%w: unknown obfs type %q", dialer.InvalidParameterErr, obfsType)
+		}
+	}
 	var echConfigList []byte
 	if ech := q.Get("ech"); ech != "" {
 		echConfigList, err = decodeECHConfigList(ech)
@@ -193,6 +209,7 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 		ECHConfigList: echConfigList,
 		MaxTx:         maxTx,
 		MaxRx:         maxRx,
+		ObfsPassword:  obfsPassword,
 	}
 	conf.Password, _ = u.User.Password()
 	return conf, nil

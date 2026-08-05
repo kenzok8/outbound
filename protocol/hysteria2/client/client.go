@@ -15,6 +15,7 @@ import (
 	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
+	"github.com/daeuniverse/outbound/protocol/hysteria2/obfs"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 
 	"github.com/olicesx/quic-go"
@@ -92,6 +93,15 @@ func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	pktConn, err := c.config.ConnFactory.New(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if c.config.ObfsPassword != "" {
+		// Salamander obfuscation: wrap the packet conn so every QUIC packet
+		// becomes indistinguishable random bytes on the wire.
+		pktConn, err = obfs.WrapPacketConnSalamander(pktConn, []byte(c.config.ObfsPassword))
+		if err != nil {
+			_ = pktConn.Close()
+			return nil, err
+		}
 	}
 	serverAddr := quicRemoteAddr(pktConn, c.config.ServerAddr)
 	// Convert config to TLS config & QUIC config

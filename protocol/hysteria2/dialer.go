@@ -28,6 +28,7 @@ type Dialer struct {
 type Feature1 struct {
 	BandwidthConfig client.BandwidthConfig
 	UDPHopInterval  time.Duration
+	ObfsPassword    string
 }
 
 func toClientTLSConfig(config *tls.Config) client.TLSConfig {
@@ -61,6 +62,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if feature := header.Feature1; feature != nil {
 		config.BandwidthConfig = feature.(*Feature1).BandwidthConfig
 		config.UDPHopInterval = feature.(*Feature1).UDPHopInterval
+		config.ObfsPassword = feature.(*Feature1).ObfsPassword
 	}
 
 	var err error
