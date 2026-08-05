@@ -167,14 +167,38 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 		}
 	}
 	var maxTx, maxRx uint64
-	if q.Get("maxTx") != "" && q.Get("maxRx") != "" {
-		maxTx, err = strconv.ParseUint(q.Get("maxTx"), 10, 64)
+	// upmbps/downmbps: hysteria2 official / sing-box style bandwidth
+	// declarations in Mbps, usable individually. Converted to bytes per
+	// second (Mbps * 1_000_000 / 8) for the underlying BandwidthConfig.
+	if up := q.Get("upmbps"); up != "" {
+		v, err := strconv.ParseUint(up, 10, 64)
 		if err != nil {
 			return nil, dialer.InvalidParameterErr
 		}
-		maxRx, err = strconv.ParseUint(q.Get("maxRx"), 10, 64)
+		maxTx = v * 1_000_000 / 8
+	}
+	if down := q.Get("downmbps"); down != "" {
+		v, err := strconv.ParseUint(down, 10, 64)
 		if err != nil {
 			return nil, dialer.InvalidParameterErr
+		}
+		maxRx = v * 1_000_000 / 8
+	}
+	// Legacy dae-style maxTx/maxRx in raw bytes per second; both must be
+	// present together. Only fills dimensions not already set by
+	// upmbps/downmbps so mixed forms (e.g. upmbps + maxRx) behave sanely.
+	if q.Get("maxTx") != "" && q.Get("maxRx") != "" {
+		if maxTx == 0 {
+			maxTx, err = strconv.ParseUint(q.Get("maxTx"), 10, 64)
+			if err != nil {
+				return nil, dialer.InvalidParameterErr
+			}
+		}
+		if maxRx == 0 {
+			maxRx, err = strconv.ParseUint(q.Get("maxRx"), 10, 64)
+			if err != nil {
+				return nil, dialer.InvalidParameterErr
+			}
 		}
 	}
 	var obfsPassword string
