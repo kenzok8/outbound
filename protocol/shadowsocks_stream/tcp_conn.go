@@ -24,6 +24,17 @@ func NewTcpConn(c netproxy.Conn, cipher *ciphers.StreamCipher) *TcpConn {
 	}
 }
 
+// unwrapConn peels transparent wrappers such as netproxy.BufferedReaderConn so
+// that SSR obfs conns stay reachable by the type assertions below.
+func unwrapConn(c netproxy.Conn) netproxy.Conn {
+	if ic, ok := c.(interface{ IntrinsicConn() netproxy.Conn }); ok {
+		if inner := ic.IntrinsicConn(); inner != nil {
+			return inner
+		}
+	}
+	return c
+}
+
 func (c *TcpConn) Read(b []byte) (n int, err error) {
 	if !c.cipher.DecryptInited() {
 		buf := b
@@ -82,12 +93,13 @@ func (c *TcpConn) Write(b []byte) (n int, err error) {
 		b = buf
 
 		// For SSR obfs.
-		if innerConn, ok := c.Conn.(interface {
+		obfsConn := unwrapConn(c.Conn)
+		if innerConn, ok := obfsConn.(interface {
 			SetCipher(cipher *ciphers.StreamCipher)
 		}); ok {
 			innerConn.SetCipher(c.cipher)
 		}
-		if innerConn, ok := c.Conn.(interface {
+		if innerConn, ok := obfsConn.(interface {
 			SetAddrLen(addrLen int)
 		}); ok {
 			innerConn.SetAddrLen(lenToWrite)
