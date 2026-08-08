@@ -393,6 +393,7 @@ func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
 func TestUDPConnRedundantSend(t *testing.T) {
 	// Small packets (≤ redundantSendThreshold) should trigger redundant sends.
 	// Large packets should not.
+	// Redundant copies are sent via time.AfterFunc, so we need to wait.
 	tests := []struct {
 		name      string
 		payloadSz int
@@ -421,6 +422,9 @@ func TestUDPConnRedundantSend(t *testing.T) {
 			if _, err := u.WriteTo(payload, "127.0.0.1:443"); err != nil {
 				t.Fatalf("WriteTo error: %v", err)
 			}
+			// Wait for delayed redundant copies to fire.
+			// Max delay = redundantSendInterval × redundantSendCopies + scheduling slack.
+			time.Sleep(redundantSendInterval*time.Duration(redundantSendCopies) + 100*time.Millisecond)
 			if got := calls.Load(); int(got) != tt.wantCalls {
 				t.Fatalf("SendFunc calls: got %d want %d", got, tt.wantCalls)
 			}

@@ -30,19 +30,25 @@ const (
 	udpMessageChanSize = 128
 
 	// redundantSendThreshold is the maximum payload size (in bytes) for which
-	// the sender will immediately fire extra copies into the QUIC datagram
-	// queue. Only small packets—game heartbeats, NAT keepalives, DNS—qualify.
+	// the sender will schedule extra copies into the QUIC datagram queue.
+	// Only small packets—game heartbeats, NAT keepalives, DNS—qualify.
 	// Bulk UDP transfers (file download, video) are larger and excluded.
 	redundantSendThreshold = 256
 
-	// redundantSendCopies is the number of *additional* copies sent after the
-	// original. Total transmissions = redundantSendCopies + 1.
+	// redundantSendCopies is the number of *additional* copies scheduled after
+	// the original. Total transmissions = redundantSendCopies + 1.
 	// At 2 extra copies (3 total), even a 20% underlying loss rate has only
 	// a 0.8% chance of losing all three — vs 20% for a single send.
-	// Each copy occupies a separate slot in the QUIC datagram queue, so it
-	// lands in a different QUIC packet sent at a slightly different time,
-	// decorrelating it from burst loss on the underlying path.
 	redundantSendCopies = 2
+
+	// redundantSendInterval is the delay between successive redundant copies.
+	// Back-to-back copies land in the same pacer batch (1ms window) and are
+	// vulnerable to a single loss burst. Spacing them by 5ms ensures each
+	// copy falls into a separate pacer window and a separate QUIC packet,
+	// decorrelating them from burst loss on the underlying path.
+	// 5ms is well within game heartbeat jitter tolerance (servers accept
+	// 100-200ms jitter).
+	redundantSendInterval = 5 * time.Millisecond
 )
 
 // sendBufPool recycles the per-session MaxUDPSize send buffer. Sessions are
@@ -245,15 +251,37 @@ func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 		}
 		return len(b), nil
 	} else {
-		// Redundant send for small packets: fire extra copies into the datagram
-		// queue so they land in separate QUIC packets, decorrelating them from
-		// burst loss on the underlying path. QUIC DATAGRAM frames are not
-		// retransmitted (RFC 9221), so this application-layer redundancy is the
-		// only way to improve delivery probability for latency-sensitive small
-		// packets like game heartbeats. Only applies to unfragmented sends.
+		// Redundant send for small packets: schedule delayed copies so they
+		// land in separate QUIC packets / pacer windows, decorrelating them
+		// from burst loss on the underlying path. QUIC DATAGRAM frames are
+		// not retransmitted (RFC 9221), so this application-layer redundancy
+		// is the only way to improve delivery probability for latency-sensitive
+		// small packets like game heartbeats.
+		//
+		// The original is sent immediately (above). Each redundant copy is
+		// delayed by redundantSendInterval × (i+1) to ensure it falls outside
+		// the current pacer batch and the current loss burst window.
 		if len(b) <= redundantSendThreshold {
 			for i := 0; i < redundantSendCopies; i++ {
-				_ = u.SendFunc(u.SendBuf, msg)
+				delay := redundantSendInterval * time.Duration(i+1)
+				dataCopy := make([]byte, len(b))
+				copy(dataCopy, b)
+				msgCopy := &protocol.UDPMessage{
+					SessionID: u.ID,
+					PacketID:  0,
+					FragID:    0,
+					FragCount: 1,
+					Addr:      addr,
+					Data:      dataCopy,
+				}
+				time.AfterFunc(delay, func() {
+					u.writeMu.Lock()
+					defer u.writeMu.Unlock()
+					if u.Closed {
+						return
+					}
+					_ = u.SendFunc(u.SendBuf, msgCopy)
+				})
 			}
 		}
 		return len(b), err
