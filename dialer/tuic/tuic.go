@@ -28,9 +28,13 @@ type Tuic struct {
 	AllowInsecure     bool
 	DisableSni        bool
 	CongestionControl string
-	Alpn              []string
-	Protocol          string
-	UdpRelayMode      string
+	// Cwnd is the congestion_control parameter: for "brutal" it carries the
+	// target bandwidth in bytes per second (community convention, matching
+	// sing-box and the tuic brutal forks).
+	Cwnd         int
+	Alpn         []string
+	Protocol     string
+	UdpRelayMode string
 }
 
 func NewTuic(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -51,6 +55,7 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (n
 	if d, err = protocol.NewDialer("tuic", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Feature1:     s.CongestionControl,
+		Feature2:     s.Cwnd,
 		TlsConfig: &tls.Config{
 			NextProtos:         s.Alpn,
 			MinVersion:         tls.VersionTLS13,
@@ -123,11 +128,23 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 		AllowInsecure:     allowInsecure,
 		DisableSni:        disableSni,
 		CongestionControl: t.Query().Get("congestion_control"),
+		Cwnd:              cwndFromQuery(t),
 		Alpn:              alpn,
 		UdpRelayMode:      strings.ToLower(t.Query().Get("udp_relay_mode")),
 		Protocol:          "tuic",
 	}
 	return data, nil
+}
+
+// cwndFromQuery parses the "cwnd" query parameter. Negative values are
+// treated as unset so a malformed link degrades to the default congestion
+// controller instead of panicking downstream.
+func cwndFromQuery(u *url.URL) int {
+	cwnd, err := strconv.Atoi(u.Query().Get("cwnd"))
+	if err != nil || cwnd < 0 {
+		return 0
+	}
+	return cwnd
 }
 
 func (t *Tuic) ExportToURL() string {
@@ -147,6 +164,9 @@ func (t *Tuic) ExportToURL() string {
 	}
 	if t.CongestionControl != "" {
 		common.SetValue(&q, "congestion_control", t.CongestionControl)
+	}
+	if t.Cwnd > 0 {
+		common.SetValue(&q, "cwnd", strconv.Itoa(t.Cwnd))
 	}
 	if len(t.Alpn) > 0 {
 		common.SetValue(&q, "alpn", strings.Join(t.Alpn, ","))

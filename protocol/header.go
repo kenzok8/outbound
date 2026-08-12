@@ -6,6 +6,7 @@ type Header struct {
 	ProxyAddress string
 	SNI          string
 	Feature1     interface{}
+	Feature2     interface{}
 	TlsConfig    *tls.Config
 	Cipher       string
 	User         string

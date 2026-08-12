@@ -457,6 +457,13 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 			if !outbounderrors.IsTemporaryError(err) {
 				return nil, err
 			}
+			// Some temporary errors (notably stateless reset) are delivered
+			// after the datagram queue is already closed, so Receive returns
+			// immediately from then on. Exit via the connection context
+			// instead of spinning in a tight loop.
+			if ctxErr := io.Conn.Context().Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			continue
 		}
 		udpMsg, err := protocol.ParseUDPMessage(buf)

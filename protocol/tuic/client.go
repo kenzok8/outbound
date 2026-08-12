@@ -42,7 +42,9 @@ type ClientOption struct {
 	MaxUdpRelayPacketSize int
 	CongestionController  string
 	ReduceRtt             bool
-	CWND                  int
+	// CWND carries the brutal controller's target bandwidth (bytes per
+	// second); ignored by other controllers.
+	CWND uint64
 }
 
 type clientImpl struct {

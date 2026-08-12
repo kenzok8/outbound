@@ -43,6 +43,13 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		// FIXME: QUIC has severe performance problems.
 		// udpRelayMode = common.QUIC
 	}
+	// cwnd doubles as the brutal congestion controller's target bandwidth
+	// (bytes per second) when congestion_control=brutal; 0 lets the
+	// controller fall back to BBR.
+	cwnd := 0
+	if v, ok := header.Feature2.(int); ok {
+		cwnd = v
+	}
 	proxyUDPAddr, err := net.ResolveUDPAddr("udp", header.ProxyAddress)
 	if err != nil {
 		return nil, err
@@ -67,8 +74,8 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					Password:              header.Password,
 					UdpRelayMode:          udpRelayMode,
 					CongestionController:  header.Feature1.(string),
-					ReduceRtt:             true,  // 0-RTT cuts cold-start RTT
-					CWND:                  10,
+					ReduceRtt:             true, // 0-RTT cuts cold-start RTT
+					CWND:                  uint64(cwnd),
 					MaxUdpRelayPacketSize: maxDatagramFrameSize,
 				},
 				udp:       true,

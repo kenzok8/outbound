@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"runtime"
 	"sync"
 	"time"
 
@@ -284,11 +285,18 @@ type udpSessionManager struct {
 	m      map[uint32]*udpConn
 	nextID uint32
 
-	closed   bool
-	draining bool
-	onIdle   func()
-	done     chan struct{}
+	closed    bool
+	draining  bool
+	onIdle    func()
+	done      chan struct{}
+	closeOnce sync.Once
 }
+
+// maxDemuxGoroutines caps how many receive goroutines may drain the shared
+// datagram queue. Every goroutine parks on Receive most of the time, so the
+// cap only guards against pathological GOMAXPROCS values (e.g. 64-core
+// boxes); a handful of goroutines already removes the single-core ceiling.
+const maxDemuxGoroutines = 8
 
 func newUDPSessionManager(io udpIO) *udpSessionManager {
 	m := &udpSessionManager{
@@ -297,12 +305,23 @@ func newUDPSessionManager(io udpIO) *udpSessionManager {
 		nextID: 1,
 		done:   make(chan struct{}),
 	}
-	go func() { _ = m.run() }()
+	// Parallel demux: a single run() goroutine caps aggregate packet rate at
+	// one core (parse + session lookup + defrag + consumer callback per
+	// datagram). quic-go's datagramQueue.Receive is safe for concurrent use,
+	// so run one loop per CPU (capped) and let consumers of different
+	// sessions progress in parallel.
+	n := runtime.GOMAXPROCS(0)
+	if n > maxDemuxGoroutines {
+		n = maxDemuxGoroutines
+	}
+	for range n {
+		go func() { _ = m.run() }()
+	}
 	return m
 }
 
 func (m *udpSessionManager) run() error {
-	defer m.closeCleanup()
+	defer m.closeOnce.Do(m.closeCleanup)
 	for {
 		msg, err := m.io.ReceiveMessage()
 		if err != nil {
@@ -338,7 +357,11 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 	conn, ok := m.m[msg.SessionID]
 	m.mutex.RUnlock()
 	if !ok {
-		// Ignore message from unknown session
+		// Ignore message from unknown session (e.g. arrived after cleanup).
+		// Return its pooled datagram buffer to quic-go.
+		if msg.Release != nil {
+			msg.Release()
+		}
 		return
 	}
 	if conn.deliverMessage(msg) {
@@ -427,8 +450,12 @@ func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
 	conn.receiverMu.Unlock()
 	conn.stopDeadlineTimer()
 	// Return any partially-reassembled fragments to the quic-go pool; the
-	// session is dead and nobody will complete the reassembly.
+	// session is dead and nobody will complete the reassembly. Take
+	// receiveMu: concurrent deliverMessage/ReadFrom hold it around D.Feed,
+	// and Defragger's state is not otherwise synchronized.
+	conn.receiveMu.Lock()
 	conn.D.Close()
+	conn.receiveMu.Unlock()
 	close(conn.ReceiveCh)
 	delete(m.m, conn.ID)
 	// Return the per-session send buffer to the pool for reuse by the next
