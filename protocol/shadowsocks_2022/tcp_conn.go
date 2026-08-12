@@ -111,6 +111,10 @@ func (c *TCPConn) Close() error {
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.
 // Returns true if the operation should proceed, false if it should be aborted.
 // Uses a rolling deadline for TCP I/O to avoid issues with the dial context's absolute deadline.
+// Only used during the handshake: steady-state chunk reads must not impose a
+// per-chunk deadline (see checkContext), otherwise connections idle for more
+// than the rolling window are killed even though upper layers (relay
+// watchdog, TCP keepalive) own liveness detection.
 func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 	ctx := c.getContext()
 	select {
@@ -127,6 +131,26 @@ func (c *TCPConn) checkContextAndSetReadDeadline() bool {
 		_ = dl.SetReadDeadline(time.Now().Add(30 * time.Second))
 	}
 	return true
+}
+
+// checkContext reports whether the connection context is still alive.
+// Steady-state chunk reads use this instead of a rolling deadline so an idle
+// connection is not torn down by the protocol layer.
+func (c *TCPConn) checkContext() bool {
+	select {
+	case <-c.getContext().Done():
+		return false
+	default:
+	}
+	return true
+}
+
+// clearReadDeadline removes the handshake's rolling deadline once the first
+// payload chunk has been delivered.
+func (c *TCPConn) clearReadDeadline() {
+	if dl, ok := c.Conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = dl.SetReadDeadline(time.Time{})
+	}
 }
 
 // checkContextAndSetWriteDeadline checks if the context is cancelled before a blocking write.
@@ -391,9 +415,14 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 		c.onceRead = true
 	} else {
-		if !c.checkContextAndSetReadDeadline() {
+		if !c.checkContext() {
 			return 0, io.EOF
 		}
+		// First steady-state chunk: the handshake (including its first
+		// payload read) is complete, so clear the rolling handshake
+		// deadline. Steady-state reads rely on ctx cancellation, TCP
+		// keepalive, and upper-layer idle watchdogs.
+		c.clearReadDeadline()
 		var payloadLengthBuf [2 + 16]byte
 		payloadLengthRaw := payloadLengthBuf[:2+c.CipherConf().TagLen]
 		if _, err := io.ReadFull(c.Conn, payloadLengthRaw); err != nil {
@@ -418,7 +447,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
 
-	if !c.checkContextAndSetReadDeadline() {
+	if !c.checkContext() {
 		return 0, io.EOF
 	}
 	payload := c.ensureReadCipherBuf(int(payloadLength) + c.CipherConf().TagLen)

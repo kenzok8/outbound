@@ -122,7 +122,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 
-		reader := bufio.NewReader(conn)
+		reader := bufio.NewReaderSize(conn, 32<<10)
 		resp, err := http.ReadResponse(reader, req)
 		if err != nil {
 			_ = conn.Close()

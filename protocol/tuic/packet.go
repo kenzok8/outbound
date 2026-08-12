@@ -18,8 +18,9 @@ import (
 )
 
 // packetChanCap bounds the per-association UDP packet queue. 2048 covers
-// bursty game ticks / DNS floods; when full, PushBack blocks (backpressure)
-// instead of growing unbounded like the previous container/list design.
+// bursty game ticks / DNS floods; when full, PushBack drops the packet
+// instead of blocking so one slow consumer cannot stall the demux goroutine
+// that serves every association on the QUIC connection.
 const packetChanCap = 2048
 
 type Packets struct {
@@ -62,7 +63,14 @@ func (p *Packets) PushBack(packet *Packet) {
 	}
 	// Channel send while holding mu so a concurrent Close cannot close the
 	// channel underneath us (Close also acquires mu before close).
-	p.ch <- packet
+	// When full, drop instead of blocking: this call runs on the single
+	// demux goroutine serving every association on the QUIC connection, and
+	// blocking here would stall all of them (head-of-line blocking).
+	select {
+	case p.ch <- packet:
+	default:
+		packet.releaseData()
+	}
 	p.mu.Unlock()
 }
 

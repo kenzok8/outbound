@@ -9,11 +9,11 @@ import (
 func TestPool_Get_Bug(t *testing.T) {
 	fmt.Println("=== Testing pool.Get for powers of 2 ===")
 	fmt.Println()
-	
+
 	testCases := []struct {
-		size          int
+		size           int
 		minExpectedCap int
-		description   string
+		description    string
 	}{
 		{1024, 1024, "1024 bytes (power of 2)"},
 		{2048, 2048, "2048 bytes (power of 2) - LIKELY BUG"},
@@ -26,15 +26,15 @@ func TestPool_Get_Bug(t *testing.T) {
 		t.Run(tc.description, func(t *testing.T) {
 			buf := Get(tc.size)
 			defer buf.Put()
-			
+
 			actualCap := cap(buf)
 			actualLen := len(buf)
-			
+
 			fmt.Printf("Test: %s\n", tc.description)
 			fmt.Printf("  Requested: %d bytes\n", tc.size)
 			fmt.Printf("  Got: len=%d, cap=%d\n", actualLen, actualCap)
 			fmt.Printf("  Min expected cap: %d\n", tc.minExpectedCap)
-			
+
 			if actualCap < tc.size {
 				t.Errorf("❌ CRITICAL: cap=%d < requested size=%d (WILL PANIC!)\n", actualCap, tc.size)
 			} else if actualCap < tc.minExpectedCap {
@@ -49,9 +49,9 @@ func TestPool_Get_Bug(t *testing.T) {
 // TestGetMustBiggerBug 测试 GetMustBigger 是否返回足够容量的 buffer
 func TestGetMustBiggerBug(t *testing.T) {
 	testCases := []struct {
-		size          int
-		expectedCap   int
-		description   string
+		size        int
+		expectedCap int
+		description string
 	}{
 		{2080, 4096, "2080 bytes - should get bucket 12 (4096)"},
 		{2048, 2048, "2048 bytes - should get bucket 11 (2048)"},
@@ -63,15 +63,15 @@ func TestGetMustBiggerBug(t *testing.T) {
 		t.Run(tc.description, func(t *testing.T) {
 			buf := GetMustBigger(tc.size)
 			defer buf.Put()
-			
+
 			actualCap := cap(buf)
 			actualLen := len(buf)
-			
+
 			fmt.Printf("Test: %s\n", tc.description)
 			fmt.Printf("  Requested: %d bytes\n", tc.size)
 			fmt.Printf("  Got: len=%d, cap=%d\n", actualLen, actualCap)
 			fmt.Printf("  Expected cap: %d\n", tc.expectedCap)
-			
+
 			if actualCap < tc.size {
 				t.Errorf("❌ FAIL: cap=%d < requested size=%d (PANIC!)\n", actualCap, tc.size)
 			} else if actualCap < tc.expectedCap {
@@ -86,15 +86,15 @@ func TestGetMustBiggerBug(t *testing.T) {
 // TestPoolInitialization 测试 pool 初始化是否正确
 func TestPoolInitialization(t *testing.T) {
 	fmt.Println("\n=== Pool Initialization Test ===")
-	
+
 	// 测试每个 bucket
 	for i := minsizePower; i < num; i++ {
 		buf := pools[i].Get().([]byte)
 		actualCap := cap(buf)
 		expectedCap := 1 << i
-		
+
 		fmt.Printf("Bucket %d: expected cap=%d, actual cap=%d", i, expectedCap, actualCap)
-		
+
 		if actualCap != expectedCap {
 			fmt.Printf(" ❌ MISMATCH!\n")
 			t.Errorf("Bucket %d: expected cap=%d, got %d", i, expectedCap, actualCap)
@@ -103,4 +103,26 @@ func TestPoolInitialization(t *testing.T) {
 		}
 	}
 	fmt.Println()
+}
+
+// TestPool_PutNonPowerOfTwoCapDoesNotPolluteBucket 回归测试：非 2 幂 cap 的缓冲
+// 必须被丢弃而不是存入下一档桶——否则后续 Get(2^n) 会把池中的短缓冲
+// 重新切片到桶大小，导致 slice bounds panic。
+func TestPool_PutNonPowerOfTwoCapDoesNotPolluteBucket(t *testing.T) {
+	// 模拟 append 增长产生的非 2 幂 cap（如 socks5 认证分支撑破 512 → ~832）。
+	polluter := make([]byte, 512, 512)
+	polluter = append(polluter, make([]byte, 300)...)
+	if cap(polluter)&(cap(polluter)-1) == 0 {
+		t.Fatalf("test setup: expected non-power-of-2 cap, got %d", cap(polluter))
+	}
+	Put(polluter)
+
+	// 若污染了下一档桶，这里对 1024/2048 的 Get 会 panic 或返回容量不足的缓冲。
+	for i := 0; i < 200; i++ {
+		b := Get(2048)
+		if cap(b) < 2048 {
+			t.Fatalf("iteration %d: Get(2048) returned cap=%d (bucket polluted)", i, cap(b))
+		}
+		b.Put()
+	}
 }

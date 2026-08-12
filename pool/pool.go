@@ -100,12 +100,12 @@ func Put(buf []byte) {
 		// Small buffers are also directly discarded.
 		return
 	}
-	
-	// For non-power-of-2 sizes, use GetBiggerClosestN to round up to the next bucket.
-	// This ensures capacity is not wasted and buffers go to the correct bucket.
-	// Examples:
-	//   - size=1536 -> i=11 (bucket for 2048) instead of 10 (bucket for 1024)
-	//   - size=1024 -> i=10 (bucket for 1024)
+	// Only power-of-2 capacities may enter a bucket: Get re-slices pooled
+	// buffers to the requested size, so a non-power-of-2 cap (e.g. grown by
+	// append) stored in the next bucket would panic on a later Get(2^n).
+	if size&(size-1) != 0 {
+		return
+	}
 	i := GetBiggerClosestN(size)
 	if i < minsizePower {
 		i = minsizePower
