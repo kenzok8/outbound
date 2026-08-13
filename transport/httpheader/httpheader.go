@@ -135,7 +135,12 @@ func (c *conn) writeRequestHeader() error {
 		return err
 	}
 	req.Host = c.host
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	// Do not advertise gzip/deflate: the server's compressed response would
+	// make every connection allocate a flate decoder (compress/flate + gzip
+	// Reader per handshake), which shows up as ~4k allocs/10s under
+	// connection-storm workloads (speedtests) and feeds the GC loop. The
+	// handshake response header is tiny; compression saves nothing here.
+	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("User-Agent", defaultUserAgent)
