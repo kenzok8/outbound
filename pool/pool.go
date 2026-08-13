@@ -63,7 +63,13 @@ func Get(size int) PB {
 		if i < minsizePower {
 			i = minsizePower
 		}
-		return pools[i].Get().([]byte)[:size]
+		b := pools[i].Get().([]byte)
+		if cap(b) < size {
+			// Pooled buffer has a smaller-than-bucket capacity (grown by
+			// append and stored by Put): it cannot be re-sliced to size.
+			return make([]byte, size)
+		}
+		return b[:size]
 	}
 	return make([]byte, size)
 }
@@ -80,7 +86,11 @@ func GetMustBigger(size int) PB {
 		if i < minsizePower {
 			i = minsizePower
 		}
-		return pools[i].Get().([]byte)[:size]
+		b := pools[i].Get().([]byte)
+		if cap(b) < size {
+			return make([]byte, size)
+		}
+		return b[:size]
 	}
 	return make([]byte, size)
 }
@@ -100,12 +110,10 @@ func Put(buf []byte) {
 		// Small buffers are also directly discarded.
 		return
 	}
-	// Only power-of-2 capacities may enter a bucket: Get re-slices pooled
-	// buffers to the requested size, so a non-power-of-2 cap (e.g. grown by
-	// append) stored in the next bucket would panic on a later Get(2^n).
-	if size&(size-1) != 0 {
-		return
-	}
+	// Buffers whose cap is not a power of 2 (grown by append) go to the
+	// bucket that fits them. Get guards against them with a cap check and
+	// falls back to a fresh allocation, so a later Get(2^n) can never
+	// re-slice past their capacity.
 	i := GetBiggerClosestN(size)
 	if i < minsizePower {
 		i = minsizePower

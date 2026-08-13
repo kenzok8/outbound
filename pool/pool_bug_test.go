@@ -46,7 +46,30 @@ func TestPool_Get_Bug(t *testing.T) {
 	}
 }
 
-// TestGetMustBiggerBug 测试 GetMustBigger 是否返回足够容量的 buffer
+// TestPutNonPowerOf2Cap verifies that a buffer whose cap was grown by
+// append (non-power-of-2) can be Put back safely: a later Get requesting
+// more than its cap must fall back to a fresh allocation instead of
+// panicking, and a Get that fits must not panic either.
+func TestPutNonPowerOf2Cap(t *testing.T) {
+	grown := Get(1000)          // bucket cap 1024
+	grown = append(grown, make([]byte, 536)...) // cap 1536, non-power-of-2
+	Put(grown)
+
+	// A Get larger than the grown cap must allocate fresh (no panic).
+	big := Get(2048)
+	if cap(big) < 2048 {
+		t.Fatalf("Get(2048) returned cap %d, want >= 2048", cap(big))
+	}
+	Put(big)
+
+	// A Get that fits the grown cap must not panic either.
+	small := Get(1500)
+	if len(small) != 1500 {
+		t.Fatalf("Get(1500) returned len %d", len(small))
+	}
+	Put(small)
+}
+
 func TestGetMustBiggerBug(t *testing.T) {
 	testCases := []struct {
 		size        int
