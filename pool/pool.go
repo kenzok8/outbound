@@ -4,6 +4,7 @@ package pool
 
 import (
 	"math/bits"
+	"sync"
 )
 
 const (
@@ -12,48 +13,18 @@ const (
 	maxsize      = 1 << (num - 1)
 	minsizePower = 6
 	minsize      = 1 << minsizePower
-	// maxPooledPerBucket bounds how many buffers each bucket retains.
-	// 64 x 64KiB = 4MiB worst case for the largest bucket.
-	maxPooledPerBucket = 64
 )
 
-// poolBuckets is a set of bounded channel pools, one per power-of-2 size
-// class. A sync.Pool is cleared on every GC cycle, so under GC pressure
-// every packet/chunk re-allocates its buffer, driving the GC harder (the
-// allocation spiral observed on vmess and hy2 speedtests). Channel pools
-// survive GC and are capped.
-var poolBuckets [num]bucketPool
-
-type bucketPool struct {
-	ch chan []byte
-}
-
-func (p *bucketPool) Get() []byte {
-	select {
-	case b := <-p.ch:
-		return b
-	default:
-		return nil
-	}
-}
-
-func (p *bucketPool) Put(b []byte) {
-	select {
-	case p.ch <- b:
-	default:
-		// pool full: drop the buffer, GC reclaims it
-	}
-}
+var (
+	pools [num]sync.Pool
+)
 
 func init() {
 	for i := minsizePower; i < num; i++ {
 		size := 1 << i
-		ch := make(chan []byte, maxPooledPerBucket)
-		// warm the pool so the first bursts don't all allocate
-		for j := 0; j < maxPooledPerBucket/4; j++ {
-			ch <- make([]byte, size)
+		pools[i].New = func() interface{} {
+			return make([]byte, size)
 		}
-		poolBuckets[i].ch = ch
 	}
 }
 
@@ -92,10 +63,10 @@ func Get(size int) PB {
 		if i < minsizePower {
 			i = minsizePower
 		}
-		b := poolBuckets[i].Get()
-		if b == nil || cap(b) < size {
-			// Pooled buffer missing or smaller than the bucket capacity
-			// (grown by append and stored by Put): allocate fresh.
+		b := pools[i].Get().([]byte)
+		if cap(b) < size {
+			// Pooled buffer has a smaller-than-bucket capacity (grown by
+			// append and stored by Put): it cannot be re-sliced to size.
 			return make([]byte, size)
 		}
 		return b[:size]
@@ -115,8 +86,8 @@ func GetMustBigger(size int) PB {
 		if i < minsizePower {
 			i = minsizePower
 		}
-		b := poolBuckets[i].Get()
-		if b == nil || cap(b) < size {
+		b := pools[i].Get().([]byte)
+		if cap(b) < size {
 			return make([]byte, size)
 		}
 		return b[:size]
@@ -148,6 +119,6 @@ func Put(buf []byte) {
 		i = minsizePower
 	}
 	if i < num {
-		poolBuckets[i].Put(buf)
+		pools[i].Put(buf) // nolint:staticcheck
 	}
 }
