@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"sync"
 	"testing"
 	"time"
 )
@@ -145,6 +144,7 @@ func TestUDPHopPacketConnReadFromReturnsPacketSourceAddr(t *testing.T) {
 		currentAddr: &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443},
 		recvQueue:   make(chan *udpPacket, 1),
 		closeChan:   make(chan struct{}),
+		bufPool:     newHopBufPool(),
 	}
 	conn.recvQueue <- &udpPacket{
 		Buf:  []byte("hello"),
@@ -172,11 +172,7 @@ func TestUDPHopPacketConnRecvLoopDoesNotBlockOnTimeoutWhenQueueFull(t *testing.T
 	conn := &udpHopPacketConn{
 		recvQueue: make(chan *udpPacket, 1),
 		closeChan: make(chan struct{}),
-		bufPool: sync.Pool{
-			New: func() interface{} {
-				return make([]byte, udpBufferSize)
-			},
-		},
+		bufPool:   newHopBufPool(),
 	}
 	conn.recvQueue <- &udpPacket{Buf: []byte("queued"), N: len("queued")}
 

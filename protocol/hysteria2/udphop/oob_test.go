@@ -50,7 +50,7 @@ func (c *oobStubConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int
 // basicConn (per-packet recvfrom, no GSO), which is exactly the regression
 // this optimisation exists to prevent.
 func TestSatisfiesOOBCapablePacketConn(t *testing.T) {
-	conn := &udpHopPacketConn{closeChan: make(chan struct{})}
+	conn := &udpHopPacketConn{closeChan: make(chan struct{}), bufPool: newHopBufPool()}
 	if _, ok := interface{}(conn).(quic.OOBCapablePacketConn); !ok {
 		t.Fatal("udpHopPacketConn no longer satisfies quic.OOBCapablePacketConn")
 	}
@@ -60,7 +60,7 @@ func TestSatisfiesOOBCapablePacketConn(t *testing.T) {
 // ReadBatch (queue-backed) instead of binding a recvmmsg reader to a single
 // hop's file descriptor.
 func TestSatisfiesBatchConn(t *testing.T) {
-	conn := &udpHopPacketConn{closeChan: make(chan struct{})}
+	conn := &udpHopPacketConn{closeChan: make(chan struct{}), bufPool: newHopBufPool()}
 	type batchConn interface {
 		ReadBatch([]ipv4.Message, int) (int, error)
 	}
@@ -234,6 +234,7 @@ func TestReadMsgUDPReturnsQueuedPacket(t *testing.T) {
 		currentAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
 		recvQueue:   make(chan *udpPacket, 1),
 		closeChan:   make(chan struct{}),
+		bufPool:     newHopBufPool(),
 	}
 	conn.recvQueue <- &udpPacket{Buf: []byte("quic"), N: 4, Addr: src}
 
@@ -267,8 +268,8 @@ func bytesEqual(a, b []byte) bool {
 
 // testBufPool mirrors the production bufPool so ReadBatch can recycle buffers
 // when draining queued packets.
-func testBufPool() sync.Pool {
-	return sync.Pool{New: func() interface{} { return make([]byte, udpBufferSize) }}
+func testBufPool() *hopBufPool {
+	return newHopBufPool()
 }
 
 // TestReadBatchRecyclesBuffersExactlyOnce guards the buffer ownership
@@ -277,24 +278,23 @@ func testBufPool() sync.Pool {
 // Put leaks the buffer (the pool keeps allocating), so refilling the queue
 // after a full drain must hit the pool with zero new allocations.
 func TestReadBatchRecyclesBuffersExactlyOnce(t *testing.T) {
-	var newCalls int
 	conn := &udpHopPacketConn{
 		currentAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
 		recvQueue:   make(chan *udpPacket, 16),
 		closeChan:   make(chan struct{}),
-		bufPool: sync.Pool{New: func() interface{} {
-			newCalls++
-			return make([]byte, udpBufferSize)
-		}},
+		bufPool:     newHopBufPool(),
 	}
+	initialNewCalls := conn.bufPool.newCount.Load()
 
-	// Batch 1: recvLoop transfers ownership of 16 fresh pool buffers to the queue.
+	// Batch 1: recvLoop transfers ownership of 16 fresh pool buffers to the
+	// queue. The pool is pre-warmed with recvBatchSize buffers, so only the
+	// remaining n-recvBatchSize Get calls allocate.
 	const n = 16
 	for i := 0; i < n; i++ {
-		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get().([]byte), N: 8, Addr: conn.currentAddr}
+		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get(), N: 8, Addr: conn.currentAddr}
 	}
-	if newCalls != n {
-		t.Fatalf("seed allocations = %d, want %d", newCalls, n)
+	if got, want := conn.bufPool.newCount.Load()-initialNewCalls, int64(n-recvBatchSize); got != want {
+		t.Fatalf("seed allocations = %d, want %d", got, want)
 	}
 
 	// Drain batch 1 through ReadBatch; every buffer must be recycled.
@@ -316,10 +316,10 @@ func TestReadBatchRecyclesBuffersExactlyOnce(t *testing.T) {
 	// Batch 2: if every buffer was recycled exactly once, refilling the queue
 	// hits the pool and allocates nothing.
 	for i := 0; i < n; i++ {
-		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get().([]byte), N: 8, Addr: conn.currentAddr}
+		conn.recvQueue <- &udpPacket{Buf: conn.bufPool.Get(), N: 8, Addr: conn.currentAddr}
 	}
-	if newCalls != n {
+	if got, want := conn.bufPool.newCount.Load()-initialNewCalls, int64(n-recvBatchSize); got != want {
 		t.Fatalf("pool reallocated %d buffers after a full recycle (want 0); "+
-			"a Put path was lost (%d total allocations)", newCalls-n, newCalls)
+			"a Put path was lost (%d total allocations)", got-(n-recvBatchSize), got)
 	}
 }

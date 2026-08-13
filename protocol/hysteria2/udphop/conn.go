@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -61,7 +62,41 @@ type udpHopPacketConn struct {
 	closeChan chan struct{}
 	closed    bool
 
-	bufPool sync.Pool
+	bufPool *hopBufPool
+}
+
+// hopBufPool recycles the udpBufferSize receive buffers. sync.Pool is cleared
+// on every GC cycle, so under GC pressure every udphop datagram re-allocates
+// its 2KB buffer, feeding the GC loop. A bounded channel pool survives GC.
+type hopBufPool struct {
+	ch       chan []byte
+	newCount atomic.Int64 // number of pool misses (buffer allocations)
+}
+
+func newHopBufPool() *hopBufPool {
+	p := &hopBufPool{ch: make(chan []byte, recvBatchSize*4)}
+	for i := 0; i < recvBatchSize; i++ {
+		p.ch <- make([]byte, udpBufferSize)
+	}
+	return p
+}
+
+func (p *hopBufPool) Get() []byte {
+	select {
+	case b := <-p.ch:
+		return b
+	default:
+		p.newCount.Add(1)
+		return make([]byte, udpBufferSize)
+	}
+}
+
+func (p *hopBufPool) Put(b []byte) {
+	select {
+	case p.ch <- b:
+	default:
+		// pool full: drop the buffer, GC reclaims it
+	}
 }
 
 type udpPacket struct {
@@ -136,11 +171,7 @@ func NewUDPHopPacketConnContext(ctx context.Context, addr *UDPHopAddr, hopInterv
 		currentConn: curConn,
 		recvQueue:   make(chan *udpPacket, packetQueueSize),
 		closeChan:   make(chan struct{}),
-		bufPool: sync.Pool{
-			New: func() interface{} {
-				return make([]byte, udpBufferSize)
-			},
-		},
+		bufPool:     newHopBufPool(),
 	}
 	go hConn.recvLoop(curConn)
 	go hConn.hopLoop()
@@ -168,7 +199,7 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 func (u *udpHopPacketConn) recvLoopBatch(pconn *ipv4.PacketConn) {
 	msgs := make([]ipv4.Message, recvBatchSize)
 	for i := range msgs {
-		msgs[i].Buffers = [][]byte{u.bufPool.Get().([]byte)}
+		msgs[i].Buffers = [][]byte{u.bufPool.Get()}
 	}
 	defer func() {
 		for i := range msgs {
@@ -196,7 +227,7 @@ func (u *udpHopPacketConn) recvLoopBatch(pconn *ipv4.PacketConn) {
 			case u.recvQueue <- &udpPacket{buf, msg.N, msg.Addr, nil}:
 				// Ownership of buf transfers to the consumer; refill the slot
 				// so the next ReadBatch has somewhere to land.
-				msg.Buffers[0] = u.bufPool.Get().([]byte)
+				msg.Buffers[0] = u.bufPool.Get()
 			default:
 				// Queue full: drop the packet and reuse the same buffer for
 				// the next batch (mirrors the single-path backpressure policy).
@@ -209,7 +240,7 @@ func (u *udpHopPacketConn) recvLoopBatch(pconn *ipv4.PacketConn) {
 // transport does not expose a raw socket fd (e.g. proxied UDP relays).
 func (u *udpHopPacketConn) recvLoopSingle(conn net.PacketConn) {
 	for {
-		buf := u.bufPool.Get().([]byte)
+		buf := u.bufPool.Get()
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
 			u.bufPool.Put(buf) // nolint:staticcheck
