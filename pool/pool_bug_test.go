@@ -51,7 +51,7 @@ func TestPool_Get_Bug(t *testing.T) {
 // more than its cap must fall back to a fresh allocation instead of
 // panicking, and a Get that fits must not panic either.
 func TestPutNonPowerOf2Cap(t *testing.T) {
-	grown := Get(1000)          // bucket cap 1024
+	grown := Get(1000)                          // bucket cap 1024
 	grown = append(grown, make([]byte, 536)...) // cap 1536, non-power-of-2
 	Put(grown)
 
@@ -112,7 +112,10 @@ func TestPoolInitialization(t *testing.T) {
 
 	// 测试每个 bucket
 	for i := minsizePower; i < num; i++ {
-		buf := pools[i].Get().([]byte)
+		buf := poolBuckets[i].Get()
+		if buf == nil {
+			t.Fatalf("Bucket %d: pool unexpectedly empty (pre-warmed)", i)
+		}
 		actualCap := cap(buf)
 		expectedCap := 1 << i
 
@@ -124,6 +127,7 @@ func TestPoolInitialization(t *testing.T) {
 		} else {
 			fmt.Printf(" ✅\n")
 		}
+		poolBuckets[i].Put(buf)
 	}
 	fmt.Println()
 }
@@ -133,7 +137,7 @@ func TestPoolInitialization(t *testing.T) {
 // 重新切片到桶大小，导致 slice bounds panic。
 func TestPool_PutNonPowerOfTwoCapDoesNotPolluteBucket(t *testing.T) {
 	// 模拟 append 增长产生的非 2 幂 cap（如 socks5 认证分支撑破 512 → ~832）。
-	polluter := make([]byte, 512, 512)
+	polluter := make([]byte, 512)
 	polluter = append(polluter, make([]byte, 300)...)
 	if cap(polluter)&(cap(polluter)-1) == 0 {
 		t.Fatalf("test setup: expected non-power-of-2 cap, got %d", cap(polluter))
