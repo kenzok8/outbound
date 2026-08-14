@@ -58,12 +58,11 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	largePayload := make([]byte, redundantSendThreshold+1) // above redundancy threshold → single send
 	for range 2 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := u.WriteTo(largePayload, "127.0.0.1:443"); err != nil {
+			if _, err := u.WriteTo([]byte("payload"), "127.0.0.1:443"); err != nil {
 				t.Errorf("WriteTo returned error: %v", err)
 			}
 		}()
@@ -388,42 +387,4 @@ func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
 	}
 
 	m.closeCleanup()
-}
-
-func TestUDPConnRedundantSend(t *testing.T) {
-	// Small packets (≤ redundantSendThreshold) should trigger redundant sends.
-	// Large packets should not.
-	tests := []struct {
-		name      string
-		payloadSz int
-		wantCalls int // 1 + redundantSendCopies for small, 1 for large
-	}{
-		{"small=128", 128, 1 + redundantSendCopies},
-		{"threshold=256", redundantSendThreshold, 1 + redundantSendCopies},
-		{"large=257", redundantSendThreshold + 1, 1},
-		{"large=1024", 1024, 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var calls atomic.Int32
-			u := &udpConn{
-				ID:        1,
-				ReceiveCh: make(chan *protocol.UDPMessage, 1),
-				SendBuf:   make([]byte, protocol.MaxUDPSize),
-				SendFunc: func(buf []byte, msg *protocol.UDPMessage) error {
-					calls.Add(1)
-					return nil
-				},
-				CloseFunc: func() {},
-				target:    "127.0.0.1:443",
-			}
-			payload := make([]byte, tt.payloadSz)
-			if _, err := u.WriteTo(payload, "127.0.0.1:443"); err != nil {
-				t.Fatalf("WriteTo error: %v", err)
-			}
-			if got := calls.Load(); int(got) != tt.wantCalls {
-				t.Fatalf("SendFunc calls: got %d want %d", got, tt.wantCalls)
-			}
-		})
-	}
 }

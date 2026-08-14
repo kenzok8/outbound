@@ -28,21 +28,6 @@ const (
 	// instead of 16KB. QUIC flow control (window-update suppression) provides
 	// backpressure beyond the queue, so no packets are lost.
 	udpMessageChanSize = 128
-
-	// redundantSendThreshold is the maximum payload size (in bytes) for which
-	// the sender will immediately fire extra copies into the QUIC datagram
-	// queue. Only small packets—game heartbeats, NAT keepalives, DNS—qualify.
-	// Bulk UDP transfers (file download, video) are larger and excluded.
-	redundantSendThreshold = 256
-
-	// redundantSendCopies is the number of *additional* copies sent after the
-	// original. Total transmissions = redundantSendCopies + 1.
-	// At 2 extra copies (3 total), even a 20% underlying loss rate has only
-	// a 0.8% chance of losing all three — vs 20% for a single send.
-	// Each copy occupies a separate slot in the QUIC datagram queue, so it
-	// lands in a different QUIC packet sent at a slightly different time,
-	// decorrelating it from burst loss on the underlying path.
-	redundantSendCopies = 2
 )
 
 // sendBufPool recycles the per-session MaxUDPSize send buffer. Sessions are
@@ -245,17 +230,6 @@ func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 		}
 		return len(b), nil
 	} else {
-		// Redundant send for small packets: fire extra copies into the datagram
-		// queue so they land in separate QUIC packets, decorrelating them from
-		// burst loss on the underlying path. QUIC DATAGRAM frames are not
-		// retransmitted (RFC 9221), so this application-layer redundancy is the
-		// only way to improve delivery probability for latency-sensitive small
-		// packets like game heartbeats. Only applies to unfragmented sends.
-		if len(b) <= redundantSendThreshold {
-			for i := 0; i < redundantSendCopies; i++ {
-				_ = u.SendFunc(u.SendBuf, msg)
-			}
-		}
 		return len(b), err
 	}
 }
