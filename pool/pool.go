@@ -16,6 +16,20 @@ const (
 )
 
 var (
+	// pools is the general-purpose byte-buffer pool, bucketed by power-of-2
+	// size. It uses sync.Pool deliberately: it serves many protocols and call
+	// sites (ciphers, anytls, juicity, bufio, direct), so per-bucket churn is
+	// spread out, and sync.Pool's lock-free per-P fast path wins on throughput.
+	// sync.Pool is cleared each GC cycle; that is acceptable here because these
+	// buffers are short-lived and the aggregate allocation rate is bounded by
+	// traffic, not by a single hot per-packet loop.
+	//
+	// The genuinely hot, per-packet serialization paths that would feed a GC
+	// spiral under sync.Pool (tuic/juicity framing, hy2 UDP hop) use dedicated
+	// GC-stable pools instead — see pool/bytes_buffer.go (LIFO stack) and
+	// protocol/hysteria2/udphop/conn.go hopBufPool (bounded channel). Do not
+	// "unify" those onto sync.Pool without a benchmark showing the GC-clear
+	// behavior is harmless under load.
 	pools [num]sync.Pool
 )
 
