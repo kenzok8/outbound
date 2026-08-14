@@ -42,6 +42,16 @@ func (c *recordingPacketConn) WriteTo(p []byte, addr string) (int, error) {
 	return len(p), nil
 }
 
+func (c *recordingPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
+	c.mu.Lock()
+	for _, it := range items {
+		clone := append([]byte(nil), it.Data...)
+		c.writes = append(c.writes, recordedPacketWrite{addr: it.Addr, data: clone})
+	}
+	c.mu.Unlock()
+	return len(items), nil
+}
+
 func (c *recordingPacketConn) Close() error {
 	c.closeOnce.Do(func() {
 		if c.closeCh != nil {
@@ -161,7 +171,6 @@ func TestPktConnTransportDoneClosesWhenControlConnEnds(t *testing.T) {
 	recorder := &recordingPacketConn{closeCh: make(chan struct{})}
 	ctrlConn := newScriptedCtrlConn()
 	pc := NewPktConn(recorder, "127.0.0.1:1080", "1.1.1.1:53", ctrlConn)
-
 	lifecycle, ok := any(pc).(netproxy.TransportLifecycle)
 	if !ok {
 		t.Fatalf("expected SOCKS5 packet conn to expose TransportDone, got %T", pc)
@@ -182,5 +191,111 @@ func TestPktConnTransportDoneClosesWhenControlConnEnds(t *testing.T) {
 	case <-recorder.closeCh:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for SOCKS5 control-channel shutdown to close packet conn")
+	}
+}
+
+// TestPktConnWriteBatch verifies that WriteBatch encapsulates every datagram
+// with the SOCKS5 UDP header (RSV FRAG ATYP DST.ADDR DST.PORT) and forwards
+// the whole batch to the underlying batched writer.
+func TestPktConnWriteBatch(t *testing.T) {
+	recorder := &recordingPacketConn{}
+	ctrlConn := newScriptedCtrlConn()
+	pc := NewPktConn(recorder, "127.0.0.1:1080", "1.1.1.1:53", ctrlConn)
+
+	items := []netproxy.BatchItem{
+		{Data: []byte("hello"), Addr: "10.0.0.1:53"},
+		{Data: []byte("world"), Addr: "[2001:db8::1]:443"},
+	}
+	n, err := pc.WriteBatch(items)
+	if err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("unexpected n: got %d want 2", n)
+	}
+
+	recorder.mu.Lock()
+	writes := recorder.writes
+	recorder.mu.Unlock()
+	if len(writes) != 2 {
+		t.Fatalf("unexpected write count: got %d want 2", len(writes))
+	}
+	for i, write := range writes {
+		if write.addr != "127.0.0.1:1080" {
+			t.Fatalf("write #%d: unexpected proxy addr %q", i, write.addr)
+		}
+		if len(write.data) < 4 || write.data[0] != 0 || write.data[1] != 0 || write.data[2] != 0 {
+			t.Fatalf("write #%d: bad socks5 header %v", i, write.data)
+		}
+		addr := socks.SplitAddr(write.data[3:])
+		if addr == nil {
+			t.Fatalf("write #%d: failed to parse encoded target address", i)
+		}
+		wantPayloads := [][]byte{[]byte("hello"), []byte("world")}
+		payload := string(write.data[3+len(addr):])
+		if payload != string(wantPayloads[i]) {
+			t.Fatalf("write #%d: payload mismatch: got %q want %q", i, payload, wantPayloads[i])
+		}
+		if addr.String() != items[i].Addr {
+			t.Fatalf("write #%d: target mismatch: got %q want %q", i, addr.String(), items[i].Addr)
+		}
+	}
+}
+
+// TestPktConnWriteBatchFallback verifies per-item synchronous fallback when
+// the underlying transport has no batched writer. nonBatchPacketConn wraps a
+// recordingPacketConn but deliberately does not promote WriteBatch, so it
+// must NOT satisfy netproxy.PacketBatchWriter.
+type nonBatchPacketConn struct {
+	inner *recordingPacketConn
+}
+
+func (c *nonBatchPacketConn) Read(p []byte) (int, error)  { return c.inner.Read(p) }
+func (c *nonBatchPacketConn) Write(p []byte) (int, error) { return c.inner.Write(p) }
+func (c *nonBatchPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
+	return c.inner.ReadFrom(p)
+}
+func (c *nonBatchPacketConn) WriteTo(p []byte, addr string) (int, error) {
+	return c.inner.WriteTo(p, addr)
+}
+func (c *nonBatchPacketConn) Close() error                       { return c.inner.Close() }
+func (c *nonBatchPacketConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }
+func (c *nonBatchPacketConn) SetReadDeadline(t time.Time) error  { return c.inner.SetReadDeadline(t) }
+func (c *nonBatchPacketConn) SetWriteDeadline(t time.Time) error { return c.inner.SetWriteDeadline(t) }
+
+func TestPktConnWriteBatchFallback(t *testing.T) {
+	recorder := &nonBatchPacketConn{inner: &recordingPacketConn{}}
+	if _, ok := any(recorder).(netproxy.PacketBatchWriter); ok {
+		t.Fatal("test fixture must not implement PacketBatchWriter")
+	}
+	ctrlConn := newScriptedCtrlConn()
+	pc := NewPktConn(recorder, "127.0.0.1:1080", "1.1.1.1:53", ctrlConn)
+
+	items := []netproxy.BatchItem{
+		{Data: []byte("one"), Addr: "10.0.0.1:53"},
+		{Data: []byte("two"), Addr: "10.0.0.2:53"},
+	}
+	n, err := pc.WriteBatch(items)
+	if err != nil {
+		t.Fatalf("WriteBatch fallback: %v", err)
+	}
+	if n != 6 {
+		t.Fatalf("unexpected n: got %d want 6 (3+3 payload bytes)", n)
+	}
+	recorder.inner.mu.Lock()
+	writes := recorder.inner.writes
+	recorder.inner.mu.Unlock()
+	if len(writes) != 2 {
+		t.Fatalf("unexpected write count: got %d want 2", len(writes))
+	}
+	for i, write := range writes {
+		addr := socks.SplitAddr(write.data[3:])
+		if addr == nil || addr.String() != items[i].Addr {
+			t.Fatalf("write #%d: target mismatch", i)
+		}
+		payload := string(write.data[3+len(addr):])
+		if payload != string(items[i].Data) {
+			t.Fatalf("write #%d: payload mismatch: got %q want %q", i, payload, items[i].Data)
+		}
 	}
 }

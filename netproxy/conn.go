@@ -38,6 +38,22 @@ type PacketConn interface {
 	SetWriteDeadline(t time.Time) error
 }
 
+// BatchItem is one datagram for a batched packet write. Data must remain
+// valid until the WriteBatch call returns.
+type BatchItem struct {
+	Data []byte
+	Addr string
+}
+
+// PacketBatchWriter is an optional extension of PacketConn. Transports that
+// can amortize per-datagram syscalls (e.g. sendmmsg on a direct UDP socket)
+// implement it so hot paths can flush several datagrams in a single syscall.
+// Implementations must accept items in order; on error the whole batch is
+// reported failed (partial success is reported through n).
+type PacketBatchWriter interface {
+	WriteBatch(items []BatchItem) (n int, err error)
+}
+
 // ReceivedPacket is one complete datagram delivered by an optional
 // transport-owned packet receiver. The receiver owns the packet after a
 // handler accepts it and must call Release exactly once.

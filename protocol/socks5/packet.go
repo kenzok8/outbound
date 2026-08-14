@@ -169,6 +169,46 @@ func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
 	return 0, err
 }
 
+// WriteBatch implements netproxy.PacketBatchWriter: encapsulate every
+// datagram with its SOCKS5 UDP header (RSV FRAG ATYP DST.ADDR DST.PORT) and
+// hand the whole batch to the underlying transport's batched writer in one
+// call. The encapsulation copies per item exactly like WriteTo; only the
+// syscall is amortized.
+func (pc *PktConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
+	bw, ok := pc.PacketConn.(netproxy.PacketBatchWriter)
+	if !ok {
+		// Underlying transport has no batched writer: fall back to per-item
+		// synchronous writes, preserving ordering.
+		var sent int
+		for _, it := range items {
+			n, err := pc.WriteTo(it.Data, it.Addr)
+			sent += n
+			if err != nil {
+				return sent, err
+			}
+		}
+		return sent, nil
+	}
+	enc := make([]netproxy.BatchItem, len(items))
+	for i, it := range items {
+		target, err := pc.targetAddr(it.Addr)
+		if err != nil {
+			return i, fmt.Errorf("invalid addr: %w", err)
+		}
+		tgtLen := len(target)
+		buf := pool.Get(3 + tgtLen + len(it.Data))
+		copy(buf, []byte{0, 0, 0})
+		copy(buf[3:], target)
+		copy(buf[3+tgtLen:], it.Data)
+		enc[i] = netproxy.BatchItem{Data: buf, Addr: pc.proxyAddr}
+	}
+	n, err := bw.WriteBatch(enc)
+	for _, it := range enc {
+		pool.Put(it.Data)
+	}
+	return n, err
+}
+
 func (pc *PktConn) targetAddr(addr string) (socks.Addr, error) {
 	if cached, ok := pc.addrCache.Load(addr); ok {
 		return cached, nil

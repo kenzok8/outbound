@@ -7,7 +7,11 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/netproxy"
 )
 
 var resolveUDPAddr = common.ResolveUDPAddr
@@ -81,6 +85,33 @@ func (c *directPacketConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) 
 	}
 
 	return c.UDPConn.WriteToUDP(b, addr)
+}
+
+// WriteBatch implements netproxy.PacketBatchWriter: several datagrams in one
+// sendmmsg syscall. On a connected (non-FullCone) socket every datagram goes
+// to the connected peer (Addr left nil); on a FullCone socket each item
+// carries its own destination. Data slices must stay valid until return.
+func (c *directPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	msgs := make([]ipv6.Message, len(items))
+	for i, it := range items {
+		var addr net.Addr
+		if c.FullCone {
+			target, err := c.writeTargetAddrPort(it.Addr)
+			if err != nil {
+				return i, err
+			}
+			addr = net.UDPAddrFromAddrPort(target)
+		}
+		msgs[i] = ipv6.Message{Buffers: [][]byte{it.Data}, Addr: addr}
+	}
+	la := c.UDPConn.LocalAddr()
+	if ua, ok := la.(*net.UDPAddr); ok && ua.IP.To4() != nil {
+		return ipv4.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
+	}
+	return ipv6.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
 }
 
 func (c *directPacketConn) resolveTarget() error {
