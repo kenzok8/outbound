@@ -87,6 +87,26 @@ func (c *directPacketConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) 
 	return c.UDPConn.WriteToUDP(b, addr)
 }
 
+// directBatchScratch holds reusable per-batch scratch storage for
+// WriteBatch. Pooled because hot relays flush many batches per second and
+// the msgs array plus the per-message iovec slice would otherwise be two
+// heap allocations per datagram (the iovec literal escapes).
+type directBatchScratch struct {
+	msgs []ipv6.Message
+	iovs [][]byte
+}
+
+var directBatchScratchPool = sync.Pool{
+	New: func() any {
+		return &directBatchScratch{
+			msgs: make([]ipv6.Message, udpBatchScratchCapacity),
+			iovs: make([][]byte, udpBatchScratchCapacity),
+		}
+	},
+}
+
+const udpBatchScratchCapacity = 32
+
 // WriteBatch implements netproxy.PacketBatchWriter: several datagrams in one
 // sendmmsg syscall. On a connected (non-FullCone) socket every datagram goes
 // to the connected peer (Addr left nil); on a FullCone socket each item
@@ -95,6 +115,35 @@ func (c *directPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
+	if len(items) > udpBatchScratchCapacity {
+		// Oversized batch: allocate directly (rare).
+		return c.writeBatchAlloc(items)
+	}
+	scratch := directBatchScratchPool.Get().(*directBatchScratch)
+	defer directBatchScratchPool.Put(scratch)
+	msgs := scratch.msgs[:len(items)]
+	iovs := scratch.iovs[:len(items)]
+	for i, it := range items {
+		var addr net.Addr
+		if c.FullCone {
+			target, err := c.writeTargetAddrPort(it.Addr)
+			if err != nil {
+				return i, err
+			}
+			addr = net.UDPAddrFromAddrPort(target)
+		}
+		iovs[i] = it.Data
+		// Sub-slicing the pooled iovs array avoids the escaping literal.
+		msgs[i] = ipv6.Message{Buffers: iovs[i : i+1], Addr: addr}
+	}
+	la := c.UDPConn.LocalAddr()
+	if ua, ok := la.(*net.UDPAddr); ok && ua.IP.To4() != nil {
+		return ipv4.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
+	}
+	return ipv6.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
+}
+
+func (c *directPacketConn) writeBatchAlloc(items []netproxy.BatchItem) (int, error) {
 	msgs := make([]ipv6.Message, len(items))
 	for i, it := range items {
 		var addr net.Addr
