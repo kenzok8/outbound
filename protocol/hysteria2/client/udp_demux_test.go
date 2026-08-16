@@ -29,6 +29,112 @@ func (io *chanUDPIO) ReceiveMessage() (*protocol.UDPMessage, error) {
 
 func (io *chanUDPIO) SendMessage([]byte, *protocol.UDPMessage) error { return nil }
 
+// TestUDPSessionManagerDemuxPreservesPerSessionOrder is the ordering
+// counterpart of the parallel-demux test above: datagrams of one session
+// must be delivered to the receiver in arrival order. Reordered delivery
+// makes the inner protocol (QUIC/H3, games) see spurious loss: cwnd
+// collapse and periodic throughput dips. The per-message payload carries a
+// per-session sequence number; the receiver records the delivery order and
+// the test asserts it is strictly increasing for every session.
+func TestUDPSessionManagerDemuxPreservesPerSessionOrder(t *testing.T) {
+	const numSessions = 4
+	const msgsPerSession = 2000
+
+	io := &chanUDPIO{
+		msgs: make(chan *protocol.UDPMessage, 256),
+		dead: make(chan struct{}),
+	}
+	m := newUDPSessionManager(io)
+
+	conns := make([]*udpConn, numSessions)
+	var mu sync.Mutex
+	delivered := make([][]int, numSessions)
+	for i := range numSessions {
+		c, err := m.NewUDP("192.0.2.1:443")
+		if err != nil {
+			t.Fatalf("NewUDP #%d: %v", i, err)
+		}
+		uc := c.(*udpConn)
+		conns[i] = uc
+		idx := i
+		_, ok := uc.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+			j := int(packet.Data[1]) | int(packet.Data[2])<<8
+			mu.Lock()
+			delivered[idx] = append(delivered[idx], j)
+			mu.Unlock()
+			packet.Release()
+			return true
+		})
+		if !ok {
+			t.Fatalf("RegisterPacketReceiver #%d failed", i)
+		}
+	}
+
+	// Concurrent senders interleaving sessions, mirroring a saturated
+	// multi-session tunnel where demux goroutines race.
+	var wg sync.WaitGroup
+	wg.Add(numSessions)
+	for i := range numSessions {
+		go func(idx int) {
+			defer wg.Done()
+			for j := range msgsPerSession {
+				io.msgs <- &protocol.UDPMessage{
+					SessionID: conns[idx].ID,
+					PacketID:  0,
+					FragID:    0,
+					FragCount: 1,
+					Addr:      "192.0.2.1:443",
+					Data:      []byte{byte(idx), byte(j), byte(j >> 8)},
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		mu.Lock()
+		done := true
+		for i := range numSessions {
+			if len(delivered[i]) != msgsPerSession {
+				done = false
+				break
+			}
+		}
+		mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			for i := range numSessions {
+				t.Logf("session %d received %d/%d", i, len(delivered[i]), msgsPerSession)
+			}
+			t.Fatal("messages were not fully delivered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, seq := range delivered {
+		if len(seq) != msgsPerSession {
+			t.Fatalf("session %d: delivered %d, want %d", i, len(seq), msgsPerSession)
+		}
+		for pos, j := range seq {
+			if j != pos {
+				t.Fatalf("session %d: delivery %d carries sequence %d (out of order); first inversion in the first %d deliveries", i, pos, j, pos)
+			}
+		}
+	}
+
+	close(io.dead)
+	select {
+	case <-m.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manager done channel was not closed")
+	}
+}
+
 // TestUDPSessionManagerParallelDemux 回归测试：多个 run() goroutine 并发
 // 消费 datagram 时，各 session 的消息仍被完整、正确地分发。
 func TestUDPSessionManagerParallelDemux(t *testing.T) {

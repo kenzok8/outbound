@@ -72,7 +72,7 @@ func (c *clientImpl) closeExistingLocked() {
 	if c.pktConn != nil {
 		_ = c.pktConn.Close()
 	}
-	// udpSM.run() goroutine will exit when the QUIC connection is closed and
+	// udpSM demux goroutines will exit when the QUIC connection is closed and
 	// ReceiveDatagram returns an error.  Nil-out the pointer so callers see
 	// UDP as disabled until the next connect() succeeds.
 	c.udpSM = nil

@@ -285,6 +285,11 @@ type udpSessionManager struct {
 	m      map[uint32]*udpConn
 	nextID uint32
 
+	// workers are session-affinity demux queues indexed by SessionID. The
+	// single router (routeDemux) dispatches into them; each demuxWorker
+	// drains its queue in order.
+	workers []chan *protocol.UDPMessage
+
 	closed    bool
 	draining  bool
 	onIdle    func()
@@ -292,11 +297,17 @@ type udpSessionManager struct {
 	closeOnce sync.Once
 }
 
-// maxDemuxGoroutines caps how many receive goroutines may drain the shared
-// datagram queue. Every goroutine parks on Receive most of the time, so the
-// cap only guards against pathological GOMAXPROCS values (e.g. 64-core
-// boxes); a handful of goroutines already removes the single-core ceiling.
-const maxDemuxGoroutines = 8
+// maxDemuxWorkers caps how many session-affinity workers drain dispatched
+// datagrams. Each worker owns a disjoint set of sessions (by SessionID), so
+// per-session processing stays strictly ordered while consumer work still
+// parallelizes across sessions.
+const maxDemuxWorkers = 8
+
+// demuxWorkerQueueLen sizes the per-worker dispatch queues. Bounded
+// smoothing only: under overload the router blocks, pushing backpressure
+// to the transport's own bounded receive queue, which is where the drop
+// policy belongs (a single, well-sized drop point).
+const demuxWorkerQueueLen = 256
 
 func newUDPSessionManager(io udpIO) *udpSessionManager {
 	m := &udpSessionManager{
@@ -305,29 +316,82 @@ func newUDPSessionManager(io udpIO) *udpSessionManager {
 		nextID: 1,
 		done:   make(chan struct{}),
 	}
-	// Parallel demux: a single run() goroutine caps aggregate packet rate at
-	// one core (parse + session lookup + defrag + consumer callback per
-	// datagram). quic-go's datagramQueue.Receive is safe for concurrent use,
-	// so run one loop per CPU (capped) and let consumers of different
-	// sessions progress in parallel.
 	n := runtime.GOMAXPROCS(0)
-	if n > maxDemuxGoroutines {
-		n = maxDemuxGoroutines
+	if n > maxDemuxWorkers {
+		n = maxDemuxWorkers
 	}
-	for range n {
-		go func() { _ = m.run() }()
+	if n < 1 {
+		n = 1
+	}
+	m.workers = make([]chan *protocol.UDPMessage, n)
+	for i := range m.workers {
+		m.workers[i] = make(chan *protocol.UDPMessage, demuxWorkerQueueLen)
+	}
+	// Order-preserving parallel demux. A single router goroutine is the
+	// only receiver on the shared datagram queue, so dispatch order equals
+	// arrival order; each datagram then goes to the worker owning its
+	// session, which processes it (defrag + delivery) synchronously. The
+	// previous design popped the queue from multiple goroutines: pop order
+	// is not processing order, so consecutive datagrams of one session
+	// could be delivered interleaved — the inner protocol (QUIC/H3) then
+	// sees spurious loss, halves its congestion window, and throughput
+	// collapses periodically. Per-session serialization is also required
+	// by the receiver callback itself, which runs outside receiveMu.
+	go m.routeDemux()
+	for i := range m.workers {
+		go m.demuxWorker(i)
 	}
 	return m
 }
 
-func (m *udpSessionManager) run() error {
+// routeDemux pops datagrams from the shared transport queue and hands each
+// to the worker owning its session. It must remain the only ReceiveMessage
+// caller: a second concurrent popper would reintroduce per-session
+// reordering.
+func (m *udpSessionManager) routeDemux() {
 	defer m.closeOnce.Do(m.closeCleanup)
 	for {
 		msg, err := m.io.ReceiveMessage()
 		if err != nil {
-			return err
+			return
 		}
-		m.feed(msg)
+		ch := m.workers[msg.SessionID%uint32(len(m.workers))]
+		// Blocking dispatch: when a worker falls behind, backpressure
+		// propagates to the transport's bounded receive queue, which owns
+		// the overload drop policy. Dropping here instead would add a
+		// second, less well-sized drop point that fires on bursts the
+		// system could have processed.
+		ch <- msg
+	}
+}
+
+// demuxWorker drains its session-affinity queue in FIFO order. All work for
+// one message (session recheck, defrag, receiver callback) happens inline,
+// so per-session delivery order is exactly the dispatch order.
+func (m *udpSessionManager) demuxWorker(index int) {
+	ch := m.workers[index]
+	for {
+		select {
+		case msg := <-ch:
+			m.feed(msg)
+		case <-m.done:
+			// Transport is gone: return still-queued buffers to the
+			// pool instead of leaving them for the GC.
+			for {
+				select {
+				case msg := <-ch:
+					releaseUDPMessage(msg)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func releaseUDPMessage(msg *protocol.UDPMessage) {
+	if msg != nil && msg.Release != nil {
+		msg.Release()
 	}
 }
 
