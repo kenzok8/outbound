@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/frag"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
@@ -387,4 +388,202 @@ func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
 	}
 
 	m.closeCleanup()
+}
+
+func TestUDPConnCloseReturnsSendBufAndRejectsWrite(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.1:443")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	if u.SendBuf == nil {
+		t.Fatal("expected a pooled send buffer")
+	}
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if u.SendBuf != nil {
+		t.Fatal("SendBuf must be returned to the pool and nilled")
+	}
+	if _, err := u.WriteTo([]byte("late"), "192.0.2.1:443"); err == nil {
+		t.Fatal("WriteTo after Close must fail")
+	} else if _, ok := err.(coreErrs.ClosedError); !ok {
+		t.Fatalf("WriteTo after Close error = %T (%v), want ClosedError", err, err)
+	}
+}
+
+func TestUDPConnCloseDrainsQueuedMessages(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.2:443")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+
+	var released atomic.Int32
+	queued := &protocol.UDPMessage{
+		SessionID: u.ID,
+		FragCount: 1,
+		Addr:      "192.0.2.2:443",
+		Data:      []byte("queued"),
+		Release:   func() { released.Add(1) },
+	}
+	u.ReceiveCh <- queued
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if got := released.Load(); got != 1 {
+		t.Fatalf("queued message Release calls = %d, want 1", got)
+	}
+	if _, ok := <-u.ReceiveCh; ok {
+		t.Fatal("ReceiveCh must be closed after Close")
+	}
+}
+
+func TestUDPSessionManagerQueueIfNoReceiverReleasesOnClosed(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.3:443")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	if err := u.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var released atomic.Int32
+	late := &protocol.UDPMessage{
+		SessionID: u.ID,
+		FragCount: 1,
+		Addr:      "192.0.2.3:443",
+		Data:      []byte("late"),
+		Release:   func() { released.Add(1) },
+	}
+	if !u.queueIfNoReceiver(late) {
+		t.Fatal("queueIfNoReceiver on a closed session must claim the message")
+	}
+	if got := released.Load(); got != 1 {
+		t.Fatalf("closed-session Release calls = %d, want 1", got)
+	}
+}
+
+func TestUDPConnRegisterPacketReceiverPreservesFIFOWithFeed(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.4:443")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	defer u.Close()
+
+	u.ReceiveCh <- &protocol.UDPMessage{
+		SessionID: u.ID,
+		FragCount: 1,
+		Addr:      "192.0.2.4:443",
+		Data:      []byte{0},
+	}
+	u.ReceiveCh <- &protocol.UDPMessage{
+		SessionID: u.ID,
+		FragCount: 1,
+		Addr:      "192.0.2.4:443",
+		Data:      []byte{1},
+	}
+
+	var mu sync.Mutex
+	var got []byte
+	started := make(chan struct{})
+	block := make(chan struct{})
+	regDone := make(chan struct{})
+	var unregister func()
+	go func() {
+		defer close(regDone)
+		var ok bool
+		unregister, ok = u.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+			select {
+			case <-started:
+			default:
+				close(started)
+				<-block
+			}
+			mu.Lock()
+			got = append(got, packet.Data[0])
+			mu.Unlock()
+			packet.Release()
+			return true
+		})
+		if !ok {
+			t.Error("expected packet receiver registration")
+		}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("drain did not start")
+	}
+
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		m.feed(&protocol.UDPMessage{
+			SessionID: u.ID,
+			FragCount: 1,
+			Addr:      "192.0.2.4:443",
+			Data:      []byte{2},
+		})
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(block)
+	select {
+	case <-regDone:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterPacketReceiver did not finish drain")
+	}
+	if unregister != nil {
+		defer unregister()
+	}
+	select {
+	case <-feedDone:
+	case <-time.After(time.Second):
+		t.Fatal("feed blocked behind drain")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		copyGot := append([]byte(nil), got...)
+		mu.Unlock()
+		if n == 3 {
+			if copyGot[0] != 0 || copyGot[1] != 1 || copyGot[2] != 2 {
+				t.Fatalf("delivery order = %v, want [0 1 2]", copyGot)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("got %v, want three in-order packets", copyGot)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
