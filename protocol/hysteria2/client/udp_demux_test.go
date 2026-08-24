@@ -261,7 +261,7 @@ func TestUDPSessionManagerCloseUnblocksFullWorkerQueue(t *testing.T) {
 		t.Fatal("expected packet receiver registration")
 	}
 
-	io.msgs <- &protocol.UDPMessage{SessionID: u.ID, FragCount: 1, Data: []byte{0}}
+	io.msgs <- &protocol.UDPMessage{SessionID: u.ID, FragCount: 1, Addr: "192.0.2.8:443", Data: []byte{0}}
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
@@ -269,7 +269,7 @@ func TestUDPSessionManagerCloseUnblocksFullWorkerQueue(t *testing.T) {
 	}
 	for i := 0; i < demuxWorkerQueueLen; i++ {
 		select {
-		case io.msgs <- &protocol.UDPMessage{SessionID: u.ID, FragCount: 1, Data: []byte{byte(i + 1)}}:
+		case io.msgs <- &protocol.UDPMessage{SessionID: u.ID, FragCount: 1, Addr: "192.0.2.8:443", Data: []byte{byte(i + 1)}}:
 		case <-time.After(2 * time.Second):
 			t.Fatal("could not fill the worker queue")
 		}
@@ -279,6 +279,7 @@ func TestUDPSessionManagerCloseUnblocksFullWorkerQueue(t *testing.T) {
 	parked := &protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
+		Addr:      "192.0.2.8:443",
 		Data:      []byte{255},
 		Release:   func() { released.Add(1) },
 	}

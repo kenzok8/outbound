@@ -1,7 +1,6 @@
 package client
 
 import (
-	"net/netip"
 	"testing"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -9,16 +8,8 @@ import (
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
-func mustAddrPort(s string) netip.AddrPort {
-	ap, err := netip.ParseAddrPort(s)
-	if err != nil {
-		panic(err)
-	}
-	return ap
-}
-
-// BenchmarkNewUDP measures session creation cost (SendBuf pool + AddrPort
-// parse-once). Compared against the pre-change make([]byte) per session.
+// BenchmarkNewUDP measures session creation cost, including default target
+// validation and reuse of the pooled send buffer.
 func BenchmarkNewUDP(b *testing.B) {
 	m := &udpSessionManager{
 		io:     noopUDPTestIO{},
@@ -38,17 +29,16 @@ func BenchmarkNewUDP(b *testing.B) {
 	}
 }
 
-// BenchmarkDeliverMessage measures the hot path: datagram -> session -> handler.
-// Covers targetAddr caching (no ParseAddrPort) and Release callback wiring.
+// BenchmarkDeliverMessage measures per-datagram peer parsing and delivery to
+// the transport-owned packet handler.
 func BenchmarkDeliverMessage(b *testing.B) {
 	target := "203.0.113.10:443"
 	u := &udpConn{
-		ID:         1,
-		D:          &frag.Defragger{},
-		ReceiveCh:  make(chan *protocol.UDPMessage, udpMessageChanSize),
-		SendBuf:    sendBufPool.Get().([]byte),
-		target:     target,
-		targetAddr: mustAddrPort(target),
+		ID:        1,
+		D:         &frag.Defragger{},
+		ReceiveCh: make(chan *protocol.UDPMessage, udpMessageChanSize),
+		SendBuf:   sendBufPool.Get().([]byte),
+		target:    target,
 	}
 	defer sendBufPool.Put(u.SendBuf)
 
