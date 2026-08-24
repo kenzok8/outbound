@@ -100,7 +100,10 @@ func (d *Dialer) dialFuncFactory(udpNetwork string, rAddr net.Addr) common.DialF
 			net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
 			rAddr,
 		)
-		transport = &quic.Transport{Conn: pc}
+		transport = &quic.Transport{
+			Conn:               pc,
+			DisableAddrParsing: true,
+		}
 		return transport, rAddr, nil
 	}
 }
