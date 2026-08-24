@@ -128,7 +128,8 @@ func (c *directPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 		if c.FullCone {
 			target, err := c.writeTargetAddrPort(it.Addr)
 			if err != nil {
-				return i, err
+				// Nothing has been handed to sendmmsg yet, so n=0.
+				return 0, err
 			}
 			addr = net.UDPAddrFromAddrPort(target)
 		}
@@ -150,7 +151,8 @@ func (c *directPacketConn) writeBatchAlloc(items []netproxy.BatchItem) (int, err
 		if c.FullCone {
 			target, err := c.writeTargetAddrPort(it.Addr)
 			if err != nil {
-				return i, err
+				// Nothing has been handed to sendmmsg yet, so n=0.
+				return 0, err
 			}
 			addr = net.UDPAddrFromAddrPort(target)
 		}

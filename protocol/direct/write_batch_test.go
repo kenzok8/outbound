@@ -101,3 +101,36 @@ func TestDirectPacketConnWriteBatchFullCone(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "to-b", string(buf[:rn]))
 }
+
+// TestDirectPacketConnWriteBatchInvalidAddrReturnsZero reports n=0 when
+// address resolution fails before sendmmsg, so dae will not stamp hasSent.
+func TestDirectPacketConnWriteBatchInvalidAddrReturnsZero(t *testing.T) {
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP(client): %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	oldResolveUDPAddr := resolveUDPAddr
+	resolveUDPAddr = func(_ *net.Resolver, addr string) (*net.UDPAddr, error) {
+		if addr == "good.example:53" {
+			return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: addr, IsNotFound: true}
+	}
+	defer func() { resolveUDPAddr = oldResolveUDPAddr }()
+
+	conn := &directPacketConn{
+		UDPConn:  client,
+		FullCone: true,
+		dialTgt:  "good.example:53",
+		resolver: net.DefaultResolver,
+	}
+	items := []netproxy.BatchItem{
+		{Data: []byte("ok"), Addr: "good.example:53"},
+		{Data: []byte("bad"), Addr: "missing.example:53"},
+	}
+	n, err := conn.WriteBatch(items)
+	require.Error(t, err)
+	require.Equal(t, 0, n)
+}

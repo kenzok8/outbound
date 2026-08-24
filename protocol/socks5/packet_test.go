@@ -279,8 +279,8 @@ func TestPktConnWriteBatchFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteBatch fallback: %v", err)
 	}
-	if n != 6 {
-		t.Fatalf("unexpected n: got %d want 6 (3+3 payload bytes)", n)
+	if n != 2 {
+		t.Fatalf("unexpected n: got %d want 2 datagrams", n)
 	}
 	recorder.inner.mu.Lock()
 	writes := recorder.inner.writes
@@ -297,5 +297,32 @@ func TestPktConnWriteBatchFallback(t *testing.T) {
 		if payload != string(items[i].Data) {
 			t.Fatalf("write #%d: payload mismatch: got %q want %q", i, payload, items[i].Data)
 		}
+	}
+}
+
+// TestPktConnWriteBatchInvalidAddrReturnsZeroAndReleasesBuffers is the M2
+// regression: a mid-batch parse failure must report n=0 (nothing left the
+// socket) and Put every already-allocated encapsulation buffer.
+func TestPktConnWriteBatchInvalidAddrReturnsZeroAndReleasesBuffers(t *testing.T) {
+	recorder := &recordingPacketConn{}
+	ctrlConn := newScriptedCtrlConn()
+	pc := NewPktConn(recorder, "127.0.0.1:1080", "1.1.1.1:53", ctrlConn)
+
+	items := []netproxy.BatchItem{
+		{Data: []byte("hello"), Addr: "10.0.0.1:53"},
+		{Data: []byte("world"), Addr: "not-an-address"},
+	}
+	n, err := pc.WriteBatch(items)
+	if err == nil {
+		t.Fatal("expected invalid-addr error")
+	}
+	if n != 0 {
+		t.Fatalf("n = %d, want 0 (nothing left the socket)", n)
+	}
+	recorder.mu.Lock()
+	writes := recorder.writes
+	recorder.mu.Unlock()
+	if len(writes) != 0 {
+		t.Fatalf("underlying WriteBatch ran with %d writes, want 0", len(writes))
 	}
 }

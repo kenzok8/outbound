@@ -178,22 +178,30 @@ func (pc *PktConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 	bw, ok := pc.PacketConn.(netproxy.PacketBatchWriter)
 	if !ok {
 		// Underlying transport has no batched writer: fall back to per-item
-		// synchronous writes, preserving ordering.
-		var sent int
+		// synchronous writes, preserving ordering. n is a datagram count,
+		// matching PacketBatchWriter / dae's aggregator contract.
+		sent := 0
 		for _, it := range items {
-			n, err := pc.WriteTo(it.Data, it.Addr)
-			sent += n
-			if err != nil {
+			if _, err := pc.WriteTo(it.Data, it.Addr); err != nil {
 				return sent, err
 			}
+			sent++
 		}
 		return sent, nil
 	}
 	enc := make([]netproxy.BatchItem, len(items))
+	releaseEnc := func() {
+		for _, it := range enc {
+			if it.Data != nil {
+				pool.Put(it.Data)
+			}
+		}
+	}
 	for i, it := range items {
 		target, err := pc.targetAddr(it.Addr)
 		if err != nil {
-			return i, fmt.Errorf("invalid addr: %w", err)
+			releaseEnc()
+			return 0, fmt.Errorf("invalid addr: %w", err)
 		}
 		tgtLen := len(target)
 		buf := pool.Get(3 + tgtLen + len(it.Data))
@@ -203,9 +211,7 @@ func (pc *PktConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 		enc[i] = netproxy.BatchItem{Data: buf, Addr: pc.proxyAddr}
 	}
 	n, err := bw.WriteBatch(enc)
-	for _, it := range enc {
-		pool.Put(it.Data)
-	}
+	releaseEnc()
 	return n, err
 }
 

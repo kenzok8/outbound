@@ -48,8 +48,10 @@ type BatchItem struct {
 // PacketBatchWriter is an optional extension of PacketConn. Transports that
 // can amortize per-datagram syscalls (e.g. sendmmsg on a direct UDP socket)
 // implement it so hot paths can flush several datagrams in a single syscall.
-// Implementations must accept items in order; on error the whole batch is
-// reported failed (partial success is reported through n).
+// Implementations must accept items in order. n is the number of datagrams
+// that actually left the socket: on a pre-send failure (encapsulation or
+// address resolution) n must be 0 even if later items were never examined.
+// Partial success after a real send is reported through n together with err.
 type PacketBatchWriter interface {
 	WriteBatch(items []BatchItem) (n int, err error)
 }

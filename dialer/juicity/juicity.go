@@ -22,14 +22,17 @@ func init() {
 }
 
 type Juicity struct {
-	Name                  string
-	Server                string
-	Port                  int
-	User                  string
-	Password              string
-	Sni                   string
-	AllowInsecure         bool
-	CongestionControl     string
+	Name              string
+	Server            string
+	Port              int
+	User              string
+	Password          string
+	Sni               string
+	AllowInsecure     bool
+	CongestionControl string
+	// Cwnd is the congestion_control parameter: for "brutal" it carries the
+	// target bandwidth in bytes per second (same convention as tuic).
+	Cwnd                  int
 	PinnedCertchainSha256 string
 	Protocol              string
 }
@@ -74,6 +77,7 @@ func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer)
 	if d, err = protocol.NewDialer("juicity", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Feature1:     s.CongestionControl,
+		Feature2:     s.Cwnd,
 		TlsConfig:    tlsConfig,
 		User:         s.User,
 		Password:     s.Password,
@@ -127,10 +131,22 @@ func ParseJuicityURL(u string) (data *Juicity, err error) {
 		Sni:                   sni,
 		AllowInsecure:         allowInsecure,
 		CongestionControl:     t.Query().Get("congestion_control"),
+		Cwnd:                  cwndFromQuery(t),
 		PinnedCertchainSha256: t.Query().Get("pinned_certchain_sha256"),
 		Protocol:              "juicity",
 	}
 	return data, nil
+}
+
+// cwndFromQuery parses the "cwnd" query parameter. Negative values are
+// treated as unset so a malformed link degrades to the default congestion
+// controller instead of panicking downstream.
+func cwndFromQuery(u *url.URL) int {
+	cwnd, err := strconv.Atoi(u.Query().Get("cwnd"))
+	if err != nil || cwnd < 0 {
+		return 0
+	}
+	return cwnd
 }
 
 func (t *Juicity) ExportToURL() string {
@@ -146,6 +162,9 @@ func (t *Juicity) ExportToURL() string {
 	}
 	common.SetValue(&q, "sni", t.Sni)
 	common.SetValue(&q, "congestion_control", t.CongestionControl)
+	if t.Cwnd > 0 {
+		common.SetValue(&q, "cwnd", strconv.Itoa(t.Cwnd))
+	}
 	common.SetValue(&q, "pinned_certchain_sha256", t.PinnedCertchainSha256)
 	u.RawQuery = q.Encode()
 	return u.String()

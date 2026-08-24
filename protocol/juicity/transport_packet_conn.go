@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
@@ -231,3 +232,19 @@ func (c *TransportPacketConn) Close() error {
 	})
 	return c.closeErr
 }
+
+// TransportDone implements netproxy.TransportLifecycle so dae can skip
+// write-deadline arming on this QUIC underlay. Closing the conn cancels
+// lifeCtx; the returned channel is that context's Done.
+func (c *TransportPacketConn) TransportDone() <-chan struct{} {
+	if c == nil {
+		return nil
+	}
+	c.ensureLifetime()
+	if c.lifeCtx == nil {
+		return nil
+	}
+	return c.lifeCtx.Done()
+}
+
+var _ netproxy.TransportLifecycle = (*TransportPacketConn)(nil)

@@ -46,10 +46,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	// cwnd doubles as the brutal congestion controller's target bandwidth
 	// (bytes per second) when congestion_control=brutal; 0 lets the
 	// controller fall back to BBR.
-	cwnd := 0
-	if v, ok := header.Feature2.(int); ok {
-		cwnd = v
-	}
+	cwnd := common.CWNDFromFeature(header.Feature2)
 	proxyUDPAddr, err := net.ResolveUDPAddr("udp", header.ProxyAddress)
 	if err != nil {
 		return nil, err
@@ -75,7 +72,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					UdpRelayMode:          udpRelayMode,
 					CongestionController:  header.Feature1.(string),
 					ReduceRtt:             true, // 0-RTT cuts cold-start RTT
-					CWND:                  uint64(cwnd),
+					CWND:                  cwnd,
 					MaxUdpRelayPacketSize: maxDatagramFrameSize,
 				},
 				udp:       true,

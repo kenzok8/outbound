@@ -12,6 +12,27 @@ const (
 	MaxConnectionReceiveWindow     = 64 * 1024 * 1024 // 64MB - stream x2, measured peak combo
 )
 
+// CWNDFromFeature extracts the brutal target bandwidth (bytes per second)
+// from protocol.Header.Feature2. Missing or non-numeric values are treated
+// as unset (0) so a mis-typed header falls back to BBR instead of panicking.
+func CWNDFromFeature(v interface{}) uint64 {
+	switch n := v.(type) {
+	case int:
+		if n > 0 {
+			return uint64(n)
+		}
+	case int64:
+		if n > 0 {
+			return uint64(n)
+		}
+	case uint:
+		return uint64(n)
+	case uint64:
+		return n
+	}
+	return 0
+}
+
 // SetCongestionController wires the configured congestion controller into
 // the QUIC connection. "brutal" uses cwnd as the target bandwidth in bytes
 // per second (community convention shared with sing-box and the tuic brutal

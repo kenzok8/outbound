@@ -66,6 +66,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					Uuid:                 id,
 					Password:             header.Password,
 					CongestionController: header.Feature1.(string),
+					CWND:                 common.CWNDFromFeature(header.Feature2),
 					Ctx:                  ctx,
 					Cancel:               cancel,
 					UnderlayAuth:         make(chan *UnderlayAuth, 64),

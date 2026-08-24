@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	"github.com/olicesx/quic-go"
@@ -73,6 +74,31 @@ func waitForActiveTransportRead(t *testing.T, conn *TransportPacketConn) {
 		runtime.Gosched()
 	}
 	t.Fatal("ReadFrom did not become active")
+}
+
+func TestTransportPacketConnExposesTransportDone(t *testing.T) {
+	conn, _ := newTestTransportPacketConn(t)
+	lifecycle, ok := any(conn).(netproxy.TransportLifecycle)
+	if !ok {
+		t.Fatalf("expected TransportPacketConn to expose TransportDone, got %T", conn)
+	}
+	done := lifecycle.TransportDone()
+	if done == nil {
+		t.Fatal("expected non-nil TransportDone channel")
+	}
+	select {
+	case <-done:
+		t.Fatal("TransportDone closed before Close")
+	default:
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("TransportDone did not close after Close")
+	}
 }
 
 func TestTransportPacketConnCloseReleasesPacketConnOnce(t *testing.T) {
