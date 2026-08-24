@@ -122,6 +122,47 @@ func TestDefraggerReleaseOnClose(t *testing.T) {
 	}
 }
 
+// TestDefraggerReleaseDuplicateFragment verifies that a repeated fragment is
+// rejected without retaining its pooled receive buffer.
+func TestDefraggerReleaseDuplicateFragment(t *testing.T) {
+	var firstReleased atomic.Int32
+	var duplicateReleased atomic.Int32
+	d := &Defragger{}
+
+	first := releaseTrackingMessage(&protocol.UDPMessage{
+		SessionID: 7, PacketID: 9, FragID: 0, FragCount: 2,
+		Addr: "1.2.3.4:5", Data: []byte("first"),
+	}, &firstReleased)
+	duplicate := releaseTrackingMessage(&protocol.UDPMessage{
+		SessionID: 7, PacketID: 9, FragID: 0, FragCount: 2,
+		Addr: "1.2.3.4:5", Data: []byte("duplicate"),
+	}, &duplicateReleased)
+
+	if got := d.Feed(first); got != nil {
+		t.Fatalf("Feed(first) = %v, want nil", got)
+	}
+	if got := d.Feed(first); got != nil {
+		t.Fatalf("Feed(same pointer) = %v, want nil", got)
+	}
+	if firstReleased.Load() != 0 {
+		t.Fatalf("first releases after same-pointer replay = %d, want 0", firstReleased.Load())
+	}
+	if got := d.Feed(duplicate); got != nil {
+		t.Fatalf("Feed(duplicate) = %v, want nil", got)
+	}
+	if duplicateReleased.Load() != 1 {
+		t.Fatalf("duplicate releases = %d, want 1", duplicateReleased.Load())
+	}
+	if firstReleased.Load() != 0 {
+		t.Fatalf("first releases before Close = %d, want 0", firstReleased.Load())
+	}
+
+	d.Close()
+	if firstReleased.Load() != 1 {
+		t.Fatalf("first releases after Close = %d, want 1", firstReleased.Load())
+	}
+}
+
 // TestDefraggerReleaseInvalidFragment verifies the invalid-fragment path
 // releases immediately.
 func TestDefraggerReleaseInvalidFragment(t *testing.T) {

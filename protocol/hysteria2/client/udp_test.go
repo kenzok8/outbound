@@ -89,6 +89,175 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 	}
 }
 
+func TestUDPConnCloseConcurrentWrite(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	connRaw, err := m.NewUDP("192.0.2.10:443")
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+
+	firstWrite := make(chan struct{})
+	var firstWriteOnce sync.Once
+	originalSend := u.SendFunc
+	u.SendFunc = func(buf []byte, msg *protocol.UDPMessage) error {
+		firstWriteOnce.Do(func() { close(firstWrite) })
+		return originalSend(buf, msg)
+	}
+
+	u.receiverMu.Lock()
+	var writers sync.WaitGroup
+	for range 8 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for {
+				if _, err := u.WriteTo([]byte("payload"), u.target); err != nil {
+					return
+				}
+			}
+		}()
+	}
+	<-firstWrite
+
+	closed := make(chan struct{})
+	go func() {
+		m.close(u)
+		close(closed)
+	}()
+	u.receiverMu.Unlock()
+
+	<-closed
+	writers.Wait()
+}
+
+func TestUDPConnMessageAddrUsesDefaultCacheAndPerDatagramFallback(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	const target = "[2001:db8::1]:443"
+	connRaw, err := m.NewUDP(target)
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	defer m.close(u)
+
+	tests := []struct {
+		name    string
+		addr    string
+		want    netip.AddrPort
+		wantErr bool
+	}{
+		{
+			name: "cached default target",
+			addr: target,
+			want: netip.MustParseAddrPort(target),
+		},
+		{
+			name: "equivalent target spelling",
+			addr: "[2001:db8:0:0:0:0:0:1]:443",
+			want: netip.MustParseAddrPort(target),
+		},
+		{
+			name: "alternate peer",
+			addr: "198.51.100.8:8443",
+			want: netip.MustParseAddrPort("198.51.100.8:8443"),
+		},
+		{
+			name: "cached default after alternate peer",
+			addr: target,
+			want: netip.MustParseAddrPort(target),
+		},
+		{
+			name:    "malformed peer",
+			addr:    "not-an-addr-port",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := u.addrForMessage(tt.addr)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("addrForMessage() error = nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("addrForMessage() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("addrForMessage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUDPConnReassembledPacketPreservesDefaultAddressAndRelease(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	const target = "192.0.2.10:5353"
+	connRaw, err := m.NewUDP(target)
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	defer m.close(u)
+
+	type received struct {
+		data []byte
+		from netip.AddrPort
+	}
+	receivedCh := make(chan received, 1)
+	if _, ok := u.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		receivedCh <- received{data: append([]byte(nil), packet.Data...), from: packet.From}
+		packet.Release()
+		return true
+	}); !ok {
+		t.Fatal("RegisterPacketReceiver() = false")
+	}
+
+	var released atomic.Int32
+	for fragID, data := range [][]byte{[]byte("hello "), []byte("world")} {
+		if !u.deliverMessage(&protocol.UDPMessage{
+			SessionID: u.ID,
+			PacketID:  7,
+			FragID:    uint8(fragID),
+			FragCount: 2,
+			Addr:      target,
+			Data:      data,
+			Release:   func() { released.Add(1) },
+		}) {
+			t.Fatalf("deliverMessage(fragment %d) = false", fragID)
+		}
+	}
+
+	got := <-receivedCh
+	if string(got.data) != "hello world" {
+		t.Fatalf("reassembled data = %q, want %q", got.data, "hello world")
+	}
+	if want := netip.MustParseAddrPort(target); got.from != want {
+		t.Fatalf("reassembled address = %v, want %v", got.from, want)
+	}
+	if got := released.Load(); got != 2 {
+		t.Fatalf("fragment releases = %d, want 2", got)
+	}
+}
+
 func TestUDPConnReadFromReportsPerDatagramMessageAddress(t *testing.T) {
 	targetAddr := netip.MustParseAddrPort("192.0.2.10:5353")
 	messageAddrs := []netip.AddrPort{

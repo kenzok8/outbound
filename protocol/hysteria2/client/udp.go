@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
@@ -50,7 +51,7 @@ type udpConn struct {
 	SendBuf   []byte
 	SendFunc  func([]byte, *protocol.UDPMessage) error
 	CloseFunc func()
-	Closed    bool
+	closed    atomic.Bool
 
 	// transportDone is closed when the underlying QUIC transport connection
 	// is permanently closed.  Allows upstream consumers (e.g. dae UdpEndpoint)
@@ -61,12 +62,13 @@ type udpConn struct {
 	receiveMu sync.Mutex
 	// deliverMu serializes RegisterPacketReceiver's drain against feed's
 	// deliver/queue path so queued datagrams stay FIFO with live ones.
-	deliverMu  sync.Mutex
-	muTimer    sync.Mutex
-	timer      *time.Timer
-	target     string
-	receiverMu sync.Mutex
-	receiver   netproxy.PacketReceiveHandler
+	deliverMu         sync.Mutex
+	muTimer           sync.Mutex
+	timer             *time.Timer
+	target            string
+	defaultTargetAddr netip.AddrPort
+	receiverMu        sync.Mutex
+	receiver          netproxy.PacketReceiveHandler
 }
 
 var _ netproxy.PacketReceiver = (*udpConn)(nil)
@@ -105,7 +107,7 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 			// Incomplete message, wait for more
 			continue
 		}
-		from, err := netip.ParseAddrPort(dfMsg.Addr)
+		from, err := u.addrForMessage(dfMsg.Addr)
 		if err != nil {
 			releaseUDPMessage(dfMsg)
 			return 0, netip.AddrPort{}, err
@@ -161,6 +163,13 @@ func (u *udpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) 
 	}
 }
 
+func (u *udpConn) addrForMessage(addr string) (netip.AddrPort, error) {
+	if addr == u.target {
+		return u.defaultTargetAddr, nil
+	}
+	return netip.ParseAddrPort(addr)
+}
+
 func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
 	u.receiverMu.Lock()
 	handler := u.receiver
@@ -174,7 +183,7 @@ func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
 	if msg == nil {
 		return true
 	}
-	from, err := netip.ParseAddrPort(msg.Addr)
+	from, err := u.addrForMessage(msg.Addr)
 	if err != nil {
 		releaseUDPMessage(msg)
 		return true
@@ -195,7 +204,7 @@ func (u *udpConn) queueIfNoReceiver(msg *protocol.UDPMessage) bool {
 	if u.receiver != nil {
 		return false
 	}
-	if u.Closed {
+	if u.closed.Load() {
 		releaseUDPMessage(msg)
 		return true
 	}
@@ -212,7 +221,7 @@ func (u *udpConn) queueIfNoReceiver(msg *protocol.UDPMessage) bool {
 func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 	u.writeMu.Lock()
 	defer u.writeMu.Unlock()
-	if u.Closed || u.SendBuf == nil {
+	if u.closed.Load() || u.SendBuf == nil {
 		return 0, coreErrs.ClosedError{}
 	}
 
@@ -500,7 +509,7 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 
 	// Validate the default target at session creation. WriteTo may send to
 	// other targets, and each reply carries its actual peer in UDPMessage.Addr.
-	_, err := netip.ParseAddrPort(addr)
+	defaultTargetAddr, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -513,9 +522,10 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 		SendFunc:      m.io.SendMessage,
 		transportDone: m.done,
 
-		writeMu: sync.Mutex{},
-		muTimer: sync.Mutex{},
-		target:  addr,
+		writeMu:           sync.Mutex{},
+		muTimer:           sync.Mutex{},
+		target:            addr,
+		defaultTargetAddr: defaultTargetAddr,
 	}
 	conn.CloseFunc = func() {
 		m.close(conn)
@@ -536,13 +546,13 @@ func (m *udpSessionManager) close(conn *udpConn) {
 }
 
 func (m *udpSessionManager) closeLocked(conn *udpConn) func() {
-	if conn == nil || conn.Closed {
+	if conn == nil || conn.closed.Load() {
 		return nil
 	}
-	// Closed and receiver swap share receiverMu with queueIfNoReceiver so a
-	// send cannot race close(ReceiveCh).
+	// Publish closure before clearing the receiver. queueIfNoReceiver observes
+	// both while holding receiverMu; WriteTo observes the atomic closed flag.
 	conn.receiverMu.Lock()
-	conn.Closed = true
+	conn.closed.Store(true)
 	conn.receiver = nil
 	conn.receiverMu.Unlock()
 	conn.stopDeadlineTimer()

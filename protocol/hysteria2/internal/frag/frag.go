@@ -86,6 +86,11 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			m.Release = nil
 			return m
 		}
+	} else if d.frags[m.FragID] != m && m.Release != nil {
+		// A distinct duplicate doesn't contribute to reassembly, so its receive
+		// buffer can be returned immediately. Keep the retained pointer alive if
+		// a caller accidentally feeds the same message object twice.
+		m.Release()
 	}
 	return nil
 }
