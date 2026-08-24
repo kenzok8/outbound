@@ -1,6 +1,7 @@
 package frag
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -119,6 +120,31 @@ func TestDefraggerReleaseOnClose(t *testing.T) {
 	d.Close()
 	if released.Load() != 1 {
 		t.Fatalf("releases after close = %d, want 1", released.Load())
+	}
+}
+
+func TestDefraggerReleaseAfterClose(t *testing.T) {
+	for _, fragCount := range []uint8{1, 2} {
+		t.Run(fmt.Sprintf("frag count %d", fragCount), func(t *testing.T) {
+			var released atomic.Int32
+			d := &Defragger{}
+			d.Close()
+			msg := releaseTrackingMessage(&protocol.UDPMessage{
+				SessionID: 7, PacketID: 9, FragID: 0, FragCount: fragCount,
+				Addr: "1.2.3.4:5", Data: []byte("late"),
+			}, &released)
+
+			if got := d.Feed(msg); got != nil {
+				t.Fatalf("Feed(after Close) = %v, want nil", got)
+			}
+			if released.Load() != 1 {
+				t.Fatalf("releases after Feed = %d, want 1", released.Load())
+			}
+			d.Close()
+			if released.Load() != 1 {
+				t.Fatalf("releases after second Close = %d, want 1", released.Load())
+			}
+		})
 	}
 }
 

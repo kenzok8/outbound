@@ -35,13 +35,20 @@ func FragUDPMessage(m *protocol.UDPMessage, maxSize int) []protocol.UDPMessage {
 // If another packet arrives before a packet has received all fragments
 // in their entirety, any previous state is discarded.
 type Defragger struct {
-	pktID uint16
-	frags []*protocol.UDPMessage
-	count uint8
-	size  int // data size
+	pktID  uint16
+	frags  []*protocol.UDPMessage
+	count  uint8
+	size   int // data size
+	closed bool
 }
 
 func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
+	if d.closed {
+		if m.Release != nil {
+			m.Release()
+		}
+		return nil
+	}
 	if m.FragCount <= 1 {
 		return m
 	}
@@ -126,5 +133,6 @@ func (d *Defragger) releaseAll() {
 // without this, those pooled datagram buffers would be retained until the
 // session object itself is garbage collected.
 func (d *Defragger) Close() {
+	d.closed = true
 	d.releasePending()
 }

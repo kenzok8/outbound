@@ -171,10 +171,6 @@ func (u *udpConn) addrForMessage(addr string) (netip.AddrPort, error) {
 func (u *udpConn) feedMessage(msg *protocol.UDPMessage) *protocol.UDPMessage {
 	u.receiveMu.Lock()
 	defer u.receiveMu.Unlock()
-	if u.closed.Load() {
-		releaseUDPMessage(msg)
-		return nil
-	}
 	return u.D.Feed(msg)
 }
 

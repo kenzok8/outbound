@@ -106,6 +106,9 @@ func TestUDPConnFeedMessageCloseBarrier(t *testing.T) {
 		u := &udpConn{D: &frag.Defragger{}}
 		var released atomic.Int32
 		u.closed.Store(true)
+		u.receiveMu.Lock()
+		u.D.Close()
+		u.receiveMu.Unlock()
 
 		if got := u.feedMessage(newFragment(&released)); got != nil {
 			t.Fatalf("feedMessage() = %v, want nil", got)
