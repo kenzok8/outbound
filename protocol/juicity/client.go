@@ -227,7 +227,7 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 		if isStreamLimitReached(err) {
 			return nil, common.ErrTooManyOpenStreams
 		}
-		if t.handleIfConnectionClosed(err) {
+		if t.handleIfConnectionClosed(err, quicConn) {
 			return nil, common.ErrClientClosed
 		}
 		return nil, fmt.Errorf("OpenStream: %w", err)
@@ -243,16 +243,20 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 
 // handleIfConnectionClosed detaches the connection from the client pool and
 // closes it when a permanent error (non-temporary) is encountered, matching
-// the recovery pattern proven in hysteria2.
-func (t *clientImpl) handleIfConnectionClosed(err error) bool {
+// the recovery pattern proven in hysteria2. originConn is the connection that
+// produced err; a replacement must not be torn down for a stale failure.
+func (t *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connection) bool {
 	if err == nil {
 		return false
 	}
-	if netErr, ok := err.(net.Error); ok && netErr.Temporary() { // nolint:staticcheck
+	if outbounderrors.IsTemporaryError(err) {
 		return false
 	}
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
+	if t.quicConn != originConn {
+		return false
+	}
 	t.closeConnectionLocked(err)
 	return true
 }
@@ -334,10 +338,17 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 	select {
 	case t.UnderlayAuth <- auth:
 	case <-quicConn.Context().Done():
-		if t.handleIfConnectionClosed(quicContextErr(quicConn.Context())) {
+		// The QUIC connection itself is gone. Detach that origin even if the
+		// context cause looks like a cancellation, but never close a replacement.
+		err := quicContextErr(quicConn.Context())
+		t.connMutex.Lock()
+		if t.quicConn == quicConn {
+			t.closeConnectionLocked(err)
+			t.connMutex.Unlock()
 			return nil, nil, common.ErrClientClosed
 		}
-		return nil, nil, quicContextErr(quicConn.Context())
+		t.connMutex.Unlock()
+		return nil, nil, err
 	case <-t.Ctx.Done():
 		return nil, nil, common.ErrClientClosed
 	case <-ctx.Done():

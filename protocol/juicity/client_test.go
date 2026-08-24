@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,8 +20,12 @@ import (
 )
 
 type juicityTestQUICConn struct {
-	ctx        context.Context
-	openStream func() (quic.Stream, error)
+	ctx          context.Context
+	cancel       context.CancelFunc
+	openStream   func() (quic.Stream, error)
+	closed       atomic.Bool
+	contextCalls atomic.Int32
+	onContext    func(n int32)
 }
 
 func (c *juicityTestQUICConn) AcceptStream(context.Context) (quic.Stream, error) {
@@ -58,10 +64,18 @@ func (c *juicityTestQUICConn) RemoteAddr() net.Addr {
 }
 
 func (c *juicityTestQUICConn) CloseWithError(quic.ApplicationErrorCode, string) error {
+	c.closed.Store(true)
+	if c.cancel != nil {
+		c.cancel()
+	}
 	return nil
 }
 
 func (c *juicityTestQUICConn) Context() context.Context {
+	n := c.contextCalls.Add(1)
+	if c.onContext != nil {
+		c.onContext(n)
+	}
 	if c.ctx != nil {
 		return c.ctx
 	}
@@ -323,5 +337,235 @@ func TestClientRingCloseCancelsClientsAndClearsRing(t *testing.T) {
 	}
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+type tempNetError struct{ msg string }
+
+func (e tempNetError) Error() string   { return e.msg }
+func (e tempNetError) Timeout() bool   { return true }
+func (e tempNetError) Temporary() bool { return true }
+
+func newJuicityTestClient(t *testing.T, conn quic.Connection) *clientImpl {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &clientImpl{
+		ClientOption: &ClientOption{
+			Ctx:    ctx,
+			Cancel: cancel,
+		},
+		quicConn: conn,
+	}
+}
+
+func TestHandleIfConnectionClosedKeepsTunnelOnTemporaryErrors(t *testing.T) {
+	origin := &juicityTestQUICConn{ctx: context.Background()}
+	client := newJuicityTestClient(t, origin)
+
+	cases := []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		fmt.Errorf("open stream: %w", context.Canceled),
+		fmt.Errorf("join: %w", errors.Join(context.DeadlineExceeded, errors.New("udp"))),
+		tempNetError{msg: "temporarily unavailable"},
+		fmt.Errorf("wrap: %w", tempNetError{msg: "timeout"}),
+	}
+	for _, err := range cases {
+		if client.handleIfConnectionClosed(err, origin) {
+			t.Fatalf("temporary error %v closed the tunnel", err)
+		}
+		if client.quicConn != origin {
+			t.Fatalf("temporary error %v dropped quicConn", err)
+		}
+		if origin.closed.Load() {
+			t.Fatalf("temporary error %v closed origin conn", err)
+		}
+		select {
+		case <-client.Ctx.Done():
+			t.Fatalf("temporary error %v canceled client context", err)
+		default:
+		}
+	}
+}
+
+func TestHandleIfConnectionClosedClosesOnlyOriginConn(t *testing.T) {
+	origin := &juicityTestQUICConn{ctx: context.Background()}
+	replacement := &juicityTestQUICConn{ctx: context.Background()}
+	client := newJuicityTestClient(t, replacement)
+
+	if client.handleIfConnectionClosed(errors.New("application closed"), origin) {
+		t.Fatal("stale origin error must not close the replacement tunnel")
+	}
+	if client.quicConn != replacement {
+		t.Fatal("replacement quicConn was dropped")
+	}
+	if replacement.closed.Load() {
+		t.Fatal("replacement conn was closed")
+	}
+	if origin.closed.Load() {
+		t.Fatal("stale origin should not be closed by identity mismatch")
+	}
+	select {
+	case <-client.Ctx.Done():
+		t.Fatal("stale origin error canceled the live client")
+	default:
+	}
+
+	client.quicConn = origin
+	if !client.handleIfConnectionClosed(errors.New("application closed"), origin) {
+		t.Fatal("permanent origin error should close the tunnel")
+	}
+	if client.quicConn != nil {
+		t.Fatal("expected origin quicConn to be cleared")
+	}
+	if !origin.closed.Load() {
+		t.Fatal("expected origin conn CloseWithError")
+	}
+	select {
+	case <-client.Ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected permanent error to cancel client context")
+	}
+}
+
+func TestDialContextTemporaryOpenStreamDoesNotCloseTunnel(t *testing.T) {
+	origin := &juicityTestQUICConn{
+		ctx: context.Background(),
+		openStream: func() (quic.Stream, error) {
+			return nil, fmt.Errorf("open: %w", context.Canceled)
+		},
+	}
+	client := newJuicityTestClient(t, origin)
+
+	_, err := client.DialContext(context.Background(), &trojanc.Metadata{
+		Metadata: protocol.Metadata{IsClient: true, Hostname: "example.com", Port: 443},
+		Network:  "tcp",
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("expected OpenStream error")
+	}
+	if errors.Is(err, common.ErrClientClosed) {
+		t.Fatalf("temporary OpenStream error returned closed client: %v", err)
+	}
+	if client.quicConn != origin || origin.closed.Load() {
+		t.Fatal("temporary OpenStream error closed the shared tunnel")
+	}
+}
+
+func TestDialAuthDoesNotCloseReplacementOnOriginDone(t *testing.T) {
+	originCtx, originCancel := context.WithCancel(context.Background())
+	defer originCancel()
+	enteredSelect := make(chan struct{}, 1)
+	origin := &juicityTestQUICConn{
+		ctx: originCtx,
+		onContext: func(n int32) {
+			// getQuicConn observes Context once; DialAuth observes it again
+			// when entering the UnderlayAuth select.
+			if n == 2 {
+				select {
+				case enteredSelect <- struct{}{}:
+				default:
+				}
+			}
+		},
+	}
+	replacement := &juicityTestQUICConn{ctx: context.Background()}
+	client := newJuicityTestClient(t, origin)
+	client.UnderlayAuth = make(chan *UnderlayAuth)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := client.DialAuth(context.Background(), &trojanc.Metadata{
+			Metadata: protocol.Metadata{IsClient: true, Hostname: "example.com", Port: 0},
+			Network:  "udp",
+		}, nil, nil)
+		errCh <- err
+	}()
+
+	select {
+	case <-enteredSelect:
+	case <-time.After(time.Second):
+		t.Fatal("DialAuth did not observe origin context for UnderlayAuth select")
+	}
+	client.connMutex.Lock()
+	client.quicConn = replacement
+	client.connMutex.Unlock()
+	originCancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected DialAuth to fail after origin context is done")
+		}
+		if errors.Is(err, common.ErrClientClosed) {
+			t.Fatalf("origin-done DialAuth closed the live client: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DialAuth did not return after origin context was canceled")
+	}
+	if client.quicConn != replacement {
+		t.Fatal("replacement quicConn was dropped")
+	}
+	if replacement.closed.Load() {
+		t.Fatal("replacement conn was closed")
+	}
+	select {
+	case <-client.Ctx.Done():
+		t.Fatal("origin-done DialAuth canceled the live client")
+	default:
+	}
+}
+
+func TestHandleIfConnectionClosedNilOriginDoesNotCloseCurrent(t *testing.T) {
+	current := &juicityTestQUICConn{ctx: context.Background()}
+	client := newJuicityTestClient(t, current)
+	if client.handleIfConnectionClosed(errors.New("application closed"), nil) {
+		t.Fatal("nil origin must not close the current tunnel")
+	}
+	if client.quicConn != current || current.closed.Load() {
+		t.Fatal("nil origin closed the live connection")
+	}
+}
+
+func TestDialContextStreamLimitDoesNotCloseTunnel(t *testing.T) {
+	origin := &juicityTestQUICConn{
+		ctx: context.Background(),
+		openStream: func() (quic.Stream, error) {
+			return nil, &quic.StreamLimitReachedError{}
+		},
+	}
+	client := newJuicityTestClient(t, origin)
+
+	_, err := client.DialContext(context.Background(), &trojanc.Metadata{
+		Metadata: protocol.Metadata{IsClient: true, Hostname: "example.com", Port: 443},
+		Network:  "tcp",
+	}, nil, nil)
+	if !errors.Is(err, common.ErrTooManyOpenStreams) {
+		t.Fatalf("error = %v, want ErrTooManyOpenStreams", err)
+	}
+	if client.quicConn != origin || origin.closed.Load() {
+		t.Fatal("stream-limit error closed the shared tunnel")
+	}
+}
+
+func TestNewDialerKeepsDatagramsDisabled(t *testing.T) {
+	d, err := NewDialer(nil, protocol.Header{
+		User:         "00000000-0000-0000-0000-000000000000",
+		Password:     "passwd",
+		ProxyAddress: "127.0.0.1:443",
+		Feature1:     "bbr",
+		TlsConfig:    &tls.Config{},
+	})
+	if err != nil {
+		t.Fatalf("NewDialer: %v", err)
+	}
+	jd := d.(*Dialer)
+	cli := jd.clientRing.newClient(func(int64) {})
+	if cli.QuicConfig == nil {
+		t.Fatal("expected QUIC config")
+	}
+	if cli.QuicConfig.EnableDatagrams {
+		t.Fatal("juicity must keep EnableDatagrams=false")
 	}
 }

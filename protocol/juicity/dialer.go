@@ -138,7 +138,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				if err != nil {
 					return nil, err
 				}
-				transport, _, err := d.dialFuncFactory(udpNetwork, d.proxyUDPAddr)(context.TODO(), d.nextDialer)
+				transport, _, err := d.dialFuncFactory(udpNetwork, d.proxyUDPAddr)(ctx, d.nextDialer)
 				if err != nil {
 					return nil, err
 				}

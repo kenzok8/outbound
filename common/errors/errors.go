@@ -12,6 +12,8 @@ import (
 	"context"
 	"errors"
 	"net"
+
+	"github.com/olicesx/quic-go"
 )
 
 // ============================================================================
@@ -27,10 +29,10 @@ var (
 	ErrDNSTemporaryFailure = errors.New("temporary DNS failure")
 
 	// Stream Errors
-	ErrStreamExhausted    = errors.New("too many open streams")
-	ErrClientClosed       = errors.New("client closed")
-	ErrClientClosing       = errors.New("client closing")
-	ErrOperationHold      = errors.New("hold on")
+	ErrStreamExhausted = errors.New("too many open streams")
+	ErrClientClosed    = errors.New("client closed")
+	ErrClientClosing   = errors.New("client closing")
+	ErrOperationHold   = errors.New("hold on")
 )
 
 // ============================================================================
@@ -184,6 +186,13 @@ func IsTemporaryError(err error) bool {
 	// Context timeout/cancelled are temporary
 	if errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	// A full DATAGRAM send queue drops the current datagram and keeps the
+	// QUIC connection alive. Closing the shared tunnel here would replay the
+	// HY2 game-disconnect failure on TUIC.
+	if errors.Is(err, quic.ErrDatagramQueueFullTimeout) {
 		return true
 	}
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/olicesx/quic-go"
 )
 
 // mockNetError implements net.Error for testing
@@ -76,6 +78,11 @@ func TestIsTemporaryError(t *testing.T) {
 			err:      ErrClientClosed,
 			expected: false,
 		},
+		{
+			name:     "datagram send-queue timeout",
+			err:      quic.ErrDatagramQueueFullTimeout,
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -98,5 +105,10 @@ func TestIsTemporaryErrorWithWrappedErrors(t *testing.T) {
 	wrappedCanceled := fmt.Errorf("wrapped: %w", context.Canceled)
 	if !IsTemporaryError(wrappedCanceled) {
 		t.Error("IsTemporaryError should return true for wrapped context.Canceled")
+	}
+
+	wrappedQueueTimeout := fmt.Errorf("send datagram: %w", quic.ErrDatagramQueueFullTimeout)
+	if !IsTemporaryError(wrappedQueueTimeout) {
+		t.Error("IsTemporaryError should return true for wrapped datagram send-queue timeout")
 	}
 }
