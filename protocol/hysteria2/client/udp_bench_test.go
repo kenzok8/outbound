@@ -2,6 +2,7 @@ package client
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -44,6 +45,7 @@ func BenchmarkDeliverMessageAlternateTarget(b *testing.B) {
 
 func benchmarkDeliverMessage(b *testing.B, messageAddr string) {
 	target := "203.0.113.10:443"
+	messageAddr = strings.Clone(messageAddr)
 	u := &udpConn{
 		ID:                1,
 		D:                 &frag.Defragger{},
@@ -61,8 +63,9 @@ func benchmarkDeliverMessage(b *testing.B, messageAddr string) {
 		Data:      make([]byte, 1200),
 	}
 
-	var handlerFn netproxy.PacketReceiveHandler = func(*netproxy.ReceivedPacket) bool {
-		return true // accept and immediately release
+	var handlerFn netproxy.PacketReceiveHandler = func(packet *netproxy.ReceivedPacket) bool {
+		packet.Release()
+		return true
 	}
 	u.RegisterPacketReceiver(handlerFn)
 

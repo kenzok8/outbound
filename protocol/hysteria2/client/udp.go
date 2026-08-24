@@ -100,9 +100,7 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 			// Closed
 			return 0, netip.AddrPort{}, io.EOF
 		}
-		u.receiveMu.Lock()
-		dfMsg := u.D.Feed(msg)
-		u.receiveMu.Unlock()
+		dfMsg := u.feedMessage(msg)
 		if dfMsg == nil {
 			// Incomplete message, wait for more
 			continue
@@ -170,6 +168,16 @@ func (u *udpConn) addrForMessage(addr string) (netip.AddrPort, error) {
 	return netip.ParseAddrPort(addr)
 }
 
+func (u *udpConn) feedMessage(msg *protocol.UDPMessage) *protocol.UDPMessage {
+	u.receiveMu.Lock()
+	defer u.receiveMu.Unlock()
+	if u.closed.Load() {
+		releaseUDPMessage(msg)
+		return nil
+	}
+	return u.D.Feed(msg)
+}
+
 func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
 	u.receiverMu.Lock()
 	handler := u.receiver
@@ -177,9 +185,7 @@ func (u *udpConn) deliverMessage(msg *protocol.UDPMessage) bool {
 	if handler == nil {
 		return false
 	}
-	u.receiveMu.Lock()
-	msg = u.D.Feed(msg)
-	u.receiveMu.Unlock()
+	msg = u.feedMessage(msg)
 	if msg == nil {
 		return true
 	}

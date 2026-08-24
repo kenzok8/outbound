@@ -89,6 +89,56 @@ func TestUDPConnWriteToSerializesSendFunc(t *testing.T) {
 	}
 }
 
+func TestUDPConnFeedMessageCloseBarrier(t *testing.T) {
+	newFragment := func(released *atomic.Int32) *protocol.UDPMessage {
+		return &protocol.UDPMessage{
+			SessionID: 1,
+			PacketID:  7,
+			FragID:    0,
+			FragCount: 2,
+			Addr:      "192.0.2.10:443",
+			Data:      []byte("partial"),
+			Release:   func() { released.Add(1) },
+		}
+	}
+
+	t.Run("close before feed", func(t *testing.T) {
+		u := &udpConn{D: &frag.Defragger{}}
+		var released atomic.Int32
+		u.closed.Store(true)
+
+		if got := u.feedMessage(newFragment(&released)); got != nil {
+			t.Fatalf("feedMessage() = %v, want nil", got)
+		}
+		if got := released.Load(); got != 1 {
+			t.Fatalf("fragment releases = %d, want 1", got)
+		}
+		u.D.Close()
+		if got := released.Load(); got != 1 {
+			t.Fatalf("fragment releases after Defragger.Close = %d, want 1", got)
+		}
+	})
+
+	t.Run("feed before close", func(t *testing.T) {
+		u := &udpConn{D: &frag.Defragger{}}
+		var released atomic.Int32
+
+		if got := u.feedMessage(newFragment(&released)); got != nil {
+			t.Fatalf("feedMessage() = %v, want nil", got)
+		}
+		if got := released.Load(); got != 0 {
+			t.Fatalf("fragment releases before close = %d, want 0", got)
+		}
+		u.closed.Store(true)
+		u.receiveMu.Lock()
+		u.D.Close()
+		u.receiveMu.Unlock()
+		if got := released.Load(); got != 1 {
+			t.Fatalf("fragment releases after close = %d, want 1", got)
+		}
+	})
+}
+
 func TestUDPConnCloseConcurrentWrite(t *testing.T) {
 	m := &udpSessionManager{
 		io:     noopUDPTestIO{},
