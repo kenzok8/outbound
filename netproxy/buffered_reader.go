@@ -2,8 +2,11 @@ package netproxy
 
 import (
 	"bufio"
+	"crypto/tls"
 	"net"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // BufferedReaderConn wraps a Conn with a bufio.Reader so that callers using
@@ -14,10 +17,30 @@ import (
 // for the payload. On a raw TCP socket each Read may hit the kernel, doubling
 // the syscall count compared to what dae's relay loop issues on the write side.
 //
-// The buffer size is chosen to comfortably hold a full decryption chunk so the
-// wrapped protocol's io.ReadFull completes in a single underlying read once
-// data starts flowing.
-const defaultReadBufferSize = 32 << 10 // 32 KiB, matches dae's relay buffer
+// The default buffer is sized to hold a full protocol decryption chunk so
+// io.ReadFull(header) plus io.ReadFull(payload) complete from one underlying
+// read once data is flowing. Shadowsocks AEAD max chunk is ~16.1 KiB
+// (16383 B payload + length + two AEAD tags); VMess MaxChunkSize is 16 KiB.
+// 16 KiB is just short of a max SS chunk. 32 KiB matches dae's relay copy
+// unit and leaves slack for tags. SS2022's theoretical 64 KiB-1 max is rare;
+// the relay writes 32 KiB, so a typical encrypted chunk still fits.
+//
+// This buffer is per proxied raw-TCP session, not per node. TLS-like
+// underlays (*tls.Conn, *utls.UConn, and any Conn that already exposes a
+// TLS record buffer) already coalesce small io.ReadFull calls from their
+// decrypted record buffer (maxPlaintext = 16 KiB). Wrapping those again
+// would hold an extra live allocation for the connection lifetime and add
+// a memcpy without reducing syscalls. NewBufferedReaderConn therefore
+// returns such conns unchanged.
+const defaultReadBufferSize = 32 << 10
+
+// AlreadyReadBuffered is implemented by connections whose Read already
+// coalesces from an internal buffer (typically a TLS record layer). Protocol
+// dialers wrap every underlay with NewBufferedReaderConn; implement this on
+// a new transport instead of teaching netproxy another concrete type.
+type AlreadyReadBuffered interface {
+	AlreadyReadBuffered()
+}
 
 // BufferedReaderConn embeds the original Conn and routes Read through a
 // per-connection bufio.Reader. All other Conn methods (Write, Close, deadlines)
@@ -29,8 +52,20 @@ type BufferedReaderConn struct {
 }
 
 // NewBufferedReaderConn wraps c with a bufio.Reader of the given size.
-// Pass 0 to use the default (32 KiB).
-func NewBufferedReaderConn(c Conn, size int) *BufferedReaderConn {
+// Pass 0 to use the default (32 KiB). If c already coalesces reads (TLS
+// record layer, or AlreadyReadBuffered), c is returned unchanged so the
+// extra read buffer is not allocated. Callers that need a wrapper even
+// on TLS (Vision regression tests) should use ForceBufferedReaderConn.
+func NewBufferedReaderConn(c Conn, size int) Conn {
+	if alreadyHasReadBuffer(c) {
+		return c
+	}
+	return ForceBufferedReaderConn(c, size)
+}
+
+// ForceBufferedReaderConn always allocates the bufio wrapper. Used by
+// tests that must exercise IntrinsicConn peeling through the wrap.
+func ForceBufferedReaderConn(c Conn, size int) *BufferedReaderConn {
 	if size <= 0 {
 		size = defaultReadBufferSize
 	}
@@ -38,6 +73,20 @@ func NewBufferedReaderConn(c Conn, size int) *BufferedReaderConn {
 		Conn:   c,
 		reader: bufio.NewReaderSize(readerOf{c}, size),
 	}
+}
+
+func alreadyHasReadBuffer(c Conn) bool {
+	if c == nil {
+		return false
+	}
+	switch c.(type) {
+	case *tls.Conn, *utls.UConn, *BufferedReaderConn:
+		return true
+	}
+	if _, ok := c.(AlreadyReadBuffered); ok {
+		return true
+	}
+	return false
 }
 
 // Read drains buffered bytes first, then refills from the underlying Conn.

@@ -25,6 +25,10 @@ const (
 	sessionStateClosed
 )
 
+type readBufferReleaser interface {
+	ReleaseReader()
+}
+
 type session struct {
 	conn     net.Conn
 	connLock sync.Mutex
@@ -48,6 +52,11 @@ type session struct {
 
 	closeStreamChan chan uint32
 	heartResponseCh chan struct{}
+
+	// writeBuf is a session-owned encode buffer used under connLock. Frames
+	// stay within maxFramePayloadSize, so this avoids pool.Get/Put per write
+	// without overflowing the pool cliff.
+	writeBuf []byte
 }
 
 func newSession(conn net.Conn, seq uint64) *session {
@@ -179,6 +188,11 @@ func (s *session) run() error {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("[Panic]", slog.String("stack", string(debug.Stack())))
+		}
+	}()
+	defer func() {
+		if releaser, ok := s.conn.(readBufferReleaser); ok {
+			releaser.ReleaseReader()
 		}
 	}()
 	defer func() { _ = s.Close() }()
@@ -314,10 +328,20 @@ func (s *session) Close() error {
 			_ = stream.closeLocal(false, net.ErrClosed)
 		}
 		_ = s.conn.Close()
+		s.connLock.Lock()
+		s.writeBuf = nil
+		s.connLock.Unlock()
 		s.state.Store(sessionStateClosed)
 		return nil
 	}
 	return nil
+}
+
+func (s *session) borrowWriteBuf(size int) []byte {
+	if cap(s.writeBuf) < size {
+		s.writeBuf = make([]byte, size)
+	}
+	return s.writeBuf[:size]
 }
 
 func (s *session) Closed() bool {
@@ -400,6 +424,12 @@ func (s *session) writeConnWithDeadline(b []byte, deadline time.Time) (n int, er
 	if s.closed.Load() {
 		return 0, net.ErrClosed
 	}
+	return s.writeConnLockedWithDeadline(b, deadline)
+}
+
+// writeConnLockedWithDeadline applies an optional write deadline then writes.
+// Caller must hold connLock.
+func (s *session) writeConnLockedWithDeadline(b []byte, deadline time.Time) (n int, err error) {
 	if !deadline.IsZero() {
 		if !deadline.After(time.Now()) {
 			return 0, os.ErrDeadlineExceeded

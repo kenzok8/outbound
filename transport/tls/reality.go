@@ -56,6 +56,10 @@ type RealityUConn struct {
 	Verified   bool
 }
 
+// AlreadyReadBuffered marks RealityUConn as having a TLS record buffer so
+// protocol dialers do not wrap it again with BufferedReaderConn.
+func (c *RealityUConn) AlreadyReadBuffered() {}
+
 var (
 	realityPeerCertificatesFieldOnce sync.Once
 	realityPeerCertificatesField     reflect.StructField

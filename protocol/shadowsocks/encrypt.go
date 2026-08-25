@@ -45,16 +45,26 @@ var sha1DigestPool = sync.Pool{
 type hmacBuf struct {
 	kbuf, ipad, opad [64]byte
 	inner            [sha1.Size]byte
+	prk              [sha1.Size]byte
+	t1               [sha1.Size]byte
+	t2               [sha1.Size]byte
 }
 
 var hmacBufPool = sync.Pool{
 	New: func() interface{} { return &hmacBuf{} },
 }
 
-// hmacSHA1 computes HMAC-SHA1(key, msg...) into a fixed-size result using a
-// caller-provided sha1 digest and hmacBuf, avoiding per-call hmac.New
-// allocations. b is reused across HMACs within one deriveSubKey call.
-func hmacSHA1(h hash.Hash, b *hmacBuf, key []byte, msg ...[]byte) (out [sha1.Size]byte) {
+// hmacSHA1Into computes HMAC-SHA1 without variadic slices or returned arrays,
+// keeping all transient values in the caller's pooled scratch.
+func hmacSHA1Into(
+	h hash.Hash,
+	b *hmacBuf,
+	out *[sha1.Size]byte,
+	key []byte,
+	msg1 []byte,
+	msg2 []byte,
+	msg3 []byte,
+) {
 	if len(key) > 64 {
 		h.Reset()
 		h.Write(key)
@@ -74,15 +84,20 @@ func hmacSHA1(h hash.Hash, b *hmacBuf, key []byte, msg ...[]byte) (out [sha1.Siz
 	}
 	h.Reset()
 	h.Write(b.ipad[:])
-	for _, m := range msg {
-		h.Write(m)
+	if len(msg1) > 0 {
+		h.Write(msg1)
+	}
+	if len(msg2) > 0 {
+		h.Write(msg2)
+	}
+	if len(msg3) > 0 {
+		h.Write(msg3)
 	}
 	h.Sum(b.inner[:0])
 	h.Reset()
 	h.Write(b.opad[:])
 	h.Write(b.inner[:])
 	h.Sum(out[:0])
-	return out
 }
 
 // deriveSubKey computes subKey = HKDF-SHA1(masterKey, salt, info)[:len(dst)]
@@ -96,17 +111,17 @@ func deriveSubKey(dst []byte, masterKey, salt, info []byte) {
 	defer hmacBufPool.Put(b)
 
 	// Extract: PRK = HMAC-SHA1(key=salt, data=masterKey)
-	prk := hmacSHA1(h, b, salt, masterKey)
+	hmacSHA1Into(h, b, &b.prk, salt, masterKey, nil, nil)
 
 	// Expand: T(1) = HMAC-SHA1(PRK, info || 0x01)
-	t1 := hmacSHA1(h, b, prk[:], info, one)
-	n := copy(dst, t1[:])
+	hmacSHA1Into(h, b, &b.t1, b.prk[:], info, one, nil)
+	n := copy(dst, b.t1[:])
 	if n == len(dst) {
 		return
 	}
 	// T(2) = HMAC-SHA1(PRK, T(1) || info || 0x02), only needed for 32-byte keys.
-	t2 := hmacSHA1(h, b, prk[:], t1[:], info, two)
-	copy(dst[n:], t2[:])
+	hmacSHA1Into(h, b, &b.t2, b.prk[:], b.t1[:], info, two)
+	copy(dst[n:], b.t2[:])
 }
 
 // one and two are the HKDF-Expand block counters, kept as package-level slices
@@ -116,23 +131,66 @@ var (
 	two = []byte{0x02}
 )
 
-func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (shadowBytes pool.PB, err error) {
-	var buf = pool.Get(key.CipherConf.SaltLen + len(b) + key.CipherConf.TagLen)
-	defer func() {
-		if err != nil {
-			pool.Put(buf)
-		}
-	}()
-	copy(buf, salt)
+// EncryptUDPTo encrypts one UDP packet into caller-owned storage. dst must not
+// overlap plaintext and must hold salt, ciphertext, and the authentication tag.
+func EncryptUDPTo(dst []byte, key *Key, plaintext []byte, salt []byte, reusedInfo []byte) (int, error) {
 	subKey := getSubKey(key.CipherConf.KeyLen)
 	defer putSubKey(subKey)
-	deriveSubKey(subKey, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
+	return encryptUDPTo(dst, key, plaintext, salt, reusedInfo, subKey)
+}
+
+// EncryptUDPToWithScratch encrypts using caller-owned subkey storage. The
+// scratch must hold CipherConf.KeyLen bytes and must not be used concurrently.
+func EncryptUDPToWithScratch(
+	dst []byte,
+	key *Key,
+	plaintext []byte,
+	salt []byte,
+	reusedInfo []byte,
+	subKeyScratch []byte,
+) (int, error) {
+	keyLen := key.CipherConf.KeyLen
+	if len(subKeyScratch) < keyLen {
+		return 0, fmt.Errorf("subkey scratch is too short: got %d, need %d", len(subKeyScratch), keyLen)
+	}
+	return encryptUDPTo(dst, key, plaintext, salt, reusedInfo, subKeyScratch[:keyLen])
+}
+
+func encryptUDPTo(
+	dst []byte,
+	key *Key,
+	plaintext []byte,
+	salt []byte,
+	reusedInfo []byte,
+	subKey []byte,
+) (int, error) {
+	saltLen := key.CipherConf.SaltLen
+	if len(salt) < saltLen {
+		return 0, fmt.Errorf("salt is too short: got %d, need %d", len(salt), saltLen)
+	}
+	required := saltLen + len(plaintext) + key.CipherConf.TagLen
+	if len(dst) < required {
+		return 0, fmt.Errorf("destination is too short: got %d, need %d", len(dst), required)
+	}
+	dst = dst[:required]
+	copy(dst, salt[:saltLen])
+	deriveSubKey(subKey, key.MasterKey, dst[:saltLen], reusedInfo)
 	ciph, err := key.CipherConf.NewCipher(subKey)
 	if err != nil {
+		return 0, err
+	}
+	_ = ciph.Seal(dst[saltLen:saltLen], ciphers.ZeroNonce[:key.CipherConf.NonceLen], plaintext, nil)
+	return required, nil
+}
+
+func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (pool.PB, error) {
+	buf := pool.Get(key.CipherConf.SaltLen + len(b) + key.CipherConf.TagLen)
+	n, err := EncryptUDPTo(buf, key, b, salt, reusedInfo)
+	if err != nil {
+		pool.Put(buf)
 		return nil, err
 	}
-	_ = ciph.Seal(buf[key.CipherConf.SaltLen:key.CipherConf.SaltLen], ciphers.ZeroNonce[:key.CipherConf.NonceLen], b, nil)
-	return buf, nil
+	return buf[:n], nil
 }
 
 func DecryptUDPFromPool(key *Key, shadowBytes []byte, reusedInfo []byte) (buf pool.PB, err error) {
@@ -151,12 +209,38 @@ func DecryptUDPFromPool(key *Key, shadowBytes []byte, reusedInfo []byte) (buf po
 	return buf[:n], nil
 }
 
-func DecryptUDP(writeTo []byte, key *Key, shadowBytes []byte, reusedInfo []byte) (n int, err error) {
+func DecryptUDP(writeTo []byte, key *Key, shadowBytes []byte, reusedInfo []byte) (int, error) {
+	subKey := getSubKey(key.CipherConf.KeyLen)
+	defer putSubKey(subKey)
+	return decryptUDP(writeTo, key, shadowBytes, reusedInfo, subKey)
+}
+
+// DecryptUDPWithScratch decrypts using caller-owned subkey storage. The
+// scratch must hold CipherConf.KeyLen bytes and must not be used concurrently.
+func DecryptUDPWithScratch(
+	writeTo []byte,
+	key *Key,
+	shadowBytes []byte,
+	reusedInfo []byte,
+	subKeyScratch []byte,
+) (int, error) {
+	keyLen := key.CipherConf.KeyLen
+	if len(subKeyScratch) < keyLen {
+		return 0, fmt.Errorf("subkey scratch is too short: got %d, need %d", len(subKeyScratch), keyLen)
+	}
+	return decryptUDP(writeTo, key, shadowBytes, reusedInfo, subKeyScratch[:keyLen])
+}
+
+func decryptUDP(
+	writeTo []byte,
+	key *Key,
+	shadowBytes []byte,
+	reusedInfo []byte,
+	subKey []byte,
+) (int, error) {
 	if len(shadowBytes) < key.CipherConf.SaltLen {
 		return 0, fmt.Errorf("short length to decrypt")
 	}
-	subKey := getSubKey(key.CipherConf.KeyLen)
-	defer putSubKey(subKey)
 	deriveSubKey(subKey, key.MasterKey, shadowBytes[:key.CipherConf.SaltLen], reusedInfo)
 	ciph, err := key.CipherConf.NewCipher(subKey)
 	if err != nil {

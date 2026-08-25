@@ -4,9 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"net"
 	"time"
-
-	"github.com/daeuniverse/outbound/pool"
 )
 
 const ( // cmds
@@ -70,11 +69,16 @@ func writeFrameWithDeadline(session *session, frame frame, deadline time.Time) (
 	if err != nil {
 		return 0, err
 	}
-	buffer := pool.Get(size)
-	defer pool.Put(buffer)
-
+	session.connLock.Lock()
+	if session.closed.Load() {
+		session.connLock.Unlock()
+		return 0, net.ErrClosed
+	}
+	buffer := session.borrowWriteBuf(size)
 	encodeFrame(buffer, frame)
-	if _, err := session.writeConnWithDeadline(buffer, deadline); err != nil {
+	_, err = session.writeConnLockedWithDeadline(buffer, deadline)
+	session.connLock.Unlock()
+	if err != nil {
 		return 0, err
 	}
 	return len(frame.data), nil
@@ -92,13 +96,19 @@ func writeFrames(session *session, frames ...frame) (int, error) {
 		totalData += len(frame.data)
 	}
 
-	buffer := pool.Get(totalSize)
-	defer pool.Put(buffer)
+	session.connLock.Lock()
+	if session.closed.Load() {
+		session.connLock.Unlock()
+		return 0, net.ErrClosed
+	}
+	buffer := session.borrowWriteBuf(totalSize)
 	offset := 0
 	for _, frame := range frames {
 		offset += encodeFrame(buffer[offset:], frame)
 	}
-	if _, err := session.writeConn(buffer); err != nil {
+	_, err := session.writeConnLocked(buffer)
+	session.connLock.Unlock()
+	if err != nil {
 		return 0, err
 	}
 	return totalData, nil

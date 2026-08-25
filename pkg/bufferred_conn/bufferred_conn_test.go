@@ -1,6 +1,7 @@
 package bufferred_conn
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -56,5 +57,49 @@ func TestBufferedConnTakeRelayPrefix(t *testing.T) {
 
 	if err := <-writeErr; err != nil {
 		t.Fatalf("writer failed: %v", err)
+	}
+}
+
+func TestBufferedConnCloseIdempotent(t *testing.T) {
+	left, right := net.Pipe()
+	defer func() { _ = right.Close() }()
+
+	conn := NewBufferedConn(left)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	conn.ReleaseReader()
+}
+
+func TestBufferedConnReleaseReaderIsTerminalAndIdempotent(t *testing.T) {
+	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
+
+	conn := NewBufferedConnSize(left, 64)
+	reader := conn.r
+	conn.ReleaseReader()
+	conn.ReleaseReader()
+
+	if conn.r != nil {
+		t.Fatal("released reader is still reachable from BufferedConn")
+	}
+	if reader.Size() != 0 {
+		t.Fatalf("released backing buffer size = %d, want 0", reader.Size())
+	}
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read after ReleaseReader: %v", err)
+	}
+	if _, err := conn.Peek(1); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Peek after ReleaseReader: %v", err)
+	}
+	if _, err := conn.ReadByte(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("ReadByte after ReleaseReader: %v", err)
+	}
+	if err := conn.UnreadByte(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("UnreadByte after ReleaseReader: %v", err)
 	}
 }

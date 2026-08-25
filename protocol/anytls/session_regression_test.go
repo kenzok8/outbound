@@ -3,11 +3,13 @@ package anytls
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/bufferred_conn"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -293,5 +295,28 @@ func TestPaddingFactoryOwnsRawScheme(t *testing.T) {
 	raw[0] = 'X'
 	if padding.RawScheme[0] == 'X' {
 		t.Fatal("padding factory retained caller-owned raw scheme memory")
+	}
+}
+
+func TestSessionRunReleasesBufferedReader(t *testing.T) {
+	client, server := net.Pipe()
+	buffered := bufferred_conn.NewBufferedConnSize(client, 64)
+	s := newSession(buffered, 1)
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- s.run() }()
+	_ = server.Close()
+
+	select {
+	case err := <-runDone:
+		if err == nil {
+			t.Fatal("session run returned nil after peer close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session run did not return after peer close")
+	}
+
+	if _, err := buffered.Peek(0); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Peek after session reader release: %v", err)
 	}
 }

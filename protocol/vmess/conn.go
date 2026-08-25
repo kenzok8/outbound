@@ -59,9 +59,11 @@ type Conn struct {
 	responseBodyIV  [16]byte
 	responseAuth    byte
 
-	readMutex   sync.Mutex
-	leftToRead  []byte
-	indexToRead int
+	readMutex     sync.Mutex
+	leftToRead    []byte
+	indexToRead   int
+	readSizeBuf   [2]byte
+	readOpenFrame []byte
 
 	writeSealFrame []byte
 }
@@ -85,18 +87,18 @@ func NewConn(conn netproxy.Conn, metadata Metadata, dialTgt string, cmdKey []byt
 }
 
 func (c *Conn) Close() error {
+	err := c.Conn.Close()
+
 	c.readMutex.Lock()
-	if c.leftToRead != nil {
-		pool.Put(c.leftToRead)
-		c.leftToRead = nil
-		c.indexToRead = 0
-	}
+	c.leftToRead = nil
+	c.indexToRead = 0
+	c.readOpenFrame = nil
 	c.readMutex.Unlock()
 
 	c.writeMutex.Lock()
 	c.writeSealFrame = nil
 	c.writeMutex.Unlock()
-	return c.Conn.Close()
+	return err
 }
 
 func (c *Conn) dialTargetAddrPort() (netip.AddrPort, error) {
@@ -462,29 +464,20 @@ func (c *Conn) read(b []byte) (n int, err error) {
 		n = copy(b, c.leftToRead[c.indexToRead:])
 		c.indexToRead += n
 		if c.indexToRead >= len(c.leftToRead) {
-			// put the buf back
-			pool.Put(c.leftToRead)
 			c.leftToRead = nil
 			c.indexToRead = 0
 		}
 		return n, nil
 	}
 
-	chunk, err := c.readChunkFromPool()
+	chunk, err := c.readChunk()
 	if err != nil {
 		return 0, err
 	}
-	//log.Trace("vmess: read len(chunk)=%v", len(chunk))
 	n = copy(b, chunk)
 	if n < len(chunk) {
-		// wait for the next read
 		c.leftToRead = chunk
 		c.indexToRead = n
-	} else {
-		// full reading. put the buf back
-		pool.Put(chunk)
-		c.leftToRead = nil
-		c.indexToRead = 0
 	}
 	return n, nil
 }
@@ -495,14 +488,14 @@ func (c *Conn) Metadata() Metadata {
 
 // readSize reads the size and padding from Conn. size=encryptedSize+padding
 func (c *Conn) readSize() (size uint16, padding uint16, err error) {
-	// SizeBytes is always 2 (ShakeSizeParser/PlainChunkSizeParser): use a
-	// stack array to avoid per-chunk pool operations on the hot path.
-	var buf [2]byte
-	if _, err := io.ReadFull(c.Conn, buf[:]); err != nil {
+	// SizeBytes is always 2 (ShakeSizeParser/PlainChunkSizeParser). Keep the
+	// scratch on Conn so passing it through the reader interface cannot make a
+	// fresh stack array escape on every chunk.
+	if _, err := io.ReadFull(c.Conn, c.readSizeBuf[:]); err != nil {
 		return 0, 0, err
 	}
 	padding = c.readPaddingGenerator.NextPaddingLen()
-	size, err = c.readChunkSizeParser.Decode(buf[:])
+	size, err = c.readChunkSizeParser.Decode(c.readSizeBuf[:])
 	if err != nil {
 		return size, padding, err
 	}
@@ -510,7 +503,14 @@ func (c *Conn) readSize() (size uint16, padding uint16, err error) {
 	return size, padding, nil
 }
 
-func (c *Conn) readChunkFromPool() (b []byte, err error) {
+func (c *Conn) borrowReadOpenFrame(size int) []byte {
+	if cap(c.readOpenFrame) < size {
+		c.readOpenFrame = make([]byte, size)
+	}
+	return c.readOpenFrame[:size]
+}
+
+func (c *Conn) readChunk() ([]byte, error) {
 	size, padding, err := c.readSize()
 	if err != nil {
 		return nil, err
@@ -519,12 +519,11 @@ func (c *Conn) readChunkFromPool() (b []byte, err error) {
 	if size == uint16(c.readBodyCipher.Overhead())+padding {
 		return nil, io.EOF
 	}
-	b = pool.Get(int(size))
-	if _, err = io.ReadFull(c.Conn, b); err != nil {
-		pool.Put(b)
+	frame := c.borrowReadOpenFrame(int(size))
+	if _, err = io.ReadFull(c.Conn, frame); err != nil {
 		return nil, err
 	}
-	return c.readBodyCipher.Open(b[:0], c.readNonceGenerator(), b[:len(b)-int(padding)], nil)
+	return c.readBodyCipher.Open(frame[:0], c.readNonceGenerator(), frame[:len(frame)-int(padding)], nil)
 }
 
 func (c *Conn) EncryptRespHeaderFromPool(header []byte) (b []byte, err error) {

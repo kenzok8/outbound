@@ -3,6 +3,7 @@ package juicity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -13,19 +14,22 @@ import (
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	"github.com/olicesx/quic-go"
 )
 
 type TransportPacketConn struct {
 	*quic.Transport
-	proxyAddr *net.UDPAddr
-	tgt       netip.AddrPort
-	key       *shadowsocks.Key
-	firstIv   []byte
-	writeMu   sync.Mutex
-	readMu    sync.Mutex
+	proxyAddr   *net.UDPAddr
+	tgt         netip.AddrPort
+	key         *shadowsocks.Key
+	firstIv     []byte
+	writeMu     sync.Mutex
+	writeBuf    []byte
+	writeSubKey [32]byte
+	readMu      sync.Mutex
+	readBuf     []byte
+	readSubKey  [32]byte
 
 	lifeOnce   sync.Once
 	lifeCtx    context.Context
@@ -150,26 +154,60 @@ func (c *TransportPacketConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+func (c *TransportPacketConn) borrowWriteBuffer(size int) []byte {
+	if size <= maxReusablePacketWriteBufferSize {
+		if cap(c.writeBuf) < size {
+			c.writeBuf = make([]byte, size)
+		}
+		return c.writeBuf[:size]
+	}
+	return make([]byte, size)
+}
+
+func (c *TransportPacketConn) borrowReadBuffer(size int) []byte {
+	if size <= maxReusablePacketWriteBufferSize {
+		if cap(c.readBuf) < size {
+			c.readBuf = make([]byte, size)
+		}
+		return c.readBuf[:size]
+	}
+	return make([]byte, size)
+}
+
 func (c *TransportPacketConn) Write(b []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	var salt pool.PB
+	saltLen := c.key.CipherConf.SaltLen
+	var saltStorage [32]byte
+	if saltLen > len(saltStorage) {
+		return 0, fmt.Errorf("unsupported salt length: %d", saltLen)
+	}
+	salt := saltStorage[:saltLen]
 	if c.firstIv != nil {
-		salt = c.firstIv
+		if len(c.firstIv) < saltLen {
+			return 0, fmt.Errorf("first IV is too short: got %d, need %d", len(c.firstIv), saltLen)
+		}
+		copy(salt, c.firstIv[:saltLen])
 		c.firstIv = nil
 	} else {
-		salt = pool.Get(c.key.CipherConf.SaltLen)
-		defer salt.Put()
 		salt[0] = 0
 		salt[1] = 0
 		_, _ = fastrand.Read(salt[2:])
 	}
-	toWrite, err := shadowsocks.EncryptUDPFromPool(c.key, b, salt, ciphers.JuicityReusedInfo)
+	toWrite := c.borrowWriteBuffer(saltLen + len(b) + c.key.CipherConf.TagLen)
+	n, err := shadowsocks.EncryptUDPToWithScratch(
+		toWrite,
+		c.key,
+		b,
+		salt,
+		ciphers.JuicityReusedInfo,
+		c.writeSubKey[:],
+	)
 	if err != nil {
 		return 0, err
 	}
-	defer toWrite.Put()
-	n, err := c.Transport.WriteTo(toWrite, c.proxyAddr)
+	toWrite = toWrite[:n]
+	n, err = c.Transport.WriteTo(toWrite, c.proxyAddr)
 	if err != nil {
 		return 0, err
 	}
@@ -188,8 +226,7 @@ func (c *TransportPacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
-	buf := pool.Get(len(p) + CipherConf.SaltLen + CipherConf.TagLen)
-	defer buf.Put()
+	buf := c.borrowReadBuffer(len(p) + CipherConf.SaltLen + CipherConf.TagLen)
 	ctx, cancel, gen := c.startReadContext()
 	n, _, err = c.ReadNonQUICPacket(ctx, buf)
 	cause := c.finishReadContext(ctx, cancel, gen)
@@ -202,7 +239,13 @@ func (c *TransportPacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort
 		}
 		return 0, netip.AddrPort{}, err
 	}
-	n, err = shadowsocks.DecryptUDP(p, c.key, buf[:n], ciphers.JuicityReusedInfo)
+	n, err = shadowsocks.DecryptUDPWithScratch(
+		p,
+		c.key,
+		buf[:n],
+		ciphers.JuicityReusedInfo,
+		c.readSubKey[:],
+	)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -222,12 +265,21 @@ func (c *TransportPacketConn) Close() error {
 		var err error
 		if c.Transport != nil {
 			err = c.Transport.Close()
-			if c.Conn != nil {
-				if closeErr := c.Conn.Close(); err == nil {
+			if c.Transport.Conn != nil {
+				if closeErr := c.Transport.Conn.Close(); err == nil {
 					err = closeErr
 				}
 			}
 		}
+		c.writeMu.Lock()
+		c.firstIv = nil
+		c.writeBuf = nil
+		clear(c.writeSubKey[:])
+		c.writeMu.Unlock()
+		c.readMu.Lock()
+		c.readBuf = nil
+		clear(c.readSubKey[:])
+		c.readMu.Unlock()
 		c.closeErr = err
 	})
 	return c.closeErr

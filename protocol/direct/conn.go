@@ -30,6 +30,8 @@ type directPacketConn struct {
 	cacheMu            sync.Mutex // protects cacheErr
 	cacheErr           error
 	resolver           *net.Resolver
+	batchOnce          sync.Once
+	batchWriter        packetBatchWriter
 }
 
 // Close unregisters the socket from the shared packet receiver before closing
@@ -107,6 +109,27 @@ var directBatchScratchPool = sync.Pool{
 
 const udpBatchScratchCapacity = 32
 
+type packetBatchWriter interface {
+	WriteBatch([]ipv6.Message, int) (int, error)
+}
+
+func (c *directPacketConn) getBatchWriter() packetBatchWriter {
+	c.batchOnce.Do(func() {
+		if ua, ok := c.UDPConn.LocalAddr().(*net.UDPAddr); ok && ua.IP.To4() != nil {
+			c.batchWriter = ipv4.NewPacketConn(c.UDPConn)
+			return
+		}
+		c.batchWriter = ipv6.NewPacketConn(c.UDPConn)
+	})
+	return c.batchWriter
+}
+
+func releaseDirectBatchScratch(scratch *directBatchScratch, n int) {
+	clear(scratch.msgs[:n])
+	clear(scratch.iovs[:n])
+	directBatchScratchPool.Put(scratch)
+}
+
 // WriteBatch implements netproxy.PacketBatchWriter: several datagrams in one
 // sendmmsg syscall. On a connected (non-FullCone) socket every datagram goes
 // to the connected peer (Addr left nil); on a FullCone socket each item
@@ -120,7 +143,7 @@ func (c *directPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 		return c.writeBatchAlloc(items)
 	}
 	scratch := directBatchScratchPool.Get().(*directBatchScratch)
-	defer directBatchScratchPool.Put(scratch)
+	defer releaseDirectBatchScratch(scratch, len(items))
 	msgs := scratch.msgs[:len(items)]
 	iovs := scratch.iovs[:len(items)]
 	for i, it := range items {
@@ -137,11 +160,7 @@ func (c *directPacketConn) WriteBatch(items []netproxy.BatchItem) (int, error) {
 		// Sub-slicing the pooled iovs array avoids the escaping literal.
 		msgs[i] = ipv6.Message{Buffers: iovs[i : i+1], Addr: addr}
 	}
-	la := c.UDPConn.LocalAddr()
-	if ua, ok := la.(*net.UDPAddr); ok && ua.IP.To4() != nil {
-		return ipv4.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
-	}
-	return ipv6.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
+	return c.getBatchWriter().WriteBatch(msgs, 0)
 }
 
 func (c *directPacketConn) writeBatchAlloc(items []netproxy.BatchItem) (int, error) {
@@ -158,11 +177,7 @@ func (c *directPacketConn) writeBatchAlloc(items []netproxy.BatchItem) (int, err
 		}
 		msgs[i] = ipv6.Message{Buffers: [][]byte{it.Data}, Addr: addr}
 	}
-	la := c.UDPConn.LocalAddr()
-	if ua, ok := la.(*net.UDPAddr); ok && ua.IP.To4() != nil {
-		return ipv4.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
-	}
-	return ipv6.NewPacketConn(c.UDPConn).WriteBatch(msgs, 0)
+	return c.getBatchWriter().WriteBatch(msgs, 0)
 }
 
 func (c *directPacketConn) resolveTarget() error {

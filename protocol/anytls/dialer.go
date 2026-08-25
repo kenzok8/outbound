@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	sessionReadBufferSize     = 4 << 10
 	maxIdleSessions           = 1
 	idleSessionTimeout        = 30 * time.Second
 	idleSessionCheckInterval  = 10 * time.Second
@@ -192,11 +193,6 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		return nil, err
 	}
 
-	// Wrap with a buffered reader so the many io.ReadFull calls in
-	// session.recvLoop (frame headers, lengths, payloads) do not each
-	// trigger their own syscall on the underlying TLS/TCP socket.
-	bufferedConn := bufferred_conn.NewBufferedConnSize(tlsConn, 32<<10)
-
 	buf, err := buildAuthenticationPacket(d.key, d.padding.Load())
 	if err != nil {
 		_ = tlsConn.Close()
@@ -214,12 +210,17 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		return nil, err
 	}
 
+	// The session read loop owns this buffer and releases it only after its
+	// final Read returns. Creating it after authentication avoids failure-path
+	// allocations for sessions that are never published.
+	bufferedConn := bufferred_conn.NewBufferedConnSize(tlsConn, sessionReadBufferSize)
 	seq := d.sessionCounter.Add(1)
 	s := newSessionWithPadding(bufferedConn, seq, &d.padding)
 	d.idleSessionLock.Lock()
 	if d.closed {
 		d.idleSessionLock.Unlock()
 		_ = s.Close()
+		bufferedConn.ReleaseReader()
 		return nil, net.ErrClosed
 	}
 	d.sessions[seq] = s

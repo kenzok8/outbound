@@ -71,10 +71,11 @@ func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 		Metadata: _metadata,
 		Network:  "udp",
 	}
-	buf := pool.Get(metadata.Len() + 2 + len(p))
-	defer pool.Put(buf)
+	c.Conn.writeMutex.Lock()
+	defer c.Conn.writeMutex.Unlock()
+	buf := c.Conn.borrowPacketWriteBuffer(metadata.Len() + 2 + len(p))
 	SealUDP(metadata, buf, p)
-	_, err = c.Conn.Write(buf)
+	_, err = c.Conn.writeLocked(buf)
 	if err != nil {
 		return 0, err
 	}

@@ -40,6 +40,42 @@ func TestEncryptDecrypt(t *testing.T) {
 	}
 }
 
+func TestEncryptUDPToMatchesPooledWire(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	salt := make([]byte, conf.SaltLen)
+	plaintext := []byte("destination-buffer")
+	reusedInfo := []byte("ss-subkey")
+
+	pooled, err := EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pooled.Put()
+
+	dst := make([]byte, len(pooled))
+	n, err := EncryptUDPTo(dst, key, plaintext, salt, reusedInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(pooled) || !bytes.Equal(dst[:n], pooled) {
+		t.Fatal("destination encryption changed wire bytes")
+	}
+	if _, err := EncryptUDPTo(dst[:len(dst)-1], key, plaintext, salt, reusedInfo); err == nil {
+		t.Fatal("short destination buffer was accepted")
+	}
+
+	scratchDst := make([]byte, len(pooled))
+	subKeyScratch := make([]byte, conf.KeyLen)
+	n, err = EncryptUDPToWithScratch(scratchDst, key, plaintext, salt, reusedInfo, subKeyScratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(pooled) || !bytes.Equal(scratchDst[:n], pooled) {
+		t.Fatal("scratch encryption changed wire bytes")
+	}
+}
+
 func TestMultipleSalts(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
@@ -74,6 +110,96 @@ func TestMultipleSalts(t *testing.T) {
 
 		encrypted.Put()
 		decrypted.Put()
+	}
+}
+
+func TestDecryptUDPWithScratchMatchesPlaintext(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	salt := make([]byte, conf.SaltLen)
+	plaintext := []byte("destination-decryption")
+	reusedInfo := []byte("ss-subkey")
+	encrypted, err := EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encrypted.Put()
+
+	dst := make([]byte, len(plaintext))
+	subKeyScratch := make([]byte, conf.KeyLen)
+	n, err := DecryptUDPWithScratch(dst, key, encrypted, reusedInfo, subKeyScratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(dst[:n], plaintext) {
+		t.Fatal("scratch decryption changed plaintext")
+	}
+}
+
+func TestEncryptUDPToAllocationCeiling(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	salt := make([]byte, conf.SaltLen)
+	plaintext := make([]byte, 1400)
+	dst := make([]byte, conf.SaltLen+len(plaintext)+conf.TagLen)
+	reusedInfo := []byte("ss-subkey")
+
+	var encryptErr error
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, encryptErr = EncryptUDPTo(dst, key, plaintext, salt, reusedInfo)
+	})
+	if encryptErr != nil {
+		t.Fatal(encryptErr)
+	}
+	if allocs > 3 {
+		t.Fatalf("EncryptUDPTo allocations = %v, want at most 3", allocs)
+	}
+}
+
+func TestEncryptUDPToWithScratchAllocationCeiling(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	salt := make([]byte, conf.SaltLen)
+	plaintext := make([]byte, 1400)
+	dst := make([]byte, conf.SaltLen+len(plaintext)+conf.TagLen)
+	subKeyScratch := make([]byte, conf.KeyLen)
+	reusedInfo := []byte("ss-subkey")
+
+	var encryptErr error
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, encryptErr = EncryptUDPToWithScratch(dst, key, plaintext, salt, reusedInfo, subKeyScratch)
+	})
+	if encryptErr != nil {
+		t.Fatal(encryptErr)
+	}
+	if allocs > 1 {
+		t.Fatalf("EncryptUDPToWithScratch allocations = %v, want at most 1", allocs)
+	}
+}
+
+func TestDecryptUDPWithScratchAllocationCeiling(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	salt := make([]byte, conf.SaltLen)
+	plaintext := make([]byte, 1400)
+	reusedInfo := []byte("ss-subkey")
+	encrypted, err := EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encrypted.Put()
+	dst := make([]byte, len(plaintext))
+	subKeyScratch := make([]byte, conf.KeyLen)
+
+	var decryptErr error
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, decryptErr = DecryptUDPWithScratch(dst, key, encrypted, reusedInfo, subKeyScratch)
+	})
+	if decryptErr != nil {
+		t.Fatal(decryptErr)
+	}
+	if allocs > 1 {
+		t.Fatalf("DecryptUDPWithScratch allocations = %v, want at most 1", allocs)
 	}
 }
 

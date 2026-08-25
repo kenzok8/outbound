@@ -96,6 +96,8 @@ func (c *TCPConn) getContext() context.Context {
 }
 
 func (c *TCPConn) Close() error {
+	err := c.Conn.Close()
+
 	c.readMutex.Lock()
 	c.leftToRead = nil
 	c.indexToRead = 0
@@ -105,7 +107,7 @@ func (c *TCPConn) Close() error {
 	c.writeMutex.Lock()
 	c.writeFrame = nil
 	c.writeMutex.Unlock()
-	return c.Conn.Close()
+	return err
 }
 
 // checkContextAndSetReadDeadline checks if the context is cancelled before a blocking read.

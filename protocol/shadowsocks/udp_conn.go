@@ -1,10 +1,8 @@
 package shadowsocks
 
 import (
-	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -15,7 +13,6 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	disk_bloom "github.com/mzz2017/disk-bloom"
-	"golang.org/x/crypto/hkdf"
 )
 
 // [LEGACY] Global switch for UDP cipher cache optimization (kept for reference):
@@ -287,10 +284,7 @@ func encryptUDPInPlace(key *Key, buf []byte, payloadLen int, reusedInfo []byte) 
 	subKey := getSubKey(key.CipherConf.KeyLen)
 	defer putSubKey(subKey)
 
-	kdf := hkdf.New(sha1.New, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
-	if _, err := io.ReadFull(kdf, subKey); err != nil {
-		return nil, err
-	}
+	deriveSubKey(subKey, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
 
 	ciph, err := key.CipherConf.NewCipher(subKey)
 	if err != nil {

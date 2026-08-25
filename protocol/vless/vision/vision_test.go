@@ -86,7 +86,7 @@ func TestNewConnAcceptsBufferedReaderWrappedTLSConn(t *testing.T) {
 	defer func() { _ = server.Close() }()
 
 	tlsConn := gotls.Client(client, &gotls.Config{InsecureSkipVerify: true})
-	wrapped := netproxy.NewBufferedReaderConn(tlsConn, 0)
+	wrapped := netproxy.ForceBufferedReaderConn(tlsConn, 0)
 	conn, err := NewConn(wrapped, make([]byte, 16))
 	if err != nil {
 		t.Fatalf("NewConn returned error: %v", err)
@@ -106,7 +106,7 @@ func TestNewConnAcceptsBufferedReaderWrappedRealityConn(t *testing.T) {
 
 	uConn := utls.UClient(client, &utls.Config{InsecureSkipVerify: true}, utls.HelloChrome_Auto)
 	realityConn := &outboundtls.RealityUConn{UConn: uConn}
-	wrapped := netproxy.NewBufferedReaderConn(realityConn, 0)
+	wrapped := netproxy.ForceBufferedReaderConn(realityConn, 0)
 	conn, err := NewConn(wrapped, make([]byte, 16))
 	if err != nil {
 		t.Fatalf("NewConn returned error: %v", err)

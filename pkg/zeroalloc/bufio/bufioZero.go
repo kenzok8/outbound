@@ -43,8 +43,20 @@ type Reader struct {
 	lastRuneSize int // size of last rune read for UnreadRune; -1 means invalid
 }
 
+// Put releases the backing buffer. The Reader must no longer be used.
 func (b *Reader) Put() {
-	pool.Put(b.buf)
+	if b == nil || b.buf == nil {
+		return
+	}
+	buf := b.buf
+	b.buf = nil
+	b.rd = nil
+	b.r = 0
+	b.w = 0
+	b.err = nil
+	b.lastByte = -1
+	b.lastRuneSize = -1
+	pool.Put(buf)
 }
 
 const minReadBufferSize = 16

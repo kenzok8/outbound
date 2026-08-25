@@ -40,14 +40,14 @@ func TestEncryptUDPInPlaceEquivalence(t *testing.T) {
 				t.Skipf("cipher %s not available", tc.cipher)
 			}
 
-				masterKey := make([]byte, conf.KeyLen)
-				fillRandom(t, masterKey)
+			masterKey := make([]byte, conf.KeyLen)
+			fillRandom(t, masterKey)
 
-				payload := make([]byte, tc.payloadSz)
-				fillRandom(t, payload)
+			payload := make([]byte, tc.payloadSz)
+			fillRandom(t, payload)
 
-				salt := make([]byte, conf.SaltLen)
-				fillRandom(t, salt)
+			salt := make([]byte, conf.SaltLen)
+			fillRandom(t, salt)
 
 			reusedInfo := []byte("ss-subkey")
 
@@ -138,6 +138,26 @@ func TestEncryptUDPInPlaceDecryptRoundTrip(t *testing.T) {
 }
 
 // TestEncryptUDPInPlaceConcurrent verifies thread safety of the encryption functions.
+func TestEncryptUDPInPlaceAllocationCeiling(t *testing.T) {
+	conf := ciphers.AeadCiphersConf["chacha20-poly1305"]
+	key := &Key{CipherConf: conf, MasterKey: make([]byte, conf.KeyLen)}
+	payload := make([]byte, 1400)
+	buf := make([]byte, conf.SaltLen+len(payload)+conf.TagLen)
+	copy(buf[conf.SaltLen:], payload)
+	payloadEnd := conf.SaltLen + len(payload)
+
+	var encryptErr error
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, encryptErr = encryptUDPInPlace(key, buf, payloadEnd, nil)
+	})
+	if encryptErr != nil {
+		t.Fatal(encryptErr)
+	}
+	if allocs > 3 {
+		t.Fatalf("encryptUDPInPlace allocations = %v, want at most 3", allocs)
+	}
+}
+
 func TestEncryptUDPInPlaceConcurrent(t *testing.T) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
@@ -155,11 +175,11 @@ func TestEncryptUDPInPlaceConcurrent(t *testing.T) {
 
 	for g := 0; g < goroutines; g++ {
 		go func() {
-				for i := 0; i < iterations; i++ {
-					payload := make([]byte, 100)
-					fillRandom(t, payload)
-					salt := make([]byte, conf.SaltLen)
-					fillRandom(t, salt)
+			for i := 0; i < iterations; i++ {
+				payload := make([]byte, 100)
+				fillRandom(t, payload)
+				salt := make([]byte, conf.SaltLen)
+				fillRandom(t, salt)
 
 				// Test in-place encryption
 				totalLen := conf.SaltLen + len(payload) + conf.TagLen
