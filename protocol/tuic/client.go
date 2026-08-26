@@ -1,7 +1,6 @@
 package tuic
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -181,25 +180,19 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 				}
 				stream.CancelRead(0)
 			}()
-			reader := bufio.NewReader(stream)
-			var commandHead *CommandHead
-			commandHead, err = ReadCommandHead(reader)
+			// Each uni stream carries exactly one packet command; parse it
+			// incrementally instead of wrapping the stream in a fresh
+			// bufio.Reader and routing every field through binary.Read.
+			var packet *Packet
+			packet, err = readPacketFromStream(stream)
 			if err != nil {
 				return
 			}
-			switch commandHead.TYPE {
-			case PacketType:
-				var packet *Packet
-				packet, err = ReadPacketWithHead(commandHead, reader)
-				if err != nil {
-					return
-				}
-				if t.udp && t.UdpRelayMode == common.QUIC {
-					assocId = packet.ASSOC_ID
-					if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
-						packets := val.(*Packets)
-						packets.PushBack(packet)
-					}
+			if t.udp && t.UdpRelayMode == common.QUIC {
+				assocId = packet.ASSOC_ID
+				if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
+					packets := val.(*Packets)
+					packets.PushBack(packet)
 				}
 			}
 		}(stream)

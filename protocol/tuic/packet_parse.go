@@ -3,6 +3,7 @@ package tuic
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -128,4 +129,111 @@ func readAddressFromSlice(msg []byte) (*Address, int, error) {
 	port := binary.BigEndian.Uint16(msg[off:])
 	off += 2
 	return &Address{TYPE: typ, ADDR: addr, PORT: port}, off, nil
+}
+
+// readPacketFromStream parses a TUIC Packet command from a stream that
+// carries exactly one command (a udp_relay_mode=quic uni stream). It mirrors
+// readPacketFromMessage's field and pooling semantics while reading
+// incrementally, keeping the per-datagram bufio.Reader allocation and the
+// binary.Read reflection of the ReadPacketWithHead path out of the QUIC
+// relay hot path.
+func readPacketFromStream(r io.Reader) (*Packet, error) {
+	// VER(1) + TYPE(1) + ASSOC_ID(2) + PKT_ID(2) + FRAG_TOTAL(1) + FRAG_ID(1) + SIZE(2)
+	var head [10]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		return nil, err
+	}
+	if typ := CommandType(head[1]); typ != PacketType {
+		return nil, fmt.Errorf("tuic: not a packet command: %s", typ)
+	}
+	assocId := binary.BigEndian.Uint16(head[2:4])
+	pktId := binary.BigEndian.Uint16(head[4:6])
+	fragTotal := head[6]
+	fragId := head[7]
+	size := binary.BigEndian.Uint16(head[8:10])
+
+	addr, err := readAddressFromStream(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var data []byte
+	dataFromPool := false
+	if size > 0 {
+		// Same split as readPacketFromMessage: unfragmented packets take
+		// DATA from the pool; fragmented packets keep make because their
+		// DATA is sliced during reassembly and outlives the parse.
+		if fragTotal <= 1 {
+			data = pool.Get(int(size))
+			dataFromPool = true
+		} else {
+			data = make([]byte, size)
+		}
+		if _, err := io.ReadFull(r, data); err != nil {
+			if dataFromPool {
+				pool.Put(data)
+			}
+			return nil, err
+		}
+	}
+
+	return &Packet{
+		CommandHead:  &CommandHead{VER: head[0], TYPE: PacketType},
+		ASSOC_ID:     assocId,
+		PKT_ID:       pktId,
+		FRAG_TOTAL:   fragTotal,
+		FRAG_ID:      fragId,
+		SIZE:         size,
+		ADDR:         addr,
+		DATA:         data,
+		dataFromPool: dataFromPool,
+	}, nil
+}
+
+// readAddressFromStream reads an Address from r with the same wire layout
+// readAddressFromSlice consumes from a buffer.
+func readAddressFromStream(r io.Reader) (*Address, error) {
+	var typeByte [1]byte
+	if _, err := io.ReadFull(r, typeByte[:]); err != nil {
+		return nil, err
+	}
+	addr := &Address{TYPE: typeByte[0]}
+	switch addr.TYPE {
+	case AtypIPv4:
+		var rest [net.IPv4len + 2]byte
+		if _, err := io.ReadFull(r, rest[:]); err != nil {
+			return nil, err
+		}
+		addr.ADDR = append([]byte(nil), rest[:net.IPv4len]...)
+		addr.PORT = binary.BigEndian.Uint16(rest[net.IPv4len:])
+	case AtypIPv6:
+		var rest [net.IPv6len + 2]byte
+		if _, err := io.ReadFull(r, rest[:]); err != nil {
+			return nil, err
+		}
+		addr.ADDR = append([]byte(nil), rest[:net.IPv6len]...)
+		addr.PORT = binary.BigEndian.Uint16(rest[net.IPv6len:])
+	case AtypDomainName:
+		var lenByte [1]byte
+		if _, err := io.ReadFull(r, lenByte[:]); err != nil {
+			return nil, err
+		}
+		addrLen := int(lenByte[0])
+		var rest []byte
+		if addrLen+2 > 0 {
+			rest = make([]byte, addrLen+2)
+			if _, err := io.ReadFull(r, rest); err != nil {
+				return nil, err
+			}
+		}
+		addr.ADDR = make([]byte, 1+addrLen)
+		addr.ADDR[0] = lenByte[0]
+		copy(addr.ADDR[1:], rest[:addrLen])
+		addr.PORT = binary.BigEndian.Uint16(rest[addrLen:])
+	case AtypNone:
+		// Address type None: no ADDR, no PORT (non-first fragments).
+	default:
+		return nil, fmt.Errorf("tuic: unknown address type: %#x", addr.TYPE)
+	}
+	return addr, nil
 }
