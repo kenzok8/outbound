@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/infra/clientring"
 	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/olicesx/quic-go"
@@ -257,6 +259,8 @@ func TestClientRingRetriesAfterClosedStream(t *testing.T) {
 	defer staleCancel()
 	freshCtx, freshCancel := context.WithCancel(context.Background())
 	defer freshCancel()
+	var mu sync.Mutex
+	var dialed []*clientImpl
 
 	staleClient := &clientImpl{
 		ClientOption: &ClientOption{
@@ -282,9 +286,22 @@ func TestClientRingRetriesAfterClosedStream(t *testing.T) {
 	}
 
 	r := newClientRing(func(func(int64)) *clientImpl {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(dialed) == 0 {
+			dialed = append(dialed, staleClient)
+			return staleClient
+		}
+		dialed = append(dialed, freshClient)
 		return freshClient
 	}, 0)
-	r._insertAfterCurrent(&clientRingNode{cli: staleClient, capability: -1})
+
+	// Prime the ring with the stale client (a failure on a freshly created
+	// node returns directly without walking), so the real dial below fails
+	// on it and fails over to a fresh client.
+	if err := r.ring.TryNext(func(*clientring.Node[*clientImpl]) error { return common.ErrHoldOn }); err == nil {
+		t.Fatal("priming TryNext() = nil, want hold-on")
+	}
 
 	conn, err := r.DialContext(context.Background(), &trojanc.Metadata{
 		Metadata: protocol.Metadata{
@@ -309,21 +326,48 @@ func TestClientRingRetriesAfterClosedStream(t *testing.T) {
 }
 
 func TestClientRingCloseCancelsClientsAndClearsRing(t *testing.T) {
-	r := newClientRing(func(func(int64)) *clientImpl { return &clientImpl{} }, 0)
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel1()
 	defer cancel2()
 	client1 := &clientImpl{ClientOption: &ClientOption{Ctx: ctx1, Cancel: cancel1}}
 	client2 := &clientImpl{ClientOption: &ClientOption{Ctx: ctx2, Cancel: cancel2}}
-	r._insertAfterCurrent(&clientRingNode{cli: client1, capability: -1})
-	r._insertAfterCurrent(&clientRingNode{cli: client2, capability: -1})
+	var mu sync.Mutex
+	dialed := 0
+	r := newClientRing(func(func(int64)) *clientImpl {
+		mu.Lock()
+		defer mu.Unlock()
+		if dialed == 0 {
+			dialed++
+			return client1
+		}
+		dialed++
+		return client2
+	}, 0)
+	// Prime the ring with one client, then fail on it so a second client
+	// is inserted and the attempt succeeds there.
+	if err := r.ring.TryNext(func(*clientring.Node[*clientImpl]) error { return common.ErrHoldOn }); err == nil {
+		t.Fatal("priming TryNext() = nil, want hold-on")
+	}
+	attempts := 0
+	if err := r.ring.TryNext(func(*clientring.Node[*clientImpl]) error {
+		attempts++
+		if attempts == 1 {
+			return common.ErrHoldOn
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("second TryNext() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
 
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if r.current != nil || r.ring.Len() != 0 {
-		t.Fatalf("ring not cleared: current=%v len=%d", r.current, r.ring.Len())
+	if got := r.ring.Len(); got != 0 {
+		t.Fatalf("ring not cleared: len=%d", got)
 	}
 	select {
 	case <-ctx1.Done():

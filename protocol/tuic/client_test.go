@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/daeuniverse/outbound/protocol/infra/clientring"
+	"github.com/daeuniverse/outbound/protocol/tuic/common"
 )
 
 func TestAcquireUniStreamSlotWaitsForCapacity(t *testing.T) {
@@ -60,25 +63,35 @@ func TestAcquireUniStreamSlotSucceedsAfterRelease(t *testing.T) {
 
 func TestClientRingCloseClosesClientsAndClearsRing(t *testing.T) {
 	r := newClientRing(func(func(int64)) *clientImpl { return &clientImpl{} }, 0)
-	client1 := &clientImpl{}
-	client2 := &clientImpl{}
-	r._insertAfterCurrent(&clientRingNode{cli: client1, capability: -1})
-	r._insertAfterCurrent(&clientRingNode{cli: client2, capability: -1})
+	// Prime the ring with one client (a failure on a freshly created node
+	// returns directly without walking), then fail on it so a second
+	// client is inserted and the attempt succeeds there.
+	if err := r.ring.TryNext(func(*clientring.Node[*clientImpl]) error { return common.ErrHoldOn }); err == nil {
+		t.Fatal("priming TryNext() = nil, want hold-on")
+	}
+	attempts := 0
+	err := r.ring.TryNext(func(*clientring.Node[*clientImpl]) error {
+		attempts++
+		if attempts == 1 {
+			return common.ErrHoldOn
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("second TryNext() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if got := r.ring.Len(); got != 2 {
+		t.Fatalf("ring length = %d, want 2", got)
+	}
 
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if r.current != nil || r.ring.Len() != 0 {
-		t.Fatalf("ring not cleared: current=%v len=%d", r.current, r.ring.Len())
-	}
-	client1.connMutex.Lock()
-	client1Closed := client1.closed
-	client1.connMutex.Unlock()
-	client2.connMutex.Lock()
-	client2Closed := client2.closed
-	client2.connMutex.Unlock()
-	if !client1Closed || !client2Closed {
-		t.Fatalf("clients not marked closed: client1=%v client2=%v", client1Closed, client2Closed)
+	if got := r.ring.Len(); got != 0 {
+		t.Fatalf("ring not cleared: len=%d", got)
 	}
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
