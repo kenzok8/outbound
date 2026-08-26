@@ -59,7 +59,7 @@ func benchmarkDeliverMessage(b *testing.B, messageAddr string) {
 	msg := &protocol.UDPMessage{
 		SessionID: 1,
 		FragCount: 1,
-		Addr:      messageAddr,
+		Addr:      []byte(messageAddr),
 		Data:      make([]byte, 1200),
 	}
 

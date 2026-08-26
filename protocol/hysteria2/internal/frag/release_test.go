@@ -27,11 +27,11 @@ func TestDefraggerReleaseExactlyOnce(t *testing.T) {
 
 	frag0 := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 42, FragID: 0, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("hello "),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("hello "),
 	}, &released)
 	frag1 := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 42, FragID: 1, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("world"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("world"),
 	}, &released)
 
 	if got := d.Feed(frag0); got != nil {
@@ -79,11 +79,11 @@ func TestDefraggerReleaseOnSupercede(t *testing.T) {
 
 	old1 := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 1, FragID: 0, FragCount: 3,
-		Addr: "1.2.3.4:5", Data: []byte("aaa"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("aaa"),
 	}, &released)
 	old2 := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 1, FragID: 1, FragCount: 3,
-		Addr: "1.2.3.4:5", Data: []byte("bbb"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("bbb"),
 	}, &released)
 
 	d.Feed(old1)
@@ -95,7 +95,7 @@ func TestDefraggerReleaseOnSupercede(t *testing.T) {
 	// New packet ID supersedes the incomplete message: old fragments released.
 	new1 := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 2, FragID: 0, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("xx"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("xx"),
 	}, &released)
 	d.Feed(new1)
 	if released.Load() != 2 {
@@ -110,7 +110,7 @@ func TestDefraggerReleaseOnClose(t *testing.T) {
 
 	frag := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 9, FragID: 0, FragCount: 4,
-		Addr: "1.2.3.4:5", Data: []byte("partial"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("partial"),
 	}, &released)
 	d.Feed(frag)
 	if released.Load() != 0 {
@@ -131,7 +131,7 @@ func TestDefraggerReleaseAfterClose(t *testing.T) {
 			d.Close()
 			msg := releaseTrackingMessage(&protocol.UDPMessage{
 				SessionID: 7, PacketID: 9, FragID: 0, FragCount: fragCount,
-				Addr: "1.2.3.4:5", Data: []byte("late"),
+				Addr: []byte("1.2.3.4:5"), Data: []byte("late"),
 			}, &released)
 
 			if got := d.Feed(msg); got != nil {
@@ -157,11 +157,11 @@ func TestDefraggerReleaseDuplicateFragment(t *testing.T) {
 
 	first := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 9, FragID: 0, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("first"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("first"),
 	}, &firstReleased)
 	duplicate := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 9, FragID: 0, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("duplicate"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("duplicate"),
 	}, &duplicateReleased)
 
 	if got := d.Feed(first); got != nil {
@@ -197,7 +197,7 @@ func TestDefraggerReleaseInvalidFragment(t *testing.T) {
 
 	frag := releaseTrackingMessage(&protocol.UDPMessage{
 		SessionID: 7, PacketID: 9, FragID: 88, FragCount: 2,
-		Addr: "1.2.3.4:5", Data: []byte("garbage"),
+		Addr: []byte("1.2.3.4:5"), Data: []byte("garbage"),
 	}, &released)
 	if got := d.Feed(frag); got != nil {
 		t.Fatalf("Feed(invalid) = %v, want nil", got)

@@ -96,7 +96,7 @@ func TestUDPConnFeedMessageCloseBarrier(t *testing.T) {
 			PacketID:  7,
 			FragID:    0,
 			FragCount: 2,
-			Addr:      "192.0.2.10:443",
+			Addr:      []byte("192.0.2.10:443"),
 			Data:      []byte("partial"),
 			Release:   func() { released.Add(1) },
 		}
@@ -239,7 +239,7 @@ func TestUDPConnMessageAddrUsesDefaultCacheAndPerDatagramFallback(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := u.addrForMessage(tt.addr)
+			got, err := u.addrForMessage([]byte(tt.addr))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("addrForMessage() error = nil")
@@ -291,7 +291,7 @@ func TestUDPConnReassembledPacketPreservesDefaultAddressAndRelease(t *testing.T)
 			PacketID:  7,
 			FragID:    uint8(fragID),
 			FragCount: 2,
-			Addr:      target,
+			Addr:      []byte(target),
 			Data:      data,
 			Release:   func() { released.Add(1) },
 		}) {
@@ -328,7 +328,7 @@ func TestUDPConnReadFromReportsPerDatagramMessageAddress(t *testing.T) {
 		u.ReceiveCh <- &protocol.UDPMessage{
 			SessionID: 1,
 			FragCount: 1,
-			Addr:      messageAddr.String(),
+			Addr:      []byte(messageAddr.String()),
 			Data:      []byte(messageAddr.String()),
 			Release:   func() { released.Add(1) },
 		}
@@ -364,7 +364,7 @@ func TestUDPConnReadFromMalformedAddressReleasesMessage(t *testing.T) {
 	u.ReceiveCh <- &protocol.UDPMessage{
 		SessionID: 1,
 		FragCount: 1,
-		Addr:      "not-an-addr-port",
+		Addr:      []byte("not-an-addr-port"),
 		Data:      []byte("malformed"),
 		Release:   func() { released.Add(1) },
 	}
@@ -394,7 +394,7 @@ func TestUDPConnPacketReceiverDrainsQueuedMessage(t *testing.T) {
 	u.ReceiveCh <- &protocol.UDPMessage{
 		SessionID: 1,
 		FragCount: 1,
-		Addr:      messageAddr.String(),
+		Addr:      []byte(messageAddr.String()),
 		Data:      []byte("queued"),
 		Release:   func() { released.Add(1) },
 	}
@@ -442,7 +442,7 @@ func TestUDPConnPacketReceiverMalformedAddressReleasesMessage(t *testing.T) {
 	claimed := u.deliverMessage(&protocol.UDPMessage{
 		SessionID: 1,
 		FragCount: 1,
-		Addr:      "not-an-addr-port",
+		Addr:      []byte("not-an-addr-port"),
 		Data:      []byte("malformed"),
 		Release:   func() { released.Add(1) },
 	})
@@ -486,7 +486,7 @@ func TestUDPSessionManagerUsesPacketReceiverForNewMessages(t *testing.T) {
 	m.feed(&protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
-		Addr:      "198.51.100.8:443",
+		Addr:      []byte("198.51.100.8:443"),
 		Data:      []byte("transport-owned"),
 		Release:   func() { released.Add(1) },
 	})
@@ -714,7 +714,7 @@ func TestUDPSessionManagerQueueAbsorbsModerateBurstWithoutDrop(t *testing.T) {
 			PacketID:  uint16(i + 1),
 			FragID:    0,
 			FragCount: 1,
-			Addr:      "127.0.0.1:53",
+			Addr:      []byte("127.0.0.1:53"),
 			Data:      []byte{byte(i)},
 		})
 	}
@@ -771,7 +771,7 @@ func TestUDPConnCloseDrainsQueuedMessages(t *testing.T) {
 	queued := &protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
-		Addr:      "192.0.2.2:443",
+		Addr:      []byte("192.0.2.2:443"),
 		Data:      []byte("queued"),
 		Release:   func() { released.Add(1) },
 	}
@@ -807,7 +807,7 @@ func TestUDPSessionManagerQueueIfNoReceiverReleasesOnClosed(t *testing.T) {
 	late := &protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
-		Addr:      "192.0.2.3:443",
+		Addr:      []byte("192.0.2.3:443"),
 		Data:      []byte("late"),
 		Release:   func() { released.Add(1) },
 	}
@@ -836,13 +836,13 @@ func TestUDPConnRegisterPacketReceiverPreservesFIFOWithFeed(t *testing.T) {
 	u.ReceiveCh <- &protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
-		Addr:      "192.0.2.4:443",
+		Addr:      []byte("192.0.2.4:443"),
 		Data:      []byte{0},
 	}
 	u.ReceiveCh <- &protocol.UDPMessage{
 		SessionID: u.ID,
 		FragCount: 1,
-		Addr:      "192.0.2.4:443",
+		Addr:      []byte("192.0.2.4:443"),
 		Data:      []byte{1},
 	}
 
@@ -885,7 +885,7 @@ func TestUDPConnRegisterPacketReceiverPreservesFIFOWithFeed(t *testing.T) {
 		m.feed(&protocol.UDPMessage{
 			SessionID: u.ID,
 			FragCount: 1,
-			Addr:      "192.0.2.4:443",
+			Addr:      []byte("192.0.2.4:443"),
 			Data:      []byte{2},
 		})
 	}()

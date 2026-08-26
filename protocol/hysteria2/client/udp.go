@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/netip"
@@ -62,10 +63,19 @@ type udpConn struct {
 	receiveMu sync.Mutex
 	// deliverMu serializes RegisterPacketReceiver's drain against feed's
 	// deliver/queue path so queued datagrams stay FIFO with live ones.
-	deliverMu         sync.Mutex
-	muTimer           sync.Mutex
-	timer             *time.Timer
-	target            string
+	deliverMu sync.Mutex
+	muTimer   sync.Mutex
+	timer     *time.Timer
+	target    string
+	// targetBytes is target as bytes for the per-datagram default-target
+	// comparison (message addresses are byte slices since they stopped
+	// being materialized as strings on receive).
+	targetBytes []byte
+	// writeAddrBytes caches the []byte form of the last WriteTo target
+	// under writeMu, so the steady-state single-target send path does not
+	// convert the address string per datagram.
+	writeAddrStr      string
+	writeAddrBytes    []byte
 	defaultTargetAddr netip.AddrPort
 	receiverMu        sync.Mutex
 	receiver          netproxy.PacketReceiveHandler
@@ -161,11 +171,24 @@ func (u *udpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) 
 	}
 }
 
-func (u *udpConn) addrForMessage(addr string) (netip.AddrPort, error) {
-	if addr == u.target {
+func (u *udpConn) addrForMessage(addr []byte) (netip.AddrPort, error) {
+	if bytes.Equal(addr, u.targetBytes) {
 		return u.defaultTargetAddr, nil
 	}
-	return netip.ParseAddrPort(addr)
+	return netip.ParseAddrPort(string(addr))
+}
+
+// addrBytesForWrite converts a WriteTo target to the []byte form the message
+// carries. Callers hold writeMu; the steady state repeatedly targets the
+// session's fixed destination, so the conversion is cached per target.
+func (u *udpConn) addrBytesForWrite(addr string) []byte {
+	if addr == u.writeAddrStr {
+		return u.writeAddrBytes
+	}
+	b := []byte(addr)
+	u.writeAddrStr = addr
+	u.writeAddrBytes = b
+	return b
 }
 
 func (u *udpConn) feedMessage(msg *protocol.UDPMessage) *protocol.UDPMessage {
@@ -233,7 +256,7 @@ func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
 		PacketID:  0,
 		FragID:    0,
 		FragCount: 1,
-		Addr:      addr,
+		Addr:      u.addrBytesForWrite(addr),
 		Data:      b,
 	}
 	// The session's fixed serialization buffer is smaller than the theoretical
@@ -527,6 +550,9 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 		writeMu:           sync.Mutex{},
 		muTimer:           sync.Mutex{},
 		target:            addr,
+		targetBytes:       []byte(addr),
+		writeAddrStr:      addr,
+		writeAddrBytes:    []byte(addr),
 		defaultTargetAddr: defaultTargetAddr,
 	}
 	conn.CloseFunc = func() {

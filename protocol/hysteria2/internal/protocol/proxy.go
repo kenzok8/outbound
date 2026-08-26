@@ -158,8 +158,12 @@ type UDPMessage struct {
 	PacketID  uint16 // 2
 	FragID    uint8  // 1
 	FragCount uint8  // 1
-	Addr      string // varint + bytes
-	Data      []byte
+	// Addr is the wire address bytes ("host:port"). It stays a byte slice
+	// so parsing subslices the datagram buffer instead of materializing a
+	// string per inbound message; consumers compare against the cached
+	// default target and only stringify non-default addresses.
+	Addr []byte // varint + bytes
+	Data []byte
 	// Release returns the backing datagram buffer (when the message was
 	// obtained via a pooled transport such as quic-go's ReceiveDatagram)
 	// to its pool. Must be called exactly once when Data is no longer
@@ -216,7 +220,7 @@ func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
 		// We need at least one byte of data after the address.
 		return nil, errors.ProtocolError{Message: "invalid message length"}
 	}
-	m.Addr = string(body[:lAddr])
+	m.Addr = body[:lAddr]
 	m.Data = body[lAddr:]
 	return m, nil
 }

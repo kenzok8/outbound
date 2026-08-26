@@ -78,7 +78,7 @@ func TestUDPIOImplSendMessageReturnsDatagramTooLargeOnSerializeOverflow(t *testi
 		PacketID:  0,
 		FragID:    0,
 		FragCount: 1,
-		Addr:      "203.0.113.10:40000",
+		Addr:      []byte("203.0.113.10:40000"),
 		Data:      bytes.Repeat([]byte("x"), 64),
 	}
 

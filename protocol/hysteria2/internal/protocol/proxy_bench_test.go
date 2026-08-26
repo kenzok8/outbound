@@ -52,7 +52,7 @@ func BenchmarkParseUDPMessage(b *testing.B) {
 		PacketID:  1,
 		FragID:    0,
 		FragCount: 1,
-		Addr:      "127.0.0.1:8080",
+		Addr:      []byte("127.0.0.1:8080"),
 		Data:      make([]byte, 100),
 	}
 	buf := make([]byte, msg.Size())
