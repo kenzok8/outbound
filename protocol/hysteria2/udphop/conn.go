@@ -186,17 +186,29 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 	if _, ok := conn.(syscall.Conn); ok {
 		pconn := ipv4.NewPacketConn(conn)
 		if pconn != nil {
-			u.recvLoopBatch(pconn)
+			u.recvLoopBatch(conn, pconn)
 			return
 		}
 	}
 	u.recvLoopSingle(conn)
 }
 
+// connStillLive reports whether conn is still owned by this hop conn as its
+// current or previous connection, i.e. its receive loop has not been retired
+// by a hop or by a full close.
+func (u *udpHopPacketConn) connStillLive(conn net.PacketConn) bool {
+	u.connMutex.RLock()
+	defer u.connMutex.RUnlock()
+	if u.closed {
+		return false
+	}
+	return conn == u.currentConn || conn == u.prevConn
+}
+
 // recvLoopBatch reads packets in batches via recvmmsg. It is the hot path for
 // direct connections and is responsible for collapsing the recvfrom storm that
 // otherwise dominates QUIC CPU under load.
-func (u *udpHopPacketConn) recvLoopBatch(pconn *ipv4.PacketConn) {
+func (u *udpHopPacketConn) recvLoopBatch(conn net.PacketConn, pconn *ipv4.PacketConn) {
 	msgs := make([]ipv4.Message, recvBatchSize)
 	for i := range msgs {
 		msgs[i].Buffers = [][]byte{u.bufPool.Get()}
@@ -213,7 +225,26 @@ func (u *udpHopPacketConn) recvLoopBatch(pconn *ipv4.PacketConn) {
 		// drain any immediately-available packets without blocking. This mirrors
 		// the blocking semantics of the single-packet ReadFrom path.
 		n, err := pconn.ReadBatch(msgs, 0)
-		if n == 0 || err != nil {
+		if err == nil && n == 0 {
+			// Spurious empty batch: retry instead of silently deafening
+			// the transport (same treatment as quic-go's batch reader).
+			continue
+		}
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			if u.connStillLive(conn) {
+				// Transient error on a conn we still own (e.g. Linux
+				// surfaces ICMP errors as ECONNREFUSED on connected UDP
+				// sockets): back off briefly and retry. Retired conns
+				// report errors from their Close and must terminate.
+				select {
+				case <-u.closeChan:
+				case <-time.After(100 * time.Millisecond):
+				}
+				continue
+			}
 			u.handleRecvError(err)
 			return
 		}
@@ -244,6 +275,18 @@ func (u *udpHopPacketConn) recvLoopSingle(conn net.PacketConn) {
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
 			u.bufPool.Put(buf) // nolint:staticcheck
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			if u.connStillLive(conn) {
+				// Transient error on a conn we still own: retry instead of
+				// terminating the only receive loop for this transport.
+				select {
+				case <-u.closeChan:
+				case <-time.After(100 * time.Millisecond):
+				}
+				continue
+			}
 			u.handleRecvError(err)
 			return
 		}
