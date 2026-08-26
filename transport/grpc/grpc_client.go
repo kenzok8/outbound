@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -175,9 +176,14 @@ func (c *ClientConn) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		n = copy(p, recvResp.hunk.Data)
-		c.buf = pool.Get(len(recvResp.hunk.Data) - n)
-		copy(c.buf, recvResp.hunk.Data[n:])
-		c.offset = 0
+		if rest := len(recvResp.hunk.Data) - n; rest > 0 {
+			// A zero-length remainder must not be stored: an empty
+			// non-nil buf made the next Read return (0, nil), one
+			// spurious iteration per fully-consumed hunk.
+			c.buf = pool.Get(rest)
+			copy(c.buf, recvResp.hunk.Data[n:])
+			c.offset = 0
+		}
 		return n, nil
 	}
 }
@@ -218,6 +224,12 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *ClientConn) Close() error {
+	if c.readDeadline != nil {
+		c.readDeadline.Stop()
+	}
+	if c.writeDeadline != nil {
+		c.writeDeadline.Stop()
+	}
 	select {
 	case <-c.ctx.Done():
 	default:
@@ -389,11 +401,26 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
 	return NewClientConn(tun, streamCloser), nil
 }
 
+// systemCertPoolCached resolves the system pool once: GetSystemCertPool is
+// not free and previously ran on every dial, even on cache-hit paths.
+var (
+	systemCertPoolOnce sync.Once
+	systemCertPool     *x509.CertPool
+	systemCertPoolErr  error
+)
+
+func systemCertPoolCached() (*x509.CertPool, error) {
+	systemCertPoolOnce.Do(func() {
+		systemCertPool, systemCertPoolErr = cert.GetSystemCertPool()
+	})
+	return systemCertPool, systemCertPoolErr
+}
+
 func getGrpcClientConn(ctx context.Context, tcpDialer netproxy.Dialer, serverName string, address string, allowInsecure bool, somark uint32, mptcp bool) (*clientConnMeta, ccCanceller, error) {
 	scope := netproxy.TransportCacheNamespace(tcpDialer)
 	cacheKey := grpcClientCacheKey(scope, serverName, address, allowInsecure, somark, mptcp)
 	// allowInsecure?
-	roots, err := cert.GetSystemCertPool()
+	roots, err := systemCertPoolCached()
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("failed to get system certificate pool")
 	}

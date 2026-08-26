@@ -99,9 +99,13 @@ func (c *ServerConn) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		n = copy(p, recvResp.hunk.Data)
-		c.buf = pool.Get(len(recvResp.hunk.Data) - n)
-		copy(c.buf, recvResp.hunk.Data[n:])
-		c.offset = 0
+		if rest := len(recvResp.hunk.Data) - n; rest > 0 {
+			// Same contract as the client side: never store an empty
+			// remainder, it would surface as a spurious (0, nil) Read.
+			c.buf = pool.Get(rest)
+			copy(c.buf, recvResp.hunk.Data[n:])
+			c.offset = 0
+		}
 		return n, nil
 	}
 }
@@ -140,6 +144,12 @@ func (c *ServerConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *ServerConn) Close() error {
+	if c.readDeadline != nil {
+		c.readDeadline.Stop()
+	}
+	if c.writeDeadline != nil {
+		c.writeDeadline.Stop()
+	}
 	select {
 	case <-c.ctx.Done():
 	default:
