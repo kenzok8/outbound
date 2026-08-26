@@ -223,6 +223,23 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
 	}
 }
 
+// armDeadline replaces the timer in slot with one that cancels the matching
+// context half at t. Callers must hold deadlineMu.
+func (c *ClientConn) armDeadline(slot **time.Timer, t time.Time, done <-chan struct{}, cancel context.CancelFunc) {
+	if *slot != nil {
+		(*slot).Stop()
+	}
+	*slot = time.AfterFunc(time.Until(t), func() {
+		c.deadlineMu.Lock()
+		defer c.deadlineMu.Unlock()
+		select {
+		case <-done:
+		default:
+			cancel()
+		}
+	})
+}
+
 func (c *ClientConn) Close() error {
 	if c.readDeadline != nil {
 		c.readDeadline.Stop()
@@ -258,31 +275,9 @@ func (c *ClientConn) SetDeadline(t time.Time) error {
 			c.ctxWrite, c.cancelWrite = context.WithCancel(context.Background())
 		default:
 		}
-		// reset the deadline timer
-		if c.readDeadline != nil {
-			c.readDeadline.Stop()
-		}
-		c.readDeadline = time.AfterFunc(t.Sub(now), func() {
-			c.deadlineMu.Lock()
-			defer c.deadlineMu.Unlock()
-			select {
-			case <-c.ctxRead.Done():
-			default:
-				c.cancelRead()
-			}
-		})
-		if c.writeDeadline != nil {
-			c.writeDeadline.Stop()
-		}
-		c.writeDeadline = time.AfterFunc(t.Sub(now), func() {
-			c.deadlineMu.Lock()
-			defer c.deadlineMu.Unlock()
-			select {
-			case <-c.ctxWrite.Done():
-			default:
-				c.cancelWrite()
-			}
-		})
+		// reset the deadline timers
+		c.armDeadline(&c.readDeadline, t, c.ctxRead.Done(), c.cancelRead)
+		c.armDeadline(&c.writeDeadline, t, c.ctxWrite.Done(), c.cancelWrite)
 	} else {
 		select {
 		case <-c.ctxRead.Done():
