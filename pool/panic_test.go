@@ -55,7 +55,6 @@ func TestAllPoolFunctions(t *testing.T) {
 		fn   func(int) PB
 	}{
 		{"Get", Get},
-		{"GetMustBigger", GetMustBigger},
 		{"GetFullCap", GetFullCap},
 	}
 	

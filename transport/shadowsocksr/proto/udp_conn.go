@@ -89,7 +89,7 @@ func (c *PacketConn) WriteTo(b []byte, to string) (n int, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	pb := pool.GetMustBigger(len(addr) + len(b))
+	pb := pool.Get(len(addr) + len(b))
 	defer pool.Put(pb)
 
 	copy(pb, addr)

@@ -109,7 +109,7 @@ func (c *SimulateShadowsockrPacketConn) WriteTo(b []byte, to string) (int, error
 	}
 	
 	// 获取 buffer
-	pb := pool.GetMustBigger(len(addr) + len(b))
+	pb := pool.Get(len(addr) + len(b))
 	defer pool.Put(pb)
 	
 	// 复制数据
@@ -148,9 +148,9 @@ func (c *FixedShadowsockrPacketConn) WriteTo(b []byte, to string) (int, error) {
 		return 0, err
 	}
 	
-	pb := pool.GetMustBigger(len(addr) + len(b))
+	pb := pool.Get(len(addr) + len(b))
 	defer pool.Put(pb)
-	
+
 	copy(pb, addr)
 	copy(pb[len(addr):], b)
 	

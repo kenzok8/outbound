@@ -70,7 +70,7 @@ func TestPutNonPowerOf2Cap(t *testing.T) {
 	Put(small)
 }
 
-func TestGetMustBiggerBug(t *testing.T) {
+func TestGetBucketCapacityBug(t *testing.T) {
 	testCases := []struct {
 		size        int
 		expectedCap int
@@ -84,7 +84,7 @@ func TestGetMustBiggerBug(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			buf := GetMustBigger(tc.size)
+			buf := Get(tc.size)
 			defer buf.Put()
 
 			actualCap := cap(buf)

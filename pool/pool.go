@@ -42,15 +42,6 @@ func init() {
 	}
 }
 
-func GetClosestN(need int) (n int) {
-	// if need is exactly 2^n, return n-1
-	if need&(need-1) == 0 {
-		return bits.Len32(uint32(need)) - 1
-	}
-	// or return its closest n
-	return bits.Len32(uint32(need))
-}
-
 func GetBiggerClosestN(need int) (n int) {
 	n = bits.Len32(uint32(need))
 	// bits.Len32 returns the number of bits needed to represent the number.
@@ -92,21 +83,6 @@ func GetFullCap(size int) PB {
 	a := Get(size)
 	a = a[:cap(a)]
 	return a
-}
-
-func GetMustBigger(size int) PB {
-	if size >= 1 && size <= maxsize {
-		i := GetBiggerClosestN(size)
-		if i < minsizePower {
-			i = minsizePower
-		}
-		b := pools[i].Get().([]byte)
-		if cap(b) < size {
-			return make([]byte, size)
-		}
-		return b[:size]
-	}
-	return make([]byte, size)
 }
 
 func GetZero(size int) []byte {
