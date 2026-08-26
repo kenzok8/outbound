@@ -11,7 +11,6 @@ import (
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/trojanc"
 )
@@ -42,12 +41,11 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort, err err
 		return 0, netip.AddrPort{}, fmt.Errorf("ReadFrom AddrPort: %w", err)
 	}
 
-	buf := pool.Get(2)
-	defer buf.Put()
-	if _, err = io.ReadFull(c.Conn, buf[:2]); err != nil {
+	var lengthBuf [2]byte
+	if _, err = io.ReadFull(c.Conn, lengthBuf[:]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	length := int(binary.BigEndian.Uint16(buf))
+	length := int(binary.BigEndian.Uint16(lengthBuf[:]))
 	if length <= len(p) {
 		if n, err = io.ReadFull(c.Conn, p[:length]); err != nil {
 			return 0, netip.AddrPort{}, err

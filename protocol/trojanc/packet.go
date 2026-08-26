@@ -39,13 +39,12 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 		return 0, netip.AddrPort{}, err
 	}
 
-	buf := pool.Get(2)
-	defer buf.Put()
-	if _, err = io.ReadFull(c.Conn, buf[:2]); err != nil {
+	var lengthBuf [2]byte
+	if _, err = io.ReadFull(c.Conn, lengthBuf[:]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	length := binary.BigEndian.Uint16(buf)
-	buf = pool.Get(2 + int(length))
+	length := binary.BigEndian.Uint16(lengthBuf[:])
+	buf := pool.Get(2 + int(length))
 	defer buf.Put()
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
 		return 0, netip.AddrPort{}, err

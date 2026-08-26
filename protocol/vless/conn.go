@@ -123,10 +123,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 	if c.metadata.Network == "udp" && c.metadata.Flow != XRV {
 		// logrus.Println("!!!", "UDP, write")
-		bLen := pool.Get(2)
-		defer pool.Put(bLen)
-		binary.BigEndian.PutUint16(bLen, uint16(len(b)))
-		if _, err = c.write(bLen); err != nil {
+		var bLen [2]byte
+		binary.BigEndian.PutUint16(bLen[:], uint16(len(b)))
+		if _, err = c.write(bLen[:]); err != nil {
 			return 0, err
 		}
 	}
@@ -161,15 +160,17 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		// defer func() {
 		// 	logrus.Println("READ", n, err)
 		// }()
-		bLen := pool.Get(2)
-		defer pool.Put(bLen)
-		if _, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, bLen); err != nil {
+		var bLen [2]byte
+		if _, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, bLen[:]); err != nil {
 			return 0, err
 		}
-		length := int(binary.BigEndian.Uint16(bLen))
+		length := int(binary.BigEndian.Uint16(bLen[:]))
 		if len(b) < length {
 			return 0, fmt.Errorf("buf size is not enough")
 		}
+		// Read exactly one framed datagram: a plain c.read(b) here could
+		// return a partial or spanning chunk of the UDP-over-TCP stream.
+		return io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, b[:length])
 	}
 
 	return c.read(b)

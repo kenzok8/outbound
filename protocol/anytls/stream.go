@@ -289,7 +289,11 @@ func (c *stream) SetWriteDeadline(t time.Time) error {
 type packetStream struct {
 	*stream
 
-	addr         string
+	addr string
+	// addrPort is addr parsed once at construction: the per-datagram read
+	// path used to re-run netip.ParseAddrPort on every ReadFrom for an
+	// address that never changes.
+	addrPort     netip.AddrPort
 	udpWriteAddr atomic.Bool
 }
 
@@ -306,7 +310,7 @@ func (ps *packetStream) ReadFrom(p []byte) (int, netip.AddrPort, error) {
 	ps.readMutex.Lock()
 	defer ps.readMutex.Unlock()
 
-	addr, _ := netip.ParseAddrPort(ps.addr)
+	addr := ps.addrPort
 	var length uint16
 	var lengthBuf [2]byte
 	if err := ps.readFullLocked(lengthBuf[:]); err != nil {

@@ -9,29 +9,32 @@ import (
 )
 
 func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
+	if !c.metadata.IsPacketAddr() {
+		// Fixed target: read the datagram straight into the caller's
+		// buffer instead of bouncing through a pooled MaxUDPSize copy.
+		n, err = c.read(p)
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		tgt, err := c.dialTargetAddrPort()
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		return n, tgt, nil
+	}
 	buf := pool.Get(MaxUDPSize)
 	defer pool.Put(buf)
 	n, err = c.read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-
-	if c.metadata.IsPacketAddr() {
-		addrTyp, address, err := ExtractPacketAddr(buf)
-		addrLen := PacketAddrLength(addrTyp)
-		if n < addrLen {
-			return 0, netip.AddrPort{}, fmt.Errorf("not enough data to read for PacketAddr")
-		}
-		copy(p, buf[addrLen:n])
-		return n - addrLen, address, err
-	} else {
-		tgt, err := c.dialTargetAddrPort()
-		if err != nil {
-			return 0, netip.AddrPort{}, err
-		}
-		copy(p, buf[:n])
-		return n, tgt, err
+	addrTyp, address, err := ExtractPacketAddr(buf)
+	addrLen := PacketAddrLength(addrTyp)
+	if n < addrLen {
+		return 0, netip.AddrPort{}, fmt.Errorf("not enough data to read for PacketAddr")
 	}
+	copy(p, buf[addrLen:n])
+	return n - addrLen, address, err
 }
 
 func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {

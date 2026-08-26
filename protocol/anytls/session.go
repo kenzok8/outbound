@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -129,9 +130,13 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 	if err != nil {
 		return nil, err
 	}
+	// Lenient like the previous per-datagram parse: domain-shaped packet
+	// addresses yield a zero AddrPort instead of failing the stream.
+	addrPort, _ := netip.ParseAddrPort(packetAddr)
 	return &packetStream{
-		stream: stream,
-		addr:   packetAddr,
+		stream:   stream,
+		addr:     packetAddr,
+		addrPort: addrPort,
 	}, nil
 }
 
