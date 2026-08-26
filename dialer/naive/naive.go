@@ -97,21 +97,9 @@ func parseNaiveURL(link string) (*Naive, error) {
 		Username:      username,
 		Password:      password,
 		Sni:           sni,
-		AllowInsecure: parseAllowInsecure(u.Query()),
+		AllowInsecure: dialer.AllowInsecureFromQuery(u.Query()),
 		Protocol:      u.Scheme,
 	}, nil
-}
-
-func parseAllowInsecure(query url.Values) bool {
-	for _, key := range []string{"allowInsecure", "allow_insecure", "allowinsecure", "skipVerify"} {
-		if value := query.Get(key); value != "" {
-			allowInsecure, _ := strconv.ParseBool(value)
-			if allowInsecure {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (s *Naive) toDialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
@@ -250,13 +238,7 @@ func (d *naiveDialer) newClientConn(ctx context.Context, magicNetwork string) (n
 		}
 	}
 
-	transport := &http2.Transport{
-		ConnPool:        d.pool,
-		IdleConnTimeout: 90 * time.Second,
-		ReadIdleTimeout: 30 * time.Second,
-		PingTimeout:     15 * time.Second,
-	}
-	h2Conn, err := transport.NewClientConn(&netproxy.FakeNetConn{Conn: rawConn})
+	h2Conn, err := d.pool.h2Transport.NewClientConn(&netproxy.FakeNetConn{Conn: rawConn})
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, nil, fmt.Errorf("naive: H2 client: %w", err)
@@ -536,16 +518,28 @@ type naiveH2ConnList struct {
 }
 
 type naiveH2ConnPool struct {
-	mu         sync.Mutex
-	connsByNet map[string]*naiveH2ConnList
-	connToNet  map[*http2.ClientConn]string
+	mu          sync.Mutex
+	h2Transport *http2.Transport
+	connsByNet  map[string]*naiveH2ConnList
+	connToNet   map[*http2.ClientConn]string
 }
 
 func newNaiveH2ConnPool() *naiveH2ConnPool {
-	return &naiveH2ConnPool{
+	p := &naiveH2ConnPool{
 		connsByNet: make(map[string]*naiveH2ConnList),
 		connToNet:  make(map[*http2.ClientConn]string),
 	}
+	// One shared HTTP/2 transport for every pooled connection: a fresh
+	// transport per conn duplicated timers and bookkeeping for no benefit.
+	// ConnPool must loop back to this pool so death notifications still
+	// reach MarkDead.
+	p.h2Transport = &http2.Transport{
+		ConnPool:        p,
+		IdleConnTimeout: 90 * time.Second,
+		ReadIdleTimeout: 30 * time.Second,
+		PingTimeout:     15 * time.Second,
+	}
+	return p
 }
 
 func (p *naiveH2ConnPool) GetConn(ctx context.Context, d *naiveDialer, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
@@ -595,6 +589,10 @@ func (p *naiveH2ConnPool) registerConn(magicNetwork string, rawConn netproxy.Con
 }
 
 func (p *naiveH2ConnPool) GetClientConn(_ *http.Request, _ string) (*http2.ClientConn, error) {
+	// Always erroring is intentional: callers use pooled conns directly via
+	// GetConn and never ask the transport to pick one. Consequence: the
+	// transport's own IdleConnTimeout path never fires for these conns —
+	// idle raw conns are only reclaimed when the peer GoAways (MarkDead).
 	return nil, fmt.Errorf("naiveH2ConnPool: use cached client connections directly")
 }
 

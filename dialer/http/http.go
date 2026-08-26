@@ -38,8 +38,11 @@ func NewHTTP(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string
 
 func ParseHTTPURL(link string) (data *HTTP, err error) {
 	u, err := url.Parse(link)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil {
 		return nil, fmt.Errorf("%w: %v", dialer.InvalidParameterErr, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%w: unsupported scheme %q", dialer.InvalidParameterErr, u.Scheme)
 	}
 	pwd, _ := u.User.Password()
 	strPort := u.Port()
@@ -55,16 +58,7 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("error when parsing port: %w", err)
 	}
-	allowInsecure, _ := strconv.ParseBool(u.Query().Get("allowInsecure"))
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
-	}
+	allowInsecure := dialer.AllowInsecureFromQuery(u.Query())
 	return &HTTP{
 		Name:          u.Fragment,
 		Server:        u.Hostname(),

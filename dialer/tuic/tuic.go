@@ -81,7 +81,7 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 	//trojan://password@server:port#escape(remarks)
 	t, err := url.Parse(u)
 	if err != nil {
-		err = fmt.Errorf("invalid trojan format")
+		err = fmt.Errorf("invalid tuic format")
 		return
 	}
 	var alpn []string
@@ -91,23 +91,8 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 			alpn[i] = strings.TrimSpace(alpn[i])
 		}
 	}
-	allowInsecure, _ := strconv.ParseBool(t.Query().Get("allowInsecure"))
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("allow_insecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("allowinsecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("skipVerify"))
-	}
-	sni := t.Query().Get("peer")
-	if sni == "" {
-		sni = t.Query().Get("sni")
-	}
-	if sni == "" {
-		sni = t.Hostname()
-	}
+	allowInsecure := dialer.AllowInsecureFromQuery(t.Query())
+	sni := dialer.SNIFromQuery(t.Query(), t.Hostname())
 	disableSni, _ := strconv.ParseBool(t.Query().Get("disable_sni"))
 	if disableSni {
 		sni = ""
@@ -128,23 +113,12 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 		AllowInsecure:     allowInsecure,
 		DisableSni:        disableSni,
 		CongestionControl: t.Query().Get("congestion_control"),
-		Cwnd:              cwndFromQuery(t),
+		Cwnd:              dialer.CwndFromQuery(t),
 		Alpn:              alpn,
 		UdpRelayMode:      strings.ToLower(t.Query().Get("udp_relay_mode")),
 		Protocol:          "tuic",
 	}
 	return data, nil
-}
-
-// cwndFromQuery parses the "cwnd" query parameter. Negative values are
-// treated as unset so a malformed link degrades to the default congestion
-// controller instead of panicking downstream.
-func cwndFromQuery(u *url.URL) int {
-	cwnd, err := strconv.Atoi(u.Query().Get("cwnd"))
-	if err != nil || cwnd < 0 {
-		return 0
-	}
-	return cwnd
 }
 
 func (t *Tuic) ExportToURL() string {

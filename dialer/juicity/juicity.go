@@ -48,7 +48,6 @@ func NewJuicity(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link str
 func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
 	d := nextDialer
 	var err error
-	var flags protocol.Flags
 	tlsConfig := &tls.Config{
 		NextProtos:         []string{"h3"},
 		MinVersion:         tls.VersionTLS13,
@@ -82,7 +81,6 @@ func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer)
 		User:         s.User,
 		Password:     s.Password,
 		IsClient:     true,
-		Flags:        flags,
 	}); err != nil {
 		return nil, nil, err
 	}
@@ -100,23 +98,8 @@ func ParseJuicityURL(u string) (data *Juicity, err error) {
 		err = fmt.Errorf("invalid juicity format")
 		return
 	}
-	allowInsecure, _ := strconv.ParseBool(t.Query().Get("allowInsecure"))
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("allow_insecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("allowinsecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(t.Query().Get("skipVerify"))
-	}
-	sni := t.Query().Get("peer")
-	if sni == "" {
-		sni = t.Query().Get("sni")
-	}
-	if sni == "" {
-		sni = t.Hostname()
-	}
+	allowInsecure := dialer.AllowInsecureFromQuery(t.Query())
+	sni := dialer.SNIFromQuery(t.Query(), t.Hostname())
 	port, err := strconv.Atoi(t.Port())
 	if err != nil {
 		return nil, dialer.InvalidParameterErr
@@ -131,22 +114,11 @@ func ParseJuicityURL(u string) (data *Juicity, err error) {
 		Sni:                   sni,
 		AllowInsecure:         allowInsecure,
 		CongestionControl:     t.Query().Get("congestion_control"),
-		Cwnd:                  cwndFromQuery(t),
+		Cwnd:                  dialer.CwndFromQuery(t),
 		PinnedCertchainSha256: t.Query().Get("pinned_certchain_sha256"),
 		Protocol:              "juicity",
 	}
 	return data, nil
-}
-
-// cwndFromQuery parses the "cwnd" query parameter. Negative values are
-// treated as unset so a malformed link degrades to the default congestion
-// controller instead of panicking downstream.
-func cwndFromQuery(u *url.URL) int {
-	cwnd, err := strconv.Atoi(u.Query().Get("cwnd"))
-	if err != nil || cwnd < 0 {
-		return 0
-	}
-	return cwnd
 }
 
 func (t *Juicity) ExportToURL() string {
