@@ -285,6 +285,15 @@ func (t *clientImpl) forceClose(quicConn quic.Connection, err error) {
 		t.onClose = nil
 	}
 	t.connMutex.Unlock()
+	// Tear the association queues down immediately: polling ReadFrom
+	// callers must not stay blocked in PopFrontBlock for the whole 10s
+	// grace period after the transport is already dead. The QUIC and
+	// underlay closes below still get their grace period.
+	t.udpIncomingPacketsMap.Range(func(key, value any) bool {
+		_ = value.(*Packets).Close()
+		t.udpIncomingPacketsMap.Delete(key)
+		return true
+	})
 	// Give 10s for closing.
 	time.AfterFunc(10*time.Second, func() {
 		t.connMutex.Lock()
@@ -308,11 +317,6 @@ func (t *clientImpl) forceClose(quicConn quic.Connection, err error) {
 			err = t.underConn.Close()
 			t.underConn = nil
 		}
-		t.udpIncomingPacketsMap.Range(func(key, value any) bool {
-			_ = value.(*Packets).Close()
-			t.udpIncomingPacketsMap.Delete(key)
-			return true
-		})
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -465,19 +466,76 @@ func TestQuicStreamPacketConnMetadataForAddrCachesLastTarget(t *testing.T) {
 	}
 
 	var q quicStreamPacketConn
+	var first *Address
 	for i := 0; i < 2; i++ {
-		if _, err := q.metadataForAddr("127.0.0.1:53"); err != nil {
-			t.Fatalf("metadataForAddr() error = %v", err)
+		address, err := q.addressForAddr("127.0.0.1:53")
+		if err != nil {
+			t.Fatalf("addressForAddr() error = %v", err)
+		}
+		if i == 0 {
+			first = address
+		} else if address != first {
+			t.Fatalf("addressForAddr() did not reuse the cached address")
+		}
+		if address.TYPE != AtypIPv4 || address.PORT != 53 {
+			t.Fatalf("addressForAddr() produced %+v", address)
 		}
 	}
 	if calls != 1 {
 		t.Fatalf("parseMetadata() call count = %d, want 1", calls)
 	}
 
-	if _, err := q.metadataForAddr("127.0.0.2:54"); err != nil {
-		t.Fatalf("metadataForAddr() second target error = %v", err)
+	if _, err := q.addressForAddr("127.0.0.2:54"); err != nil {
+		t.Fatalf("addressForAddr() second target error = %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("parseMetadata() call count after target change = %d, want 2", calls)
+	}
+}
+
+// TestPacketWriteToAtypNoneFrameLayout locks the serialization of non-first
+// TUIC fragments: the AtypNone address byte must survive on the wire and the
+// payload must not be shifted over it (a previous WriteToBytes bug returned 0
+// for the address section and let DATA cover the type byte).
+func TestPacketWriteToAtypNoneFrameLayout(t *testing.T) {
+	packet := NewPacket(7, 9, 2, 1, 4, &Address{TYPE: AtypNone}, []byte("DATA"), Ver5)
+
+	buf := make([]byte, packet.BytesLen())
+	n := packet.WriteToBytes(buf)
+	if n != packet.BytesLen() {
+		t.Fatalf("WriteToBytes() = %d, want %d (BytesLen must be exact)", n, packet.BytesLen())
+	}
+	// Layout: head(2) + ASSOC(2) + PKT(2) + FRAG_TOTAL(1) + FRAG_ID(1) + SIZE(2)
+	// + AtypNone(1) + DATA(4).
+	want := []byte{Ver5, byte(PacketType), 0, 7, 0, 9, 2, 1, 0, 4, AtypNone, 'D', 'A', 'T', 'A'}
+	if string(buf[:n]) != string(want) {
+		t.Fatalf("serialized frame = %v, want %v", buf[:n], want)
+	}
+}
+
+// TestPacketWriteToPooledBufferMatchesScratch verifies the Extend fast path
+// of Packet.WriteTo into a pooled buffer produces byte-identical output to
+// the scratch-buffer path.
+func TestPacketWriteToPooledBufferMatchesScratch(t *testing.T) {
+	address := NewAddress(&protocol.Metadata{
+		Type:     protocol.MetadataTypeDomain,
+		Hostname: "example.com",
+		Port:     53,
+	})
+	packet := NewPacket(1, 2, 1, 0, 5, address, []byte("hello"), Ver5)
+
+	scratch := make([]byte, packet.BytesLen())
+	n := packet.WriteToBytes(scratch)
+
+	buf := pool.GetBuffer()
+	defer pool.PutBuffer(buf)
+	if err := packet.WriteTo(buf); err != nil {
+		t.Fatalf("WriteTo(pooled) error = %v", err)
+	}
+	if buf.Len() != n {
+		t.Fatalf("pooled buffer length = %d, want %d", buf.Len(), n)
+	}
+	if string(buf.Bytes()) != string(scratch[:n]) {
+		t.Fatalf("pooled bytes = %v, want %v", buf.Bytes(), scratch[:n])
 	}
 }

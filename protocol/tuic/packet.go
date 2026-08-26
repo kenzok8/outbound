@@ -28,6 +28,11 @@ type Packets struct {
 	ch       chan *Packet
 	receiver *packetHandlerRegistration
 	closed   atomic.Bool
+
+	// deliverMu serializes direct receiver delivery (PushBack) against the
+	// receiver swap + queued-prefix drain in registerPacketHandler, so a
+	// packet pushed after the swap cannot overtake the drained prefix (FIFO).
+	deliverMu sync.Mutex
 }
 
 type packetHandlerRegistration struct {
@@ -51,12 +56,17 @@ func (p *Packets) PushBack(packet *Packet) {
 	}
 	if receiver := p.receiver; receiver != nil {
 		p.mu.Unlock()
+		// Serialize against registerPacketHandler's drain: acquiring
+		// deliverMu after dropping mu keeps lock order deliverMu > mu.
+		p.deliverMu.Lock()
 		if receiver.active.Load() {
 			// handler owns the packet on true; on false deliverPacket has
 			// already released DATA (or the packet was not pool-backed).
+			p.deliverMu.Unlock()
 			receiver.handler(packet)
 			return
 		}
+		p.deliverMu.Unlock()
 		// active=false (unregister race): handler never ran, release here.
 		packet.releaseData()
 		return
@@ -80,6 +90,12 @@ func (p *Packets) registerPacketHandler(handler func(*Packet) bool) (func(), boo
 	}
 	registration := &packetHandlerRegistration{handler: handler}
 	registration.active.Store(true)
+
+	// Hold deliverMu across the receiver swap and the drain so a concurrent
+	// PushBack that observes the new receiver cannot deliver its packet
+	// before the drained prefix (FIFO, same pattern as hysteria2).
+	p.deliverMu.Lock()
+	defer p.deliverMu.Unlock()
 
 	p.mu.Lock()
 	if p.closed.Load() || p.receiver != nil {
@@ -153,7 +169,9 @@ type quicStreamPacketConn struct {
 	mu sync.Mutex
 
 	target string
-	addr   outboundcommon.LastStringValue[protocol.Metadata]
+	// addr caches the serialized wire Address per destination so the send
+	// path stops re-parsing the cached metadata on every datagram.
+	addr outboundcommon.LastStringValue[*Address]
 
 	connId          uint16
 	quicConn        quic.Connection
@@ -372,6 +390,16 @@ func (q *quicStreamPacketConn) maybeCleanupDeFraggers(nowNano int64) {
 func (q *quicStreamPacketConn) SetDeadline(t time.Time) error {
 	q.muTimer.Lock()
 	defer q.muTimer.Unlock()
+	if t.IsZero() {
+		// A zero time clears the deadline per the net.Conn contract;
+		// time.Until would yield a hugely negative duration and fire the
+		// close callback immediately.
+		if q.deadlineTimer != nil {
+			q.deadlineTimer.Stop()
+			q.deadlineTimer = nil
+		}
+		return nil
+	}
 	dur := time.Until(t)
 	if q.deadlineTimer != nil {
 		q.deadlineTimer.Reset(dur)
@@ -413,7 +441,7 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 		}
 		if packet.FRAG_TOTAL <= 1 {
 			n := copy(p, packet.DATA)
-			addr := packet.ADDR.UDPAddr().AddrPort()
+			addr := packet.ADDR.UDPAddrPort()
 			packet.releaseData()
 			return n, addr, nil
 		}
@@ -453,7 +481,13 @@ func (q *quicStreamPacketConn) RegisterPacketReceiver(handler netproxy.PacketRec
 }
 
 func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandler, packet *Packet) bool {
-	if packet == nil || q.closed.Load() {
+	if packet == nil {
+		return false
+	}
+	if q.closed.Load() {
+		// Callers rely on "a false return means deliverPacket already
+		// released DATA"; honor that contract on this early exit too.
+		packet.releaseData()
 		return false
 	}
 	if packet.FRAG_TOTAL <= 1 {
@@ -463,7 +497,7 @@ func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandl
 		}
 		received := netproxy.NewReceivedPacket(
 			packet.DATA,
-			packet.ADDR.UDPAddr().AddrPort(),
+			packet.ADDR.UDPAddrPort(),
 			nil,
 			packet.releaseData,
 		)
@@ -484,7 +518,12 @@ func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandl
 		buffer.Put()
 		return true
 	}
-	q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
+	if bucket.len() == 0 {
+		// Mirror ReadFrom: only retire the bucket once every in-flight
+		// defragger for this recycled 16-bit PKT_ID has completed. Deleting
+		// while other candidates remain strands their received fragments.
+		q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
+	}
 	received := netproxy.NewReceivedPacket(buffer[:n], addr, nil, buffer.Put)
 	if handler(received) {
 		return true
@@ -507,11 +546,10 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 	}
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
-	mdata, err := q.metadataForAddr(addr)
+	address, err := q.addressForAddr(addr)
 	if err != nil {
 		return 0, err
 	}
-	address := NewAddress(&mdata)
 	pktId := uint16(fastrand.Uint32())
 	packet := NewPacket(q.connId, pktId, 1, 0, uint16(len(p)), address, p, Ver5)
 	switch q.udpRelayMode {
@@ -557,16 +595,17 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 	return
 }
 
-func (q *quicStreamPacketConn) metadataForAddr(addr string) (protocol.Metadata, error) {
+func (q *quicStreamPacketConn) addressForAddr(addr string) (*Address, error) {
 	if cached, ok := q.addr.Load(addr); ok {
 		return cached, nil
 	}
 	mdata, err := parseMetadata(addr)
 	if err != nil {
-		return protocol.Metadata{}, err
+		return nil, err
 	}
-	q.addr.Store(addr, mdata)
-	return mdata, nil
+	address := NewAddress(&mdata)
+	q.addr.Store(addr, address)
+	return address, nil
 }
 
 func (q *quicStreamPacketConn) LocalAddr() net.Addr {
