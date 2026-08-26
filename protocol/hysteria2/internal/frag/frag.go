@@ -62,7 +62,7 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 	if m.PacketID != d.pktID || m.FragCount != uint8(len(d.frags)) {
 		// new message, clear previous state: release the buffers of any
 		// fragments that were still pending reassembly.
-		d.releasePending()
+		d.releaseHeld()
 		d.pktID = m.PacketID
 		d.frags = make([]*protocol.UDPMessage, m.FragCount)
 		d.frags[m.FragID] = m
@@ -82,11 +82,11 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			// The assembled payload lives in the freshly allocated data
 			// slice; every fragment's backing buffer can now be returned
 			// to its pool. The trigger fragment's Release must be cleared:
-			// its buffer was already released by releaseAll, and the
+			// its buffer was already released by releaseHeld, and the
 			// caller will (correctly) invoke Release on the returned
 			// message - double-returning the same buffer to the pool
 			// would hand one buffer to two consumers.
-			d.releaseAll()
+			d.releaseHeld()
 			m.Data = data
 			m.FragID = 0
 			m.FragCount = 1
@@ -102,22 +102,10 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 	return nil
 }
 
-// releasePending returns the pooled storage of fragments that are still held
-// for reassembly. Used when a new message supersedes an incomplete one.
-func (d *Defragger) releasePending() {
-	for _, frag := range d.frags {
-		if frag != nil && frag.Release != nil {
-			frag.Release()
-		}
-	}
-	d.frags = nil
-	d.count = 0
-	d.size = 0
-}
-
-// releaseAll returns the pooled storage of every fragment that contributed to
-// a completed reassembly, including the fragment that triggered it.
-func (d *Defragger) releaseAll() {
+// releaseHeld returns the pooled storage of every held fragment — whether
+// still pending reassembly (superseded by a newer message, or the defragger
+// is closing) or just completed — and resets the defragger state.
+func (d *Defragger) releaseHeld() {
 	for _, frag := range d.frags {
 		if frag != nil && frag.Release != nil {
 			frag.Release()
@@ -134,5 +122,5 @@ func (d *Defragger) releaseAll() {
 // session object itself is garbage collected.
 func (d *Defragger) Close() {
 	d.closed = true
-	d.releasePending()
+	d.releaseHeld()
 }
