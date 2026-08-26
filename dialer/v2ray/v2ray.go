@@ -364,6 +364,10 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 	return data, nil
 }
 
+// vmessLegacyAddrRe parses the legacy vmess://BASE64 form's
+// "Security:UUID@Host:Port" body.
+var vmessLegacyAddrRe = regexp.MustCompile(`.*:(.+)@(.+):(\d+)`)
+
 func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 	var info V2Ray
 	// perform base64 decoding and unmarshal to VmessInfo
@@ -378,7 +382,7 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 		if err != nil {
 			return
 		}
-		re := regexp.MustCompile(`.*:(.+)@(.+):(\d+)`)
+		re := vmessLegacyAddrRe
 		s := strings.Split(vmess[8:], "?")[0]
 		s, err = common.Base64StdDecode(s)
 		if err != nil {

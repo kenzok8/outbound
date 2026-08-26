@@ -403,15 +403,16 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 	// Extract the base network type (tcp/udp) and requested IP family from magic network if present.
 	baseNetwork, requestedIPVersion := d.getNetworkPreference(network)
 
-	// Log every dial attempt for debugging
-	logger.WithFields(logrus.Fields{
-		"proxy_addr":   d.proxyAddr,
-		"target":       addr,
-		"network":      network,
-		"base_network": baseNetwork,
-		"ip_version":   requestedIPVersion,
-		"is_proxy":     d.isProxyAddress(addr),
-	}).Debug("[StickyIP] DialContext called")
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithFields(logrus.Fields{
+			"proxy_addr":   d.proxyAddr,
+			"target":       addr,
+			"network":      network,
+			"base_network": baseNetwork,
+			"ip_version":   requestedIPVersion,
+			"is_proxy":     d.isProxyAddress(addr),
+		}).Debug("[StickyIP] DialContext called")
+	}
 
 	// Check if we should use a cached proxy IP for this connection
 	if d.isProxyAddress(addr) {
@@ -453,21 +454,25 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			}
 		}
 		// No cached IP, or cached IP failed - resolve and try all IPs
-		logger.WithFields(logrus.Fields{
-			"proxy_addr":  d.proxyAddr,
-			"target":      addr,
-			"network":     network,
-			"cached_addr": cachedAddr,
-		}).Debug("[StickyIP] No valid cached IP - resolving proxy domain")
+		if logger.IsLevelEnabled(logrus.DebugLevel) {
+			logger.WithFields(logrus.Fields{
+				"proxy_addr":  d.proxyAddr,
+				"target":      addr,
+				"network":     network,
+				"cached_addr": cachedAddr,
+			}).Debug("[StickyIP] No valid cached IP - resolving proxy domain")
+		}
 		return d.dialWithIpResolution(ctx, network, addr, baseNetwork, requestedIPVersion)
 	}
 
 	// Not the proxy address, just pass through
-	logger.WithFields(logrus.Fields{
-		"proxy_addr": d.proxyAddr,
-		"target":     addr,
-		"network":    network,
-	}).Trace("[StickyIP] Pass-through (not proxy address)")
+	if logger.IsLevelEnabled(logrus.TraceLevel) {
+		logger.WithFields(logrus.Fields{
+			"proxy_addr": d.proxyAddr,
+			"target":     addr,
+			"network":    network,
+		}).Trace("[StickyIP] Pass-through (not proxy address)")
+	}
 	return d.dialer.DialContext(ctx, network, addr)
 }
 
