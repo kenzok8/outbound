@@ -40,30 +40,41 @@ func (pc *PktConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler)
 	return netproxy.RegisterMappedPacketReceiver(receiver, handler, pc.mapReceivedPacket)
 }
 
+// parseSocksUdpPayload splits one decoded SOCKS UDP datagram into the reply
+// payload and its source address. Shared by the polling readFrom and the
+// push-mode receiver so the two decode paths cannot drift.
+func parseSocksUdpPayload(data []byte) (payload []byte, from netip.AddrPort, err error) {
+	if len(data) < 3 {
+		return nil, netip.AddrPort{}, errors.New("not enough size to get addr")
+	}
+	tgtAddr := socks.SplitAddr(data[3:])
+	if tgtAddr == nil {
+		return nil, netip.AddrPort{}, errors.New("can not get target addr")
+	}
+	addrPort, ok := tgtAddr.AddrPort()
+	if !ok {
+		// Domain-shaped reply: keep the legacy resolution path.
+		target, err := net.ResolveUDPAddr("udp", tgtAddr.String())
+		if err != nil {
+			return nil, netip.AddrPort{}, errors.New("wrong target addr")
+		}
+		addrPort = target.AddrPort()
+	}
+	return data[3+len(tgtAddr):], addrPort, nil
+}
+
 func (pc *PktConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.ReceivedPacket, bool) {
 	if packet.Err != nil {
 		return packet, true
 	}
-	data := packet.Data
-	if len(data) < 3 {
-		packet.Err = errors.New("not enough size to get addr")
-		packet.Data = nil
-		return packet, true
-	}
-	tgtAddr := socks.SplitAddr(data[3:])
-	if tgtAddr == nil {
-		packet.Err = errors.New("can not get target addr")
-		packet.Data = nil
-		return packet, true
-	}
-	target, err := net.ResolveUDPAddr("udp", tgtAddr.String())
+	payload, from, err := parseSocksUdpPayload(packet.Data)
 	if err != nil {
-		packet.Err = errors.New("wrong target addr")
+		packet.Err = err
 		packet.Data = nil
 		return packet, true
 	}
-	packet.Data = data[3+len(tgtAddr):]
-	packet.From = target.AddrPort()
+	packet.Data = payload
+	packet.From = from
 	return packet, true
 }
 
@@ -131,18 +142,13 @@ func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, erro
 	// +----+------+------+----------+----------+----------+
 	// | 2  |  1   |  1   | Variable |    2     | Variable |
 	// +----+------+------+----------+----------+----------+
-	tgtAddr := socks.SplitAddr(buf[3:n])
-	if tgtAddr == nil {
-		return n, raddr, netip.AddrPort{}, errors.New("can not get target addr")
-	}
-
-	target, err := net.ResolveUDPAddr("udp", tgtAddr.String())
+	payload, target, err := parseSocksUdpPayload(buf[3:n])
 	if err != nil {
-		return n, raddr, netip.AddrPort{}, errors.New("wrong target addr")
+		return n, raddr, netip.AddrPort{}, err
 	}
 
-	n = copy(b, buf[3+len(tgtAddr):n])
-	return n, raddr, target.AddrPort(), err
+	n = copy(b, payload)
+	return n, raddr, target, nil
 }
 
 // WriteTo overrides the original function from transport.PacketConn.

@@ -30,36 +30,44 @@ func (c *UdpConn) RegisterPacketReceiver(handler netproxy.PacketReceiveHandler) 
 	return netproxy.RegisterMappedPacketReceiver(receiver, handler, c.mapReceivedPacket)
 }
 
+// decryptAndSplitUdp decrypts one stream-cipher UDP datagram in place and
+// splits it into the reply payload and its source address. Shared by the
+// polling ReadFrom and the push-mode receiver so the two decode paths
+// cannot drift.
+func (c *UdpConn) decryptAndSplitUdp(data []byte) (payload []byte, from netip.AddrPort, err error) {
+	if len(data) < c.cipher.InfoIVLen() {
+		return nil, netip.AddrPort{}, fmt.Errorf("packet too short")
+	}
+	dec, err := c.cipher.NewDecryptor(data[:c.cipher.InfoIVLen()])
+	if err != nil {
+		return nil, netip.AddrPort{}, err
+	}
+	body := data[c.cipher.InfoIVLen():]
+	dec.XORKeyStream(body, body)
+	addr := socks.SplitAddr(body)
+	if addr == nil {
+		return nil, netip.AddrPort{}, fmt.Errorf("no addr present")
+	}
+	from, ok := addr.AddrPort()
+	if !ok {
+		if from, err = netip.ParseAddrPort(addr.String()); err != nil {
+			return nil, netip.AddrPort{}, fmt.Errorf("bad addr: %w", err)
+		}
+	}
+	return body[len(addr):], from, nil
+}
+
 func (c *UdpConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.ReceivedPacket, bool) {
 	if packet.Err != nil {
 		return packet, true
 	}
-	if len(packet.Data) < c.cipher.InfoIVLen() {
-		packet.Err = fmt.Errorf("packet too short")
-		packet.Data = nil
-		return packet, true
-	}
-	dec, err := c.cipher.NewDecryptor(packet.Data[:c.cipher.InfoIVLen()])
+	payload, from, err := c.decryptAndSplitUdp(packet.Data)
 	if err != nil {
 		packet.Err = err
 		packet.Data = nil
 		return packet, true
 	}
-	data := packet.Data[c.cipher.InfoIVLen():]
-	dec.XORKeyStream(data, data)
-	addr := socks.SplitAddr(data)
-	if addr == nil {
-		packet.Err = fmt.Errorf("no addr present")
-		packet.Data = nil
-		return packet, true
-	}
-	from, err := netip.ParseAddrPort(addr.String())
-	if err != nil {
-		packet.Err = fmt.Errorf("bad addr: %w", err)
-		packet.Data = nil
-		return packet, true
-	}
-	packet.Data = data[len(addr):]
+	packet.Data = payload
 	packet.From = from
 	return packet, true
 }
@@ -85,27 +93,12 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) {
 		return n, netip.AddrPort{}, err
 	}
 
-	if n < c.cipher.InfoIVLen() {
-		return 0, netip.AddrPort{}, fmt.Errorf("packet too short")
-	}
-	dec, err := c.cipher.NewDecryptor(b[:c.cipher.InfoIVLen()])
+	payload, from, err := c.decryptAndSplitUdp(b[:n])
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	data := b[c.cipher.InfoIVLen():n]
-	dec.XORKeyStream(data, data)
 
-	addr := socks.SplitAddr(data)
-	if addr == nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("no addr present")
-	}
-
-	from, err = netip.ParseAddrPort(addr.String())
-	if err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("bad addr: %w", err)
-	}
-
-	n = copy(b, data[len(addr):])
+	n = copy(b, payload)
 
 	return n, from, nil
 }

@@ -3,10 +3,12 @@
 package socks
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -75,6 +77,39 @@ func (a Addr) String() string {
 	}
 
 	return net.JoinHostPort(host, port)
+}
+
+// AddrPort converts a binary SOCKS address straight to a netip.AddrPort,
+// skipping the host-string serialization and re-parse of String(). IP-typed
+// addresses hit the fast path; domain-typed (or malformed) addresses return
+// ok=false and callers keep their legacy string-based handling.
+func (a Addr) AddrPort() (netip.AddrPort, bool) {
+	if len(a) < 1 {
+		return netip.AddrPort{}, false
+	}
+	switch a[0] {
+	case ATypIP4:
+		if len(a) < 1+net.IPv4len+2 {
+			return netip.AddrPort{}, false
+		}
+		ip, ok := netip.AddrFromSlice(a[1 : 1+net.IPv4len])
+		if !ok {
+			return netip.AddrPort{}, false
+		}
+		port := binary.BigEndian.Uint16(a[1+net.IPv4len : 1+net.IPv4len+2])
+		return netip.AddrPortFrom(ip, port), true
+	case ATypIP6:
+		if len(a) < 1+net.IPv6len+2 {
+			return netip.AddrPort{}, false
+		}
+		ip, ok := netip.AddrFromSlice(a[1 : 1+net.IPv6len])
+		if !ok {
+			return netip.AddrPort{}, false
+		}
+		port := binary.BigEndian.Uint16(a[1+net.IPv6len : 1+net.IPv6len+2])
+		return netip.AddrPortFrom(ip, port), true
+	}
+	return netip.AddrPort{}, false
 }
 
 // Network returns network name. Implements netip.AddrPort interface.
