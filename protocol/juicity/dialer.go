@@ -164,9 +164,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if magicNetwork.Network == "tcp" {
 			time.AfterFunc(100*time.Millisecond, func() {
 				// avoid the situation where the server sends messages first
-				if _, err = conn.Write(nil); err != nil {
-					return
-				}
+				// Write to the underlay purely for its side effect (wake the
+				// server); probe errors are not reportable here anymore.
+				_, _ = conn.Write(nil)
 			})
 			return conn, nil
 		} else {
