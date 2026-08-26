@@ -317,6 +317,20 @@ func ReadPacket(reader BufferedReader) (c *Packet, err error) {
 }
 
 func (c Packet) WriteTo(writer BufferedWriter) (err error) {
+	// Serialize straight into the writer's tail when it supports Extend
+	// (pool/bytes.Buffer), skipping the intermediate heap buffer and extra
+	// copy of the scratch path. BytesLen is exact, so the extended region
+	// needs no truncation.
+	if ext, ok := writer.(interface {
+		Extend(n int)
+		Len() int
+		Bytes() []byte
+	}); ok {
+		start := ext.Len()
+		ext.Extend(c.BytesLen())
+		_ = c.WriteToBytes(ext.Bytes()[start:])
+		return nil
+	}
 	buf := make([]byte, c.BytesLen())
 	n := c.WriteToBytes(buf)
 	_, err = writer.Write(buf[:n])
@@ -449,10 +463,20 @@ func NewAddress(metadata *protocol.Metadata) *Address {
 	switch metadata.Type {
 	case protocol.MetadataTypeIPv4:
 		addrType = AtypIPv4
-		addr = net.ParseIP(metadata.Hostname).To4()
+		if metadata.IP.Is4() {
+			ip4 := metadata.IP.As4()
+			addr = ip4[:]
+		} else {
+			addr = net.ParseIP(metadata.Hostname).To4()
+		}
 	case protocol.MetadataTypeIPv6:
 		addrType = AtypIPv6
-		addr = net.ParseIP(metadata.Hostname).To16()
+		if metadata.IP.IsValid() && !metadata.IP.Is4() {
+			ip16 := metadata.IP.As16()
+			addr = ip16[:]
+		} else {
+			addr = net.ParseIP(metadata.Hostname).To16()
+		}
 	case protocol.MetadataTypeDomain:
 		addrType = AtypDomainName
 		addr = make([]byte, len(metadata.Hostname)+1)
@@ -565,7 +589,9 @@ func (c Address) WriteTo(writer BufferedWriter) (err error) {
 func (c Address) WriteToBytes(b []byte) (n int) {
 	b[0] = c.TYPE
 	if c.TYPE == AtypNone {
-		return
+		// The type byte alone is serialized; returning 0 here would make
+		// the caller lay the payload over it and shift the frame.
+		return 1
 	}
 	n = copy(b[1:], c.ADDR)
 	binary.BigEndian.PutUint16(b[1+n:], c.PORT)
@@ -591,7 +617,22 @@ func (c Address) UDPAddr() *net.UDPAddr {
 	}
 }
 
+// UDPAddrPort returns the address as a netip.AddrPort without the
+// intermediate net.UDPAddr allocation, for per-datagram receive paths.
+// Domain-typed addresses fall back to UDPAddr and yield an invalid AddrPort,
+// exactly like the previous UDPAddr().AddrPort() chain.
+func (c Address) UDPAddrPort() netip.AddrPort {
+	if addr, ok := netip.AddrFromSlice(c.ADDR); ok {
+		return netip.AddrPortFrom(addr, c.PORT)
+	}
+	return c.UDPAddr().AddrPort()
+}
+
 func (c Address) BytesLen() int {
+	if c.TYPE == AtypNone {
+		// Mirror the serializers: only the type byte goes on the wire.
+		return 1
+	}
 	return 1 + len(c.ADDR) + 2
 }
 
