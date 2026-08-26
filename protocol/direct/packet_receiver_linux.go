@@ -15,7 +15,11 @@ import (
 
 const (
 	directPacketReceiverBufferSize = 65535
-	directPacketReceiverBatchSize  = 64
+	// Small tier matching dae-side ingress buffers (the EthernetMtu / 2 KiB
+	// bucket): the overwhelming majority of proxy replies fit well under
+	// 2 KiB, and a 256-deep reply queue of 64 KiB buffers can pin ~16 MiB.
+	directPacketReceiverSmallBufferSize = 2048
+	directPacketReceiverBatchSize       = 64
 )
 
 // packetReceiverRegistry multiplexes direct UDP sockets through one Linux
@@ -32,6 +36,10 @@ type directPacketReceiverEntry struct {
 	fd      int
 	handler netproxy.PacketReceiveHandler
 	active  atomic.Bool
+	// needBigBuffers flips on the first datagram that exceeded the small
+	// tier (observed via MSG_TRUNC) and switches the entry to full-size
+	// buffers from then on.
+	needBigBuffers atomic.Bool
 }
 
 var defaultPacketReceiverRegistry = &packetReceiverRegistry{}
@@ -166,8 +174,15 @@ func (r *packetReceiverRegistry) drain(entry *directPacketReceiverEntry) {
 		if !entry.active.Load() {
 			return
 		}
-		buf := pool.GetFullCap(directPacketReceiverBufferSize)
-		n, sockaddr, err := unix.Recvfrom(entry.fd, buf, unix.MSG_DONTWAIT)
+		bufSize := directPacketReceiverSmallBufferSize
+		if entry.needBigBuffers.Load() {
+			bufSize = directPacketReceiverBufferSize
+		}
+		buf := pool.GetFullCap(bufSize)
+		// MSG_TRUNC makes Recvfrom return the real datagram length even
+		// when it exceeded the buffer, which is how oversize traffic is
+		// detected on the small tier.
+		n, sockaddr, err := unix.Recvfrom(entry.fd, buf, unix.MSG_DONTWAIT|unix.MSG_TRUNC)
 		if err != nil {
 			pool.Put(buf)
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR {
@@ -178,6 +193,14 @@ func (r *packetReceiverRegistry) drain(entry *directPacketReceiverEntry) {
 			}
 			r.deliverError(entry, err)
 			return
+		}
+		if n > len(buf) {
+			// Real size (via MSG_TRUNC) exceeded the small tier: this one
+			// datagram is lost; upgrade the entry so the rest of the burst
+			// survives on full-size buffers.
+			entry.needBigBuffers.Store(true)
+			pool.Put(buf)
+			continue
 		}
 
 		from, ok := directPacketReceiverAddrPort(sockaddr)
