@@ -23,8 +23,10 @@ const maxBufferPoolLen = 256
 // a fastrand-sharded LIFO only wins at >=8 cores (~15%) and loses ~15% at 4
 // cores, which is the common router shape; sync.Pool is ~20-30x faster in
 // the microbenchmark but forfeits the GC-stability property above. Verdict:
-// keep the single-mutex LIFO until a load-level profile shows this path
-// materially hot — do not unify onto sync.Pool or shards on intuition.
+// keep until a load-level profile shows this path materially hot — do not
+// unify onto sync.Pool or shards on intuition. Since then tuic's per-datagram
+// send moved to a conn-private scratch (quicStreamPacketConn.writeScratch),
+// so this pool now serves only once-per-connection frames.
 var bufferPool = newBufferPool()
 
 type bufferPoolT struct {

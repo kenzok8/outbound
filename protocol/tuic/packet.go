@@ -12,6 +12,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/olicesx/quic-go"
@@ -183,6 +184,13 @@ type quicStreamPacketConn struct {
 	deferQuicConnFn func(quicConn quic.Connection, err error)
 	closeDeferFn    func()
 
+	// writeMu serializes datagram assembly and send on this association's
+	// private scratch buffer (writeScratch), the same per-flow lock shape
+	// as hysteria2/juicity. The shared pool LIFO costs a global mutex round
+	// per datagram; the hot send path now bypasses it entirely.
+	writeMu      sync.Mutex
+	writeScratch *bytes.Buffer
+
 	closeOnce sync.Once
 	closeErr  error
 	closed    atomic.Bool
@@ -334,6 +342,11 @@ func (q *quicStreamPacketConn) close() (err error) {
 		_ = incomingPackets.Close()
 	}
 	q.clearDeFraggers()
+	// Release the serialization scratch so a closed association does not
+	// pin its peak frame size until GC.
+	q.writeMu.Lock()
+	q.writeScratch = nil
+	q.writeMu.Unlock()
 	if incomingPackets != nil && q.quicConn != nil {
 
 		buf := pool.GetBuffer()
@@ -544,8 +557,17 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
-	buf := pool.GetBuffer()
-	defer pool.PutBuffer(buf)
+	q.writeMu.Lock()
+	defer q.writeMu.Unlock()
+	// Conn-private serialization scratch: grown to this association's peak
+	// frame once, then reused without touching the shared pool. Nil-ed on
+	// Close so a closed association does not pin its peak size.
+	buf := q.writeScratch
+	if buf == nil {
+		buf = bytes.NewBuffer(nil)
+		q.writeScratch = buf
+	}
+	buf.Reset()
 	address, err := q.addressForAddr(addr)
 	if err != nil {
 		return 0, err
