@@ -17,6 +17,14 @@ const maxBufferPoolLen = 256
 // re-grows its backing slice, feeding the GC loop. LIFO keeps the temporal
 // locality that a FIFO channel pool lacks — a buffer grown to one packet size
 // is immediately reused by the next packet of the same size.
+//
+// Benchmarked (pool/bytes_buffer_bench_test.go, i7-14650HX): the single
+// mutex costs at most ~160 ns per Get/Put cycle at full 12-core parallelism;
+// a fastrand-sharded LIFO only wins at >=8 cores (~15%) and loses ~15% at 4
+// cores, which is the common router shape; sync.Pool is ~20-30x faster in
+// the microbenchmark but forfeits the GC-stability property above. Verdict:
+// keep the single-mutex LIFO until a load-level profile shows this path
+// materially hot — do not unify onto sync.Pool or shards on intuition.
 var bufferPool = newBufferPool()
 
 type bufferPoolT struct {
