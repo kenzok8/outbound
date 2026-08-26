@@ -3,12 +3,8 @@ package ciphers
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
-	"io"
 
-	"github.com/daeuniverse/outbound/pool"
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/hkdf"
 )
 
 type CipherConf struct {
@@ -43,34 +39,4 @@ func NewGcm(key []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
-}
-
-// Verify is used for legacy compatibility
-func (conf *CipherConf) Verify(buf []byte, masterKey []byte, salt []byte, cipherText []byte, subKey *[]byte) ([]byte, bool) {
-	var shadowsocksReusedInfo = []byte("ss-subkey")
-	var sk []byte
-	if subKey != nil && len(*subKey) == conf.KeyLen {
-		sk = *subKey
-	} else {
-		sk = pool.Get(conf.KeyLen)
-		defer pool.Put(sk)
-		kdf := hkdf.New(
-			sha1.New,
-			masterKey,
-			salt,
-			shadowsocksReusedInfo,
-		)
-		_, _ = io.ReadFull(kdf, sk)
-		if subKey != nil && cap(*subKey) >= conf.KeyLen {
-			*subKey = (*subKey)[:conf.KeyLen]
-			copy(*subKey, sk)
-		}
-	}
-
-	ciph, _ := conf.NewCipher(sk)
-
-	if _, err := ciph.Open(buf[:0], ZeroNonce[:conf.NonceLen], cipherText, nil); err != nil {
-		return nil, false
-	}
-	return buf[:len(cipherText)-ciph.Overhead()], true
 }

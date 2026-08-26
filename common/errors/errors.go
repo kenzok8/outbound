@@ -73,107 +73,19 @@ func IsDNSTimeout(err error) bool {
 	return contains(errStr, "i/o timeout") && contains(errStr, "lookup")
 }
 
-// IsDNSTemporaryFailure checks if the error is a temporary DNS failure.
-// This is used to determine if a DNS operation should be retried.
-func IsDNSTemporaryFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check standard error
-	if errors.Is(err, ErrDNSTemporaryFailure) {
-		return true
-	}
-
-	// Check for temporary error using net.Error interface
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		if netErr.Temporary() { // nolint:staticcheck
-			return contains(err.Error(), "lookup")
-		}
-	}
-
-	return false
-}
-
-// ============================================================================
-// Stream and Connection Errors
-// ============================================================================
-
 // IsStreamExhausted checks if the error indicates no more streams available.
 //
 // Best Practice: Use direct comparison for best performance (1.19 ns/op):
 //
 //	if err == ErrStreamExhausted { ... }
-//
-// Performance: Direct comparison path (1.19 ns), other paths (~47 ns)
 func IsStreamExhausted(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	// 🚀 Fast path: direct comparison (1.19 ns)
 	if err == ErrStreamExhausted {
 		return true
 	}
-
-	// 🐌 Fallback: string matching for backward compatibility
 	return contains(err.Error(), "too many open streams")
-}
-
-// IsClientClosing checks if the error indicates the client is closing.
-//
-// Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//
-//	if err == ErrClientClosing { ... }
-func IsClientClosing(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// 🚀 Fast path: direct comparison (1.19 ns)
-	if err == ErrClientClosing {
-		return true
-	}
-
-	// 🐌 Fallback: string matching for backward compatibility
-	return contains(err.Error(), "client closed")
-}
-
-// ShouldRetryStreamOperation checks if a stream operation should be retried.
-//
-// Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//
-//	if err == ErrStreamExhausted || err == ErrOperationHold { ... }
-//
-// Performance: Direct comparison path (1.19 ns per check), other paths (~47 ns)
-func ShouldRetryStreamOperation(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// 🚀 Fast path: direct comparison for known errors (1.19 ns per check)
-	if err == ErrStreamExhausted || err == ErrOperationHold {
-		return true
-	}
-
-	// 🚀 Fast path: client closing is NOT retryable
-	if err == ErrClientClosing {
-		return false
-	}
-
-	// 🐌 Fallback: string matching for backward compatibility
-	errStr := err.Error()
-	return contains(errStr, "too many open streams") || contains(errStr, "hold on")
-}
-
-// IsRecoverableStreamError is an alias for ShouldRetryStreamOperation
-// with a more descriptive name for readability.
-//
-// Use this in code where you want to explicitly check if an error is
-// recoverable rather than if an operation should be retried.
-func IsRecoverableStreamError(err error) bool {
-	return ShouldRetryStreamOperation(err)
 }
 
 // IsTemporaryError checks if an error is temporary and should not close the connection.

@@ -30,21 +30,6 @@ var Base62Encoder, _ = basex.NewEncoding(Alphabet)
 var Base64GrpcEncoder, _ = basex.NewEncoding(Alphabet64Grpc)
 var IntSize = 32 << (^uint(0) >> 63)
 
-func Deduplicate(list []string) []string {
-	if list == nil {
-		return nil
-	}
-	res := make([]string, 0, len(list))
-	m := make(map[string]struct{})
-	for _, v := range list {
-		if _, ok := m[v]; ok {
-			continue
-		}
-		m[v] = struct{}{}
-		res = append(res, v)
-	}
-	return res
-}
 
 func Base64UrlDecode(s string) (string, error) {
 	s = strings.TrimSpace(s)
