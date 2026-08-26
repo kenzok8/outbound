@@ -29,15 +29,16 @@ type TLSObfs struct {
 }
 
 func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
-	buf := make([]byte, discardN)
-	_, err := io.ReadFull(to.Conn, buf)
-	if err != nil {
+	var buf [3]byte
+	discard := buf[:discardN]
+	if _, err := io.ReadFull(to.Conn, discard); err != nil {
 		return 0, err
 	}
+	// A truncated size header must surface as an error: returning
+	// (0, nil) here made relay loops spin forever on success-with-no-data.
 	sizeBuf := make([]byte, 2)
-	_, err = io.ReadFull(to.Conn, sizeBuf)
-	if err != nil {
-		return 0, nil
+	if _, err := io.ReadFull(to.Conn, sizeBuf); err != nil {
+		return 0, err
 	}
 
 	length := int(binary.BigEndian.Uint16(sizeBuf))
