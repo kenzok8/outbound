@@ -38,10 +38,10 @@ func (t *Dialer) UnwrapDialer() netproxy.Dialer {
 
 func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	u, err := url.Parse(s)
-	query := u.Query()
 	if err != nil {
 		return nil, fmt.Errorf("NewHTTPUpgrade: %w", err)
 	}
+	query := u.Query()
 
 	path := query.Get("path")
 	if !strings.HasPrefix(path, "/") {

@@ -62,6 +62,16 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 		m.alpn = []string{"h2", "http/1.1"}
 	}
 	if m.serverName == "" {
+		// The sni/serverName query parameters were historically parsed
+		// nowhere, so every link silently used the host as SNI.
+		for _, key := range []string{"sni", "serverName"} {
+			if v := query.Get(key); v != "" {
+				m.serverName = v
+				break
+			}
+		}
+	}
+	if m.serverName == "" {
 		m.serverName = u.Hostname()
 	}
 	m.tlsConfig = &tls.Config{
