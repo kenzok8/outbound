@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -43,13 +42,19 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 	if _, err = io.ReadFull(c.Conn, lengthBuf[:]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	length := binary.BigEndian.Uint16(lengthBuf[:])
-	buf := pool.Get(2 + int(length))
-	defer buf.Put()
-	if _, err = io.ReadFull(c.Conn, buf); err != nil {
+	length := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	if length <= len(p) {
+		if n, err = io.ReadFull(c.Conn, p[:length]); err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		return n, addr, nil
+	}
+	// Caller buffer too small: fill it and discard the remainder of the
+	// datagram so the stream stays framed.
+	if n, err = io.ReadFull(c.Conn, p); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	n = copy(p, buf[2:])
+	_, _ = io.CopyN(io.Discard, c.Conn, int64(length-len(p)))
 	return n, addr, nil
 }
 
@@ -62,11 +67,11 @@ func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 		Metadata: _metadata,
 		Network:  "udp",
 	}
-	buf := pool.Get(metadata.Len() + 4 + len(p))
-	defer pool.Put(buf)
+	c.Conn.writeMutex.Lock()
+	defer c.Conn.writeMutex.Unlock()
+	buf := c.Conn.borrowPacketWriteBuffer(metadata.Len() + 4 + len(p))
 	SealUDP(metadata, buf, p)
-	_, err = c.Conn.Write(buf)
-	if err != nil {
+	if _, err = c.Conn.writeLocked(buf); err != nil {
 		return 0, err
 	}
 	return len(p), nil

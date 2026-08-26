@@ -81,41 +81,45 @@ func (c *UdpConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.
 			return packet, true
 		}
 	}
-	sizeMetadata, err := BytesSizeForMetadata(decoded[:n])
+	payload, from, err := splitDecryptedUdp(decoded[:n])
 	if err != nil {
 		decoded.Put()
 		packet.Err = err
-		packet.Data = nil
-		return packet, true
-	}
-	mdata, err := NewMetadata(decoded[:n])
-	if err != nil {
-		decoded.Put()
-		packet.Err = err
-		packet.Data = nil
-		return packet, true
-	}
-	if mdata.Type != protocol.MetadataTypeIPv4 && mdata.Type != protocol.MetadataTypeIPv6 {
-		decoded.Put()
-		packet.Err = fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
-		packet.Data = nil
-		return packet, true
-	}
-	if !mdata.IP.IsValid() {
-		decoded.Put()
-		packet.Err = fmt.Errorf("ip metadata without a parsed address (type %v)", mdata.Type)
 		packet.Data = nil
 		return packet, true
 	}
 	return netproxy.NewReceivedPacket(
-		decoded[sizeMetadata:n],
-		netip.AddrPortFrom(mdata.IP, mdata.Port),
+		payload,
+		from,
 		nil,
 		func() { decoded.Put() },
 	), true
 }
 
 var parseMetadata = protocol.ParseMetadata
+
+// splitDecryptedUdp splits one decrypted legacy-SS UDP payload into the
+// reply payload and its source address. Shared by the polling ReadFrom and
+// the push-mode receiver so the two decode paths cannot drift.
+func splitDecryptedUdp(plain []byte) (payload []byte, from netip.AddrPort, err error) {
+	sizeMetadata, err := BytesSizeForMetadata(plain)
+	if err != nil {
+		return nil, netip.AddrPort{}, err
+	}
+	mdata, err := NewMetadata(plain)
+	if err != nil {
+		return nil, netip.AddrPort{}, err
+	}
+	switch mdata.Type {
+	case protocol.MetadataTypeIPv4, protocol.MetadataTypeIPv6:
+		if !mdata.IP.IsValid() {
+			return nil, netip.AddrPort{}, fmt.Errorf("ip metadata without a parsed address (type %v)", mdata.Type)
+		}
+	default:
+		return nil, netip.AddrPort{}, fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
+	}
+	return plain[sizeMetadata:], netip.AddrPortFrom(mdata.IP, mdata.Port), nil
+}
 
 func NewUdpConn(conn netproxy.PacketConn, proxyAddress string, metadata protocol.Metadata, masterKey []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	conf := ciphers.AeadCiphersConf[metadata.Cipher]
@@ -330,25 +334,10 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 			return
 		}
 	}
-	// parse sAddr from metadata
-	sizeMetadata, err := BytesSizeForMetadata(b)
+	payload, addr, err := splitDecryptedUdp(b[:n])
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	mdata, err := NewMetadata(b)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-	switch mdata.Type {
-	case protocol.MetadataTypeIPv4, protocol.MetadataTypeIPv6:
-		if !mdata.IP.IsValid() {
-			return 0, netip.AddrPort{}, fmt.Errorf("ip metadata without a parsed address (type %v)", mdata.Type)
-		}
-		addr = netip.AddrPortFrom(mdata.IP, mdata.Port)
-	default:
-		return 0, netip.AddrPort{}, fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
-	}
-	copy(b, b[sizeMetadata:])
-	n -= sizeMetadata
+	n = copy(b, payload)
 	return n, addr, nil
 }

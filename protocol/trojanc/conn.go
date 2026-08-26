@@ -32,6 +32,10 @@ type Conn struct {
 	writeMutex sync.Mutex
 	onceWrite  bool
 	onceRead   sync.Once
+
+	// packetWriteBuf is the reusable sealed-datagram scratch, guarded by
+	// writeMutex (see borrowPacketWriteBuffer).
+	packetWriteBuf []byte
 }
 
 // getPasswordHash retrieves the SHA224 hash of a password (with caching)
@@ -105,6 +109,12 @@ func (c *Conn) writeRequestHeader(payload []byte) (n int, err error) {
 func (c *Conn) Write(b []byte) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
+	return c.writeLocked(b)
+}
+
+// writeLocked writes with writeMutex already held, so packet framing that
+// borrows the reusable scratch buffer can seal and send under one lock.
+func (c *Conn) writeLocked(b []byte) (n int, err error) {
 	if !c.onceWrite {
 		if c.metadata.IsClient {
 			n, err = c.writeRequestHeader(b)
@@ -116,6 +126,23 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 	}
 	return c.Conn.Write(b)
+}
+
+// maxReusablePacketWriteBufferSize caps the growth of the reusable UDP
+// write buffer; larger one-shot frames allocate instead of pinning memory.
+const maxReusablePacketWriteBufferSize = 128 << 10
+
+// borrowPacketWriteBuffer returns a scratch buffer for one sealed datagram.
+// Callers must hold writeMutex; the buffer is reused across datagrams so the
+// steady-state UDP send path stops touching the shared pool per packet.
+func (c *Conn) borrowPacketWriteBuffer(size int) []byte {
+	if size <= maxReusablePacketWriteBufferSize {
+		if cap(c.packetWriteBuf) < size {
+			c.packetWriteBuf = make([]byte, size)
+		}
+		return c.packetWriteBuf[:size]
+	}
+	return make([]byte, size)
 }
 
 func (c *Conn) ensureRequestHeader() error {
