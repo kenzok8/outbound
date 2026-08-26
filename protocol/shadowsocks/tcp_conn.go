@@ -364,6 +364,7 @@ func (c *TCPConn) ReadMetadata() (metadata Metadata, err error) {
 		c.metadata.Type = metadata.Type
 		c.metadata.Hostname = metadata.Hostname
 		c.metadata.Port = metadata.Port
+		c.metadata.IP = metadata.IP
 		if metadata.Type == protocol.MetadataTypeMsg {
 			c.metadata.Cmd = protocol.MetadataCmdResponse
 		} else {

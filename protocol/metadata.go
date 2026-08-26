@@ -12,6 +12,9 @@ type Metadata struct {
 	Type     MetadataType
 	Hostname string
 	Port     uint16
+	// IP carries the parsed address for MetadataTypeIPv4/IPv6 so hot paths
+	// avoid the Hostname string round-trip. Invalid for other types.
+	IP netip.Addr
 	// Cmd is valid only if Type is MetadataTypeMsg.
 	Cmd      MetadataCmd
 	Cipher   string
@@ -80,12 +83,16 @@ func ParseMetadata(tgt string) (mdata Metadata, err error) {
 		Type:     typ,
 		Hostname: host,
 		Port:     uint16(port),
+		IP:       tgtIP,
 	}, nil
 }
 
 func (m *Metadata) AddrPort() (netip.AddrPort, error) {
 	switch m.Type {
 	case MetadataTypeIPv4, MetadataTypeIPv6:
+		if m.IP.IsValid() {
+			return netip.AddrPortFrom(m.IP, m.Port), nil
+		}
 		ip, err := netip.ParseAddr(m.Hostname)
 		if err != nil {
 			return netip.AddrPort{}, err

@@ -101,16 +101,15 @@ func (c *UdpConn) mapReceivedPacket(packet *netproxy.ReceivedPacket) (*netproxy.
 		packet.Data = nil
 		return packet, true
 	}
-	ip, err := netip.ParseAddr(mdata.Hostname)
-	if err != nil {
+	if !mdata.IP.IsValid() {
 		decoded.Put()
-		packet.Err = err
+		packet.Err = fmt.Errorf("ip metadata without a parsed address (type %v)", mdata.Type)
 		packet.Data = nil
 		return packet, true
 	}
 	return netproxy.NewReceivedPacket(
 		decoded[sizeMetadata:n],
-		netip.AddrPortFrom(ip, mdata.Port),
+		netip.AddrPortFrom(mdata.IP, mdata.Port),
 		nil,
 		func() { decoded.Put() },
 	), true
@@ -169,6 +168,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	metadata.Hostname = mdata.Hostname
 	metadata.Port = mdata.Port
 	metadata.Type = mdata.Type
+	metadata.IP = mdata.IP
 
 	// Pre-calculate total size to allocate once
 	// Layout: [salt][metadata][payload][tag]
@@ -247,15 +247,19 @@ func writeMetadataInline(buf []byte, meta *Metadata) int {
 	buf[0] = MetadataTypeToByte(meta.Type)
 	switch meta.Type {
 	case protocol.MetadataTypeIPv4:
-		ip := net.ParseIP(meta.Hostname)
-		if ip != nil {
+		if meta.IP.Is4() {
+			ip4 := meta.IP.As4()
+			copy(buf[1:], ip4[:])
+		} else if ip := net.ParseIP(meta.Hostname); ip != nil {
 			copy(buf[1:], ip.To4()[:4])
 		}
 		binary.BigEndian.PutUint16(buf[5:], meta.Port)
 		return 7
 	case protocol.MetadataTypeIPv6:
-		ip := net.ParseIP(meta.Hostname)
-		if ip != nil {
+		if meta.IP.IsValid() && !meta.IP.Is4() {
+			ip16 := meta.IP.As16()
+			copy(buf[1:], ip16[:])
+		} else if ip := net.ParseIP(meta.Hostname); ip != nil {
 			copy(buf[1:], ip[:16])
 		}
 		binary.BigEndian.PutUint16(buf[17:], meta.Port)
@@ -337,11 +341,10 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 	switch mdata.Type {
 	case protocol.MetadataTypeIPv4, protocol.MetadataTypeIPv6:
-		ip, err := netip.ParseAddr(mdata.Hostname)
-		if err != nil {
-			return 0, netip.AddrPort{}, err
+		if !mdata.IP.IsValid() {
+			return 0, netip.AddrPort{}, fmt.Errorf("ip metadata without a parsed address (type %v)", mdata.Type)
 		}
-		addr = netip.AddrPortFrom(ip, mdata.Port)
+		addr = netip.AddrPortFrom(mdata.IP, mdata.Port)
 	default:
 		return 0, netip.AddrPort{}, fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
 	}
