@@ -52,7 +52,7 @@ func (m *Conn) Read(b []byte) (int, error) {
 
 		n, err := m.Conn.Read(b[:length])
 		if err != nil {
-			return 0, err
+			return n, err
 		}
 		m.remain -= n
 		return n, nil
@@ -114,6 +114,11 @@ func (m *Conn) Write(b []byte) (int, error) {
 		m.otb = nil
 	}
 	m.buf.Reset()
+	if len(b) > 0xFFFF {
+		// The frame length field is uint16: silently truncating would
+		// desync the peer's framing mid-stream.
+		return 0, errors.New("mux: frame payload exceeds 65535 bytes")
+	}
 	_ = binary.Write(&m.buf, binary.BigEndian, uint16(4))
 	m.buf.Write(m.id[:])
 	m.buf.WriteByte(SessionStatusKeep)
@@ -126,10 +131,13 @@ func (m *Conn) Write(b []byte) (int, error) {
 
 func (m *Conn) Close() error {
 	_, err := m.Conn.Write([]byte{0x0, 0x4, m.id[0], m.id[1], SessionStatusEnd, OptionNone})
+	// The underlay must close even when the END frame could not be
+	// delivered; returning early here leaked the raw connection.
+	closeErr := m.Conn.Close()
 	if err != nil {
 		return err
 	}
-	return m.Conn.Close()
+	return closeErr
 }
 
 func NewConn(conn net.Conn, option MuxOption) *Conn {
