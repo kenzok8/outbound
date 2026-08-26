@@ -124,16 +124,9 @@ func (pc *PktConn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 }
 
 func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
-	buf := pool.Get(len(b))
-	defer pool.Put(buf)
-
-	n, raddr, err := pc.PacketConn.ReadFrom(buf)
+	n, raddr, err := pc.PacketConn.ReadFrom(b)
 	if err != nil {
 		return n, raddr, netip.AddrPort{}, err
-	}
-
-	if n < 3 {
-		return n, raddr, netip.AddrPort{}, errors.New("not enough size to get addr")
 	}
 
 	// https://www.rfc-editor.org/rfc/rfc1928#section-7
@@ -142,11 +135,10 @@ func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, erro
 	// +----+------+------+----------+----------+----------+
 	// | 2  |  1   |  1   | Variable |    2     | Variable |
 	// +----+------+------+----------+----------+----------+
-	payload, target, err := parseSocksUdpPayload(buf[3:n])
+	payload, target, err := parseSocksUdpPayload(b[:n])
 	if err != nil {
 		return n, raddr, netip.AddrPort{}, err
 	}
-
 	n = copy(b, payload)
 	return n, raddr, target, nil
 }

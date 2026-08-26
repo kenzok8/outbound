@@ -130,6 +130,10 @@ func (c *Conn) writeLocked(b []byte) (n int, err error) {
 
 // maxReusablePacketWriteBufferSize caps the growth of the reusable UDP
 // write buffer; larger one-shot frames allocate instead of pinning memory.
+// Kept byte-identical with juicity's stream_conn.go copy: the two Conns were
+// assessed for a type-level merge (round 8) and rejected — their transports,
+// auth headers, and QUIC-specific lifecycles differ enough that a shared
+// base would be hook-shaped inheritance, not deduplication.
 const maxReusablePacketWriteBufferSize = 128 << 10
 
 // borrowPacketWriteBuffer returns a scratch buffer for one sealed datagram.

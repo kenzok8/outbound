@@ -326,3 +326,48 @@ func TestPktConnWriteBatchInvalidAddrReturnsZeroAndReleasesBuffers(t *testing.T)
 		t.Fatalf("underlying WriteBatch ran with %d writes, want 0", len(writes))
 	}
 }
+
+// scriptedReplyPacketConn feeds one canned SOCKS UDP reply frame to the
+// first ReadFrom call, letting tests exercise the polling decode path.
+type scriptedReplyPacketConn struct {
+	recordingPacketConn
+	frame []byte
+	used  bool
+}
+
+func (c *scriptedReplyPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
+	if c.used {
+		return 0, netip.AddrPort{}, io.EOF
+	}
+	c.used = true
+	n := copy(p, c.frame)
+	from := netip.MustParseAddrPort("203.0.113.9:1080")
+	return n, from, nil
+}
+
+// TestPktConnReadFromDecodesFramedReply locks the polling UDP reply decode:
+// the datagram is handed to the splitter whole (RSV+FRAG+ATYP+addr+payload)
+// and only the payload after the address survives in b.
+func TestPktConnReadFromDecodesFramedReply(t *testing.T) {
+	frame := []byte{
+		0x00, 0x00, // RSV
+		0x00, // FRAG
+		0x01, // ATYP_IPV4
+		198, 51, 100, 7,
+		0x01, 0xBB, // port 443
+		'p', 'o', 'n', 'g',
+	}
+	pc := &PktConn{PacketConn: &scriptedReplyPacketConn{frame: frame}}
+
+	buf := make([]byte, 64)
+	n, from, err := pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	if string(buf[:n]) != "pong" {
+		t.Fatalf("payload = %q, want %q", buf[:n], "pong")
+	}
+	if from != (netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), 443)) {
+		t.Fatalf("from = %v, want 198.51.100.7:443", from)
+	}
+}
