@@ -9,26 +9,46 @@ import (
 	"github.com/olicesx/quic-go"
 )
 
-func fragWriteNative(quicConn quic.Connection, packet *Packet, buf *bytes.Buffer, fragSize int) (err error) {
+// fragmentPackets splits one oversized packet into per-fragment Packet
+// copies. Fragment 0 keeps the original address pointer; every later
+// fragment carries a value copy of the address with TYPE set to AtypNone,
+// so the caller's shared *Address is never mutated.
+func fragmentPackets(packet *Packet, fragSize int) []*Packet {
 	fullPayload := packet.DATA
-	off := 0
-	fragID := uint8(0)
-	if fragSize == 0 {
-		fragSize = 1
-	}
-	fragCount := uint8((len(fullPayload) + fragSize - 1) / fragSize) // round up
+	fragCount := uint8((len(fullPayload) + fragSize - 1) / fragSize)
 	packet.FRAG_TOTAL = fragCount
-	for off < len(fullPayload) {
+	frags := make([]*Packet, 0, int(fragCount))
+	for off := 0; off < len(fullPayload); {
 		payloadSize := len(fullPayload) - off
 		if payloadSize > fragSize {
 			payloadSize = fragSize
 		}
-		frag := packet
-		frag.FRAG_ID = fragID
+		var fragAddr *Address
+		if off == 0 {
+			// Fragment 0 must carry the address on the wire.
+			fragAddr = packet.ADDR
+		} else {
+			addrCopy := *packet.ADDR
+			addrCopy.TYPE = AtypNone // avoid "fragment 2/2: address in non-first fragment"
+			fragAddr = &addrCopy
+		}
+		frag := *packet
+		frag.ADDR = fragAddr
+		frag.FRAG_ID = uint8(len(frags))
 		frag.SIZE = uint16(payloadSize)
 		frag.DATA = fullPayload[off : off+payloadSize]
+		frags = append(frags, &frag)
 		off += payloadSize
-		fragID++
+	}
+	return frags
+}
+
+func fragWriteNative(quicConn quic.Connection, packet *Packet, buf *bytes.Buffer, fragSize int) (err error) {
+	if fragSize == 0 {
+		fragSize = 1
+	}
+	frags := fragmentPackets(packet, fragSize)
+	for _, frag := range frags {
 		buf.Reset()
 		err = frag.WriteTo(buf)
 		if err != nil {
@@ -39,7 +59,6 @@ func fragWriteNative(quicConn quic.Connection, packet *Packet, buf *bytes.Buffer
 		if err != nil {
 			return
 		}
-		packet.ADDR.TYPE = AtypNone // avoid "fragment 2/2: address in non-first fragment"
 	}
 	return
 }
