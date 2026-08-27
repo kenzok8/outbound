@@ -367,6 +367,18 @@ func (c *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connect
 		return
 	}
 
+	// Stream-scoped failures must not tear down the shared tunnel: a RESET
+	// on one stream (quic.StreamError), a refused stream-limit probe, or a
+	// temporary/datagram-backpressure error only affects that attempt,
+	// while other streams on the connection stay healthy.
+	var streamErr *quic.StreamError
+	if errors.As(err, &streamErr) {
+		return
+	}
+	if outbounderrors.IsStreamExhausted(err) || outbounderrors.IsTemporaryError(err) {
+		return
+	}
+
 	shouldClose := false
 	if _, ok := err.(coreErrs.ClosedError); ok {
 		shouldClose = true
@@ -393,17 +405,33 @@ type tcpConn struct {
 	PseudoLocalAddr  net.Addr
 	PseudoRemoteAddr net.Addr
 	Established      bool
+
+	// Fast-open mode defers the response read to the first Read. The once
+	// guarantees exactly one ReadTCPResponse even if callers race the first
+	// reads, so every reader observes the same handshake outcome.
+	establishOnce sync.Once
+	respErr       error
+}
+
+func (c *tcpConn) readFastOpenResponse() error {
+	c.establishOnce.Do(func() {
+		ok, msg, err := protocol.ReadTCPResponse(c.Orig)
+		if err != nil {
+			c.respErr = err
+			return
+		}
+		if !ok {
+			c.respErr = coreErrs.DialError{Message: "from remote: " + msg}
+		}
+	})
+	return c.respErr
 }
 
 func (c *tcpConn) Read(b []byte) (n int, err error) {
 	if !c.Established {
 		// Read response
-		ok, msg, err := protocol.ReadTCPResponse(c.Orig)
-		if err != nil {
+		if err = c.readFastOpenResponse(); err != nil {
 			return 0, err
-		}
-		if !ok {
-			return 0, coreErrs.DialError{Message: msg}
 		}
 		c.Established = true
 	}

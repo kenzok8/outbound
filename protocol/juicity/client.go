@@ -128,7 +128,10 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
 
 	go func() {
-		if err := t.sendAuthentication(quicConn); err != nil {
+		// Stream-limit exhaustion on the single auth unistream is a
+		// retryable condition, not a reason to destroy the fresh client;
+		// the dial attempt surfaces the error and the ring fails over.
+		if err := t.sendAuthentication(quicConn); err != nil && !isStreamLimitReached(err) {
 			_ = t.Close()
 		}
 	}()
