@@ -2,6 +2,7 @@ package trojanc
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -38,11 +39,14 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 		return 0, netip.AddrPort{}, err
 	}
 
-	var lengthBuf [2]byte
-	if _, err = io.ReadFull(c.Conn, lengthBuf[:]); err != nil {
+	var lengthAndCRLF [4]byte
+	if _, err = io.ReadFull(c.Conn, lengthAndCRLF[:]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	length := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	if lengthAndCRLF[2] != '\r' || lengthAndCRLF[3] != '\n' {
+		return 0, netip.AddrPort{}, fmt.Errorf("invalid trojan UDP CRLF")
+	}
+	length := int(binary.BigEndian.Uint16(lengthAndCRLF[:2]))
 	if length <= len(p) {
 		if n, err = io.ReadFull(c.Conn, p[:length]); err != nil {
 			return 0, netip.AddrPort{}, err
