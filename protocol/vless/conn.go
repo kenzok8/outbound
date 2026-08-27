@@ -38,8 +38,8 @@ type Conn struct {
 
 	writeMutex     sync.Mutex
 	readMutex      sync.Mutex
-	headerReady    bool
 	readHeaderDone bool
+	headerErr      error
 	onceWrite      bool
 
 	addonsBytes []byte
@@ -178,10 +178,20 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) read(b []byte) (n int, err error) {
-	// Retry until success: consuming a Once here would silently continue
-	// with an unconsumed or misframed stream after a transient error.
+	if c.headerErr != nil {
+		return 0, c.headerErr
+	}
+	// Client reads the server's response header; server reads the client's
+	// request header. A failed io.ReadFull cannot be retried: those bytes
+	// are already gone, so the error is sticky.
 	if !c.readHeaderDone {
-		if err = c.ReadRespHeader(); err != nil {
+		if c.metadata.IsClient {
+			err = c.ReadRespHeader()
+		} else {
+			err = c.ReadReqHeader()
+		}
+		if err != nil {
+			c.headerErr = err
 			return 0, err
 		}
 		c.readHeaderDone = true
@@ -196,9 +206,11 @@ func (c *Conn) ReadReqHeader() (err error) {
 		return err
 	}
 	if buf[0] != 0 {
+		_ = c.Conn.Close()
 		return fmt.Errorf("version %v is not supprted", buf[0])
 	}
 	if subtle.ConstantTimeCompare(c.cmdKey[:16], buf[1:17]) != 1 {
+		_ = c.Conn.Close()
 		return FailAuthErr
 	}
 	if _, err = io.CopyN(io.Discard, c.Conn, int64(buf[17])); err != nil { // ignore addons
@@ -222,6 +234,7 @@ func (c *Conn) ReadRespHeader() (err error) {
 		return err
 	}
 	if buf[0] != 0 {
+		_ = c.Conn.Close()
 		return fmt.Errorf("version %v is not supprted", buf[0])
 	}
 	if _, err = io.CopyN(io.Discard, c.Conn, int64(buf[1])); err != nil {

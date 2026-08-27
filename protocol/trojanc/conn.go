@@ -30,8 +30,8 @@ type Conn struct {
 	pass     [56]byte
 
 	writeMutex     sync.Mutex
-	headerReady    bool
 	readHeaderDone bool
+	headerErr      error
 	onceWrite      bool
 
 	// packetWriteBuf is the reusable sealed-datagram scratch, guarded by
@@ -169,10 +169,15 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 			return 0, err
 		}
 	}
-	// Retry until success: consuming a Once here would silently continue
-	// with an unconsumed or misframed stream after a transient error.
-	if !c.readHeaderDone {
+	if c.headerErr != nil {
+		return 0, c.headerErr
+	}
+	// Clients already wrote the request header on first Write. Only the
+	// server side consumes a request header from the stream. A failed
+	// io.ReadFull cannot be retried: those bytes are already gone.
+	if !c.readHeaderDone && !c.metadata.IsClient {
 		if err = c.ReadReqHeader(); err != nil {
+			c.headerErr = err
 			return 0, err
 		}
 		c.readHeaderDone = true
@@ -187,7 +192,15 @@ func (c *Conn) ReadReqHeader() (err error) {
 		return err
 	}
 	if !bytes.Equal(c.pass[:], buf[:56]) {
+		_ = c.Conn.Close()
 		return FailAuthErr
+	}
+	var crlf [2]byte
+	if _, err = io.ReadFull(c.Conn, crlf[:]); err != nil {
+		return err
+	}
+	if crlf[0] != '\r' || crlf[1] != '\n' {
+		return fmt.Errorf("invalid trojan header CRLF")
 	}
 	if _, err = io.ReadFull(c.Conn, buf[:1]); err != nil {
 		return err
@@ -199,6 +212,12 @@ func (c *Conn) ReadReqHeader() (err error) {
 	}
 	if _, err = c.metadata.Unpack(c.Conn); err != nil {
 		return err
+	}
+	if _, err = io.ReadFull(c.Conn, crlf[:]); err != nil {
+		return err
+	}
+	if crlf[0] != '\r' || crlf[1] != '\n' {
+		return fmt.Errorf("invalid trojan header CRLF")
 	}
 	return nil
 }

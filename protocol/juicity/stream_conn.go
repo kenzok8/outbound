@@ -21,6 +21,7 @@ type Conn struct {
 	onceWrite      bool
 	packetWriteBuf []byte
 	readHeaderDone bool
+	headerErr      error
 
 	closeDeferFn  func()
 	transportDone <-chan struct{}
@@ -49,6 +50,7 @@ func (c *Conn) readReqHeader() (err error) {
 	c.Metadata.Network = trojanc.ParseNetwork(buf[0])
 	n := c.Metadata.Len()
 	if n < 2 {
+		_ = c.Stream.Close()
 		return fmt.Errorf("invalid juicity header")
 	}
 	if _, err = c.Metadata.Unpack(c.Stream); err != nil {
@@ -95,10 +97,15 @@ func (c *Conn) writeLocked(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	// Retry until success: consuming a Once here would silently continue
-	// with an unconsumed or misframed stream after a transient error.
-	if !c.readHeaderDone {
+	if c.headerErr != nil {
+		return 0, c.headerErr
+	}
+	// Clients already wrote the request header on first Write. Only the
+	// server side consumes a request header from the stream. A failed
+	// io.ReadFull cannot be retried: those bytes are already gone.
+	if !c.readHeaderDone && c.Metadata != nil && !c.Metadata.IsClient {
 		if err = c.readReqHeader(); err != nil {
+			c.headerErr = err
 			return 0, err
 		}
 		c.readHeaderDone = true
