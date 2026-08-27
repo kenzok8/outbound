@@ -1,3 +1,4 @@
+//go:build race
 // +build race
 
 // 验证 outbound 网络代码审查中发现的问题
@@ -37,9 +38,9 @@ func (m *MockProtocol) DecodePkt(buf []byte) ([]byte, error) {
 
 // MockPacketConn 模拟 netproxy.PacketConn
 type MockPacketConn struct {
-	writeCount atomic.Int64
+	writeCount     atomic.Int64
 	dataCorruption atomic.Bool
-	lastData atomic.Value
+	lastData       atomic.Value
 }
 
 func (m *MockPacketConn) Read(b []byte) (n int, err error) {
@@ -57,10 +58,10 @@ func (m *MockPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err err
 
 func (m *MockPacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 	m.writeCount.Add(1)
-	
+
 	// 模拟写入延迟
 	time.Sleep(1 * time.Microsecond)
-	
+
 	// 检测数据竞争
 	lastData := m.lastData.Load()
 	if lastData != nil {
@@ -73,7 +74,7 @@ func (m *MockPacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 	m.lastData.Store(p)
 	time.Sleep(1 * time.Microsecond)
 	m.lastData.Store([]byte{})
-	
+
 	return len(p), nil
 }
 
@@ -107,27 +108,27 @@ func (c *SimulateShadowsockrPacketConn) WriteTo(b []byte, to string) (int, error
 	if err != nil {
 		return 0, err
 	}
-	
+
 	// 获取 buffer
 	pb := pool.Get(len(addr) + len(b))
 	defer pool.Put(pb)
-	
+
 	// 复制数据
 	copy(pb, addr)
 	copy(pb[len(addr):], b)
-	
+
 	// 编码
 	buf := bytes.NewBuffer(pb)
 	if err = c.protocol.EncodePkt(buf); err != nil {
 		return 0, err
 	}
-	
+
 	// 写入 - 这里没有锁保护
 	_, err = c.inner.WriteTo(buf.Bytes(), c.tgt)
 	if err != nil {
 		return 0, err
 	}
-	
+
 	return len(b), nil
 }
 
@@ -142,54 +143,54 @@ type FixedShadowsockrPacketConn struct {
 func (c *FixedShadowsockrPacketConn) WriteTo(b []byte, to string) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	
+
 	addr, err := socks.ParseAddr(to)
 	if err != nil {
 		return 0, err
 	}
-	
+
 	pb := pool.Get(len(addr) + len(b))
 	defer pool.Put(pb)
 
 	copy(pb, addr)
 	copy(pb[len(addr):], b)
-	
+
 	buf := bytes.NewBuffer(pb)
 	if err = c.protocol.EncodePkt(buf); err != nil {
 		return 0, err
 	}
-	
+
 	_, err = c.inner.WriteTo(buf.Bytes(), c.tgt)
 	if err != nil {
 		return 0, err
 	}
-	
+
 	return len(b), nil
 }
 
 // TestIssue1_Outbound_ShadowsockrUDPRace 验证问题 1: shadowsockr UDP 并发写入
 func TestIssue1_Outbound_ShadowsockrUDPRace(t *testing.T) {
 	t.Log("🔍 验证问题 1: shadowsockr UDP 并发写入 (outbound)")
-	
+
 	// 测试没有锁的情况
 	t.Run("WithoutLock", func(t *testing.T) {
 		inner := &MockPacketConn{}
 		protocol := &MockProtocol{}
-		
+
 		conn := &SimulateShadowsockrPacketConn{
 			inner:    inner,
 			protocol: protocol,
 			tgt:      "127.0.0.1:8080",
 		}
-		
+
 		const goroutines = 10
 		const writesPerGoroutine = 100
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -202,45 +203,45 @@ func TestIssue1_Outbound_ShadowsockrUDPRace(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		writes := inner.writeCount.Load()
 		expected := int64(goroutines * writesPerGoroutine)
-		
+
 		t.Logf("✅ 无锁测试完成: %d 次写入，耗时 %v", writes, elapsed)
-		
+
 		if writes != expected {
 			t.Errorf("❌ 写入计数不匹配: got %d, expected %d", writes, expected)
 		}
-		
+
 		if inner.dataCorruption.Load() {
 			t.Log("⚠️  检测到潜在的数据竞争迹象")
 		}
-		
+
 		t.Log("⚠️  使用 'go test -race' 运行此测试以检测数据竞争")
 	})
-	
+
 	// 测试有锁的情况
 	t.Run("WithLock", func(t *testing.T) {
 		inner := &MockPacketConn{}
 		protocol := &MockProtocol{}
-		
+
 		conn := &FixedShadowsockrPacketConn{
 			inner:    inner,
 			protocol: protocol,
 			tgt:      "127.0.0.1:8080",
 		}
-		
+
 		const goroutines = 10
 		const writesPerGoroutine = 100
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -253,15 +254,15 @@ func TestIssue1_Outbound_ShadowsockrUDPRace(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		writes := inner.writeCount.Load()
 		expected := int64(goroutines * writesPerGoroutine)
-		
+
 		t.Logf("✅ 有锁测试完成: %d 次写入，耗时 %v", writes, elapsed)
-		
+
 		if writes != expected {
 			t.Errorf("❌ 写入计数不匹配: got %d, expected %d", writes, expected)
 		}
@@ -284,7 +285,7 @@ type SimulateDirectPacketConn struct {
 func (c *SimulateDirectPacketConn) resolveTarget() error {
 	// 模拟解析延迟
 	time.Sleep(10 * time.Millisecond)
-	
+
 	target := netip.MustParseAddrPort(c.dialTgt)
 	c.cachedDialTgt.Store(&target)
 	return nil
@@ -294,7 +295,7 @@ func (c *SimulateDirectPacketConn) Write(b []byte) (int, error) {
 	if !c.FullCone {
 		return c.conn.Write(b)
 	}
-	
+
 	// 没有锁保护的懒缓存
 	cached := c.cachedDialTgt.Load()
 	if cached == nil {
@@ -309,7 +310,7 @@ func (c *SimulateDirectPacketConn) Write(b []byte) (int, error) {
 		}
 		cached = c.cachedDialTgt.Load()
 	}
-	
+
 	// 写入 - 没有序列化
 	return c.conn.WriteToUDPAddrPort(b, *cached)
 }
@@ -338,16 +339,16 @@ func (c *FixedDirectPacketConn) Write(b []byte) (int, error) {
 	if !c.FullCone {
 		return c.conn.Write(b)
 	}
-	
+
 	// 确保目标已解析
 	if c.cachedDialTgt.Load() == nil {
 		c.resolveTarget()
 	}
-	
+
 	// 有写锁保护
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	
+
 	cached := c.cachedDialTgt.Load()
 	return c.conn.WriteToUDPAddrPort(b, *cached)
 }
@@ -355,14 +356,14 @@ func (c *FixedDirectPacketConn) Write(b []byte) (int, error) {
 // TestIssue2_Outbound_DirectPacketConnLazyCache 验证问题 2: directPacketConn 懒缓存竞争
 func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 	t.Log("🔍 验证问题 2: directPacketConn 懒缓存竞争 (outbound)")
-	
+
 	// 创建真实的 UDP 连接
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("Failed to create UDP connection: %v", err)
 	}
 	defer conn.Close()
-	
+
 	// 测试没有锁的情况
 	t.Run("WithoutLock", func(t *testing.T) {
 		directConn := &SimulateDirectPacketConn{
@@ -370,15 +371,15 @@ func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 			dialTgt:  "127.0.0.1:8080",
 			FullCone: true,
 		}
-		
+
 		const goroutines = 10
 		const writesPerGoroutine = 50
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -391,14 +392,14 @@ func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		t.Logf("✅ 无锁测试完成，耗时 %v", elapsed)
 		t.Log("⚠️  检查 UDP 连接是否有并发写入问题")
 	})
-	
+
 	// 测试有锁的情况
 	t.Run("WithLock", func(t *testing.T) {
 		directConn := &FixedDirectPacketConn{
@@ -406,15 +407,15 @@ func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 			dialTgt:  "127.0.0.1:8080",
 			FullCone: true,
 		}
-		
+
 		const goroutines = 10
 		const writesPerGoroutine = 50
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -427,10 +428,10 @@ func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		t.Logf("✅ 有锁测试完成，耗时 %v", elapsed)
 	})
 }
@@ -442,12 +443,12 @@ func TestIssue2_Outbound_DirectPacketConnLazyCache(t *testing.T) {
 // TestIssue7_Outbound_PoolPutBoundary 验证问题 7: Pool.Put 边界检查
 func TestIssue7_Outbound_PoolPutBoundary(t *testing.T) {
 	t.Log("🔍 验证问题 7: Pool.Put 边界检查 (outbound)")
-	
+
 	testCases := []struct {
-		name     string
-		capacity int
+		name         string
+		capacity     int
 		shouldAccept bool
-		note     string
+		note         string
 	}{
 		{"64 bytes (too small)", 64, false, "should be rejected"},
 		{"512 bytes (min)", 512, true, "bucket 9"},
@@ -458,16 +459,16 @@ func TestIssue7_Outbound_PoolPutBoundary(t *testing.T) {
 		{"65536 bytes (max)", 65536, true, "bucket 16"},
 		{"70000 bytes (too large)", 70000, false, "should be rejected"},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := make([]byte, tc.capacity)
-			
+
 			t.Logf("Testing: cap=%d, %s", tc.capacity, tc.note)
-			
+
 			// 调用 Put（不应该 panic）
 			pool.Put(buf)
-			
+
 			if tc.shouldAccept {
 				t.Logf("✅ Buffer accepted (cap=%d)", tc.capacity)
 			} else {
@@ -475,7 +476,7 @@ func TestIssue7_Outbound_PoolPutBoundary(t *testing.T) {
 			}
 		})
 	}
-	
+
 	t.Log("⚠️  问题确认: cap=1536 的 buffer 会被放入错误的 bucket")
 	t.Log("   这会导致:")
 	t.Log("   1. 内存浪费（大 buffer 放入小 bucket）")
@@ -489,13 +490,13 @@ func TestIssue7_Outbound_PoolPutBoundary(t *testing.T) {
 // TestOutboundLockVsNoLock 对比有锁和无锁的性能
 func TestOutboundLockVsNoLock(t *testing.T) {
 	t.Log("🔍 对比测试: 有锁 vs 无锁")
-	
+
 	// 创建测试组件
 	protocol := &MockProtocol{}
-	
+
 	const goroutines = 10
 	const writesPerGoroutine = 100
-	
+
 	t.Run("WithoutLock", func(t *testing.T) {
 		inner := &MockPacketConn{}
 		conn := &SimulateShadowsockrPacketConn{
@@ -503,12 +504,12 @@ func TestOutboundLockVsNoLock(t *testing.T) {
 			protocol: protocol,
 			tgt:      "127.0.0.1:8080",
 		}
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -518,13 +519,13 @@ func TestOutboundLockVsNoLock(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		t.Logf("无锁: %v (%.2f ops/sec)", elapsed, float64(goroutines*writesPerGoroutine)/elapsed.Seconds())
 	})
-	
+
 	t.Run("WithLock", func(t *testing.T) {
 		inner := &MockPacketConn{}
 		conn := &FixedShadowsockrPacketConn{
@@ -532,12 +533,12 @@ func TestOutboundLockVsNoLock(t *testing.T) {
 			protocol: protocol,
 			tgt:      "127.0.0.1:8080",
 		}
-		
+
 		var wg sync.WaitGroup
 		wg.Add(goroutines)
-		
+
 		startTime := time.Now()
-		
+
 		for i := 0; i < goroutines; i++ {
 			go func(id int) {
 				defer wg.Done()
@@ -547,26 +548,26 @@ func TestOutboundLockVsNoLock(t *testing.T) {
 				}
 			}(i)
 		}
-		
+
 		wg.Wait()
 		elapsed := time.Since(startTime)
-		
+
 		t.Logf("有锁: %v (%.2f ops/sec)", elapsed, float64(goroutines*writesPerGoroutine)/elapsed.Seconds())
 	})
-	
+
 	t.Log("⚠️  注意: 锁的开销通常小于数据竞争修复的成本")
 }
 
 // TestBufferPoolMemoryUsage 测试 buffer pool 的内存使用
 func TestBufferPoolMemoryUsage(t *testing.T) {
 	t.Log("🔍 Buffer Pool 内存使用测试")
-	
+
 	// 获取初始内存状态
 	// var m1 runtime.MemStats
 	// runtime.ReadMemStats(&m1)
-	
+
 	const iterations = 10000
-	
+
 	// 测试正常使用
 	for i := 0; i < iterations; i++ {
 		buf := pool.Get(1500)
@@ -574,19 +575,19 @@ func TestBufferPoolMemoryUsage(t *testing.T) {
 		_ = buf
 		pool.Put(buf)
 	}
-	
+
 	// var m2 runtime.MemStats
 	// runtime.ReadMemStats(&m2)
-	
+
 	// 测试问题场景：1536 字节的 buffer
 	for i := 0; i < iterations; i++ {
 		buf := make([]byte, 1536)
 		pool.Put(buf) // 会被放入错误的 bucket
 	}
-	
+
 	// var m3 runtime.MemStats
 	// runtime.ReadMemStats(&m3)
-	
+
 	t.Log("✅ 内存使用测试完成")
 	t.Log("⚠️  使用 pprof 检查内存分配:")
 	t.Log("   go test -memprofile=mem.prof -bench=. -run=TestBufferPoolMemoryUsage")

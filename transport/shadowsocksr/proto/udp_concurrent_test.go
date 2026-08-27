@@ -132,7 +132,7 @@ func TestUdpConnWriteToWithoutLock(t *testing.T) {
 	expected := int64(goroutines * writesPerGoroutine)
 
 	// 由于没有锁保护，写入次数可能不等于预期值
-	t.Logf("Writes without lock: got %d, expected %d (loss: %d)", 
+	t.Logf("Writes without lock: got %d, expected %d (loss: %d)",
 		writes, expected, expected-writes)
 
 	if writes != expected {
@@ -144,7 +144,7 @@ func TestUdpConnWriteToWithoutLock(t *testing.T) {
 func TestUdpConnWriteToWithLock(t *testing.T) {
 	type safeWriter struct {
 		writes int64
-		mu    sync.Mutex
+		mu     sync.Mutex
 	}
 
 	writer := &safeWriter{}

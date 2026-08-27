@@ -30,7 +30,6 @@ var Base62Encoder, _ = basex.NewEncoding(Alphabet)
 var Base64GrpcEncoder, _ = basex.NewEncoding(Alphabet64Grpc)
 var IntSize = 32 << (^uint(0) >> 63)
 
-
 // Deduplicate removes duplicate strings from list, preserving order.
 // Consumed by downstream users of this module (e.g. dae's common utils).
 func Deduplicate(list []string) []string {
