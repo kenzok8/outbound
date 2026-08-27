@@ -36,10 +36,11 @@ type Conn struct {
 	cmdKey              []byte
 	cachedProxyAddrIpIP netip.AddrPort
 
-	writeMutex sync.Mutex
-	readMutex  sync.Mutex
-	onceWrite  bool
-	onceRead   sync.Once
+	writeMutex     sync.Mutex
+	readMutex      sync.Mutex
+	headerReady    bool
+	readHeaderDone bool
+	onceWrite      bool
 
 	addonsBytes []byte
 }
@@ -177,19 +178,13 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) read(b []byte) (n int, err error) {
-	c.onceRead.Do(func() {
-		if c.metadata.IsClient {
-			if err = c.ReadRespHeader(); err != nil {
-				return
-			}
-		} else {
-			if err = c.ReadReqHeader(); err != nil {
-				return
-			}
+	// Retry until success: consuming a Once here would silently continue
+	// with an unconsumed or misframed stream after a transient error.
+	if !c.readHeaderDone {
+		if err = c.ReadRespHeader(); err != nil {
+			return 0, err
 		}
-	})
-	if err != nil {
-		return 0, err
+		c.readHeaderDone = true
 	}
 	return c.Conn.Read(b)
 }

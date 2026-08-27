@@ -29,9 +29,10 @@ type Conn struct {
 	metadata Metadata
 	pass     [56]byte
 
-	writeMutex sync.Mutex
-	onceWrite  bool
-	onceRead   sync.Once
+	writeMutex     sync.Mutex
+	headerReady    bool
+	readHeaderDone bool
+	onceWrite      bool
 
 	// packetWriteBuf is the reusable sealed-datagram scratch, guarded by
 	// writeMutex (see borrowPacketWriteBuffer).
@@ -168,13 +169,14 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 			return 0, err
 		}
 	}
-	c.onceRead.Do(func() {
-		if !c.metadata.IsClient {
-			if err = c.ReadReqHeader(); err != nil {
-				return
-			}
+	// Retry until success: consuming a Once here would silently continue
+	// with an unconsumed or misframed stream after a transient error.
+	if !c.readHeaderDone {
+		if err = c.ReadReqHeader(); err != nil {
+			return 0, err
 		}
-	})
+		c.readHeaderDone = true
+	}
 	return c.Conn.Read(b)
 }
 

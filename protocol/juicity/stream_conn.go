@@ -20,7 +20,7 @@ type Conn struct {
 	writeMutex     sync.Mutex
 	onceWrite      bool
 	packetWriteBuf []byte
-	onceRead       sync.Once
+	readHeaderDone bool
 
 	closeDeferFn  func()
 	transportDone <-chan struct{}
@@ -95,13 +95,14 @@ func (c *Conn) writeLocked(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	c.onceRead.Do(func() {
-		if !c.Metadata.IsClient {
-			if err = c.readReqHeader(); err != nil {
-				return
-			}
+	// Retry until success: consuming a Once here would silently continue
+	// with an unconsumed or misframed stream after a transient error.
+	if !c.readHeaderDone {
+		if err = c.readReqHeader(); err != nil {
+			return 0, err
 		}
-	})
+		c.readHeaderDone = true
+	}
 	return c.Stream.Read(b)
 }
 
