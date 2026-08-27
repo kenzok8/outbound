@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -483,15 +484,26 @@ func newLockedList() *lockedList {
 }
 
 type poolIdent struct {
-	ele  *list.Element
-	addr string
+	ele *list.Element
+	// key is the full pool map key: namespace|magicNetwork|addr.
+	// MarkDead / cleanup must use this, not the bare host:port.
+	key string
 }
+type addrDialerEntry struct {
+	dialer       netproxy.Dialer
+	magicNetwork string
+	refs         int
+}
+
 type h2ConnsPool struct {
 	mu           sync.Mutex
 	h2ConnsPool  map[string]*lockedList
 	h2Conn2Ident map[*http2.ClientConn]*poolIdent
-	addr2Dialer  sync.Map
-	addr2Somark  sync.Map
+	// addr2Dialer is keyed by bare host:port because http2.ClientConnPool
+	// GetClientConn only supplies addr. refs tracks live scoped lists that
+	// still need this mapping; cleanup of one namespace must not drop it
+	// while another namespace is still using the same host:port.
+	addr2Dialer map[string]*addrDialerEntry
 }
 
 func newH2ConnsPool() *h2ConnsPool {
@@ -499,15 +511,52 @@ func newH2ConnsPool() *h2ConnsPool {
 		mu:           sync.Mutex{},
 		h2ConnsPool:  make(map[string]*lockedList),
 		h2Conn2Ident: make(map[*http2.ClientConn]*poolIdent),
-		addr2Dialer:  sync.Map{},
+		addr2Dialer:  make(map[string]*addrDialerEntry),
 	}
 }
 
-func (p *h2ConnsPool) registerAddrToDialerMapping(addr string, dialer netproxy.Dialer) {
-	p.addr2Dialer.Store(addr, dialer)
+func (p *h2ConnsPool) registerAddrToDialerMapping(addr string, dialer netproxy.Dialer, magicNetwork string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retainAddrDialerLocked(addr, dialer, magicNetwork)
 }
-func (p *h2ConnsPool) registerAddrToMagicNetworkMapping(addr string, magicNetwork string) {
-	p.addr2Somark.Store(addr, magicNetwork)
+
+func (p *h2ConnsPool) retainAddrDialerLocked(addr string, dialer netproxy.Dialer, magicNetwork string) {
+	if e, ok := p.addr2Dialer[addr]; ok {
+		e.dialer = dialer
+		e.magicNetwork = magicNetwork
+		e.refs++
+		return
+	}
+	p.addr2Dialer[addr] = &addrDialerEntry{
+		dialer:       dialer,
+		magicNetwork: magicNetwork,
+		refs:         1,
+	}
+}
+
+func (p *h2ConnsPool) releaseAddrDialerLocked(addr string) {
+	e, ok := p.addr2Dialer[addr]
+	if !ok {
+		return
+	}
+	e.refs--
+	if e.refs <= 0 {
+		delete(p.addr2Dialer, addr)
+	}
+}
+
+func poolKeyBareAddr(key string) string {
+	// key is namespace|magicNetwork|addr; addr itself may contain ':'.
+	i := strings.IndexByte(key, '|')
+	if i < 0 {
+		return key
+	}
+	j := strings.IndexByte(key[i+1:], '|')
+	if j < 0 {
+		return key
+	}
+	return key[i+1+j+1:]
 }
 
 func (p *h2ConnsPool) acquireConnList(addr string) (*lockedList, bool) {
@@ -517,6 +566,27 @@ func (p *h2ConnsPool) acquireConnList(addr string) (*lockedList, bool) {
 	if conns == nil {
 		conns = newLockedList()
 		p.h2ConnsPool[addr] = conns
+	}
+	conns.refs++
+	return conns, cached
+}
+
+func (p *h2ConnsPool) acquireConnListForDialer(key string, addr string, dialer netproxy.Dialer, magicNetwork string) (*lockedList, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	conns, cached := p.h2ConnsPool[key]
+	if conns == nil {
+		conns = newLockedList()
+		p.h2ConnsPool[key] = conns
+		p.retainAddrDialerLocked(addr, dialer, magicNetwork)
+	} else {
+		// Keep GetClientConn on the latest chain for this host:port.
+		if e := p.addr2Dialer[addr]; e != nil {
+			e.dialer = dialer
+			e.magicNetwork = magicNetwork
+		} else {
+			p.retainAddrDialerLocked(addr, dialer, magicNetwork)
+		}
 	}
 	conns.refs++
 	return conns, cached
@@ -542,8 +612,7 @@ func (p *h2ConnsPool) cleanupConnListLocked(addr string, conns *lockedList) {
 		return
 	}
 	delete(p.h2ConnsPool, addr)
-	p.addr2Dialer.Delete(addr)
-	p.addr2Somark.Delete(addr)
+	p.releaseAddrDialerLocked(poolKeyBareAddr(addr))
 }
 
 func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error) {
@@ -561,8 +630,9 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 	// a config reload that swaps the underlying chain must not reuse
 	// connections dialed through the previous generation.
 	scopeKey := string(netproxy.TransportCacheNamespace(nextDialer)) + "|" + magicNetwork
-	conns, cachedConnsFound := p.acquireConnList(scopeKey + "|" + addr)
-	defer p.releaseConnList(scopeKey+"|"+addr, conns)
+	fullKey := scopeKey + "|" + addr
+	conns, cachedConnsFound := p.acquireConnListForDialer(fullKey, addr, nextDialer, magicNetwork)
+	defer p.releaseConnList(fullKey, conns)
 
 	if cachedConnsFound {
 		conns.mu.Lock()
@@ -618,12 +688,10 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 		conns.mu.Unlock()
 		p.mu.Lock()
 		p.h2Conn2Ident[h2clientConn] = &poolIdent{
-			ele:  ele,
-			addr: addr,
+			ele: ele,
+			key: fullKey,
 		}
 		p.mu.Unlock()
-		p.registerAddrToDialerMapping(addr, nextDialer)
-		p.registerAddrToMagicNetworkMapping(addr, magicNetwork)
 		return rawConn, h2clientConn, nil
 	default:
 		return nil, nil, fmt.Errorf("negotiated unsupported application layer protocol: %v", nextProto)
@@ -631,12 +699,13 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 }
 
 func (p *h2ConnsPool) GetClientConn(req *http.Request, addr string) (*http2.ClientConn, error) {
-	d, ok := p.addr2Dialer.Load(addr)
-	if !ok {
+	p.mu.Lock()
+	e, ok := p.addr2Dialer[addr]
+	p.mu.Unlock()
+	if !ok || e == nil || e.dialer == nil {
 		return nil, fmt.Errorf("no valid dialer for h2ConnsPool.GetClientConn")
 	}
-	somark, _ := p.addr2Somark.Load(addr)
-	_, h2Conn, err := p.GetConn(req.Context(), d.(netproxy.Dialer), addr, somark.(string))
+	_, h2Conn, err := p.GetConn(req.Context(), e.dialer, addr, e.magicNetwork)
 	return h2Conn, err
 }
 
@@ -647,8 +716,8 @@ func (p *h2ConnsPool) MarkDead(h2c *http2.ClientConn) {
 		p.mu.Unlock()
 		return
 	}
-	addr := ident.addr
-	conns := p.h2ConnsPool[addr]
+	key := ident.key
+	conns := p.h2ConnsPool[key]
 	delete(p.h2Conn2Ident, h2c)
 	p.mu.Unlock()
 	if conns == nil {
@@ -658,7 +727,7 @@ func (p *h2ConnsPool) MarkDead(h2c *http2.ClientConn) {
 	conns.l.Remove(ident.ele)
 	conns.mu.Unlock()
 	p.mu.Lock()
-	p.cleanupConnListLocked(addr, conns)
+	p.cleanupConnListLocked(key, conns)
 	p.mu.Unlock()
 }
 

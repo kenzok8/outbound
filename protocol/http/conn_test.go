@@ -15,44 +15,41 @@ import (
 func TestH2ConnsPoolMarkDeadCleansUpEmptyAddressState(t *testing.T) {
 	pool := newH2ConnsPool()
 	addr := "proxy.example:443"
-	pool.h2ConnsPool[addr] = newLockedList()
-	pool.registerAddrToDialerMapping(addr, noopDialer{})
-	pool.registerAddrToMagicNetworkMapping(addr, "tcp")
+	key := "|" + "tcp" + "|" + addr
+	pool.h2ConnsPool[key] = newLockedList()
+	pool.registerAddrToDialerMapping(addr, noopDialer{}, "tcp")
 
 	h2c := &http2.ClientConn{}
-	pool.h2ConnsPool[addr].mu.Lock()
-	ele := pool.h2ConnsPool[addr].l.PushFront(&h2Conn{h2Conn: h2c})
-	pool.h2ConnsPool[addr].mu.Unlock()
-	pool.h2Conn2Ident[h2c] = &poolIdent{ele: ele, addr: addr}
+	pool.h2ConnsPool[key].mu.Lock()
+	ele := pool.h2ConnsPool[key].l.PushFront(&h2Conn{h2Conn: h2c})
+	pool.h2ConnsPool[key].mu.Unlock()
+	pool.h2Conn2Ident[h2c] = &poolIdent{ele: ele, key: key}
 
 	pool.MarkDead(h2c)
 
-	if _, ok := pool.h2ConnsPool[addr]; ok {
+	if _, ok := pool.h2ConnsPool[key]; ok {
 		t.Fatal("expected empty connection list to be removed")
 	}
-	if _, ok := pool.addr2Dialer.Load(addr); ok {
+	if _, ok := pool.addr2Dialer[addr]; ok {
 		t.Fatal("expected dialer mapping to be removed")
-	}
-	if _, ok := pool.addr2Somark.Load(addr); ok {
-		t.Fatal("expected magic-network mapping to be removed")
 	}
 }
 
 func TestH2ConnsPoolMarkDeadKeepsAddressStateWhileConnListIsInUse(t *testing.T) {
 	pool := newH2ConnsPool()
 	addr := "proxy.example:443"
+	key := "|" + "tcp" + "|" + addr
 	conns := newLockedList()
-	pool.h2ConnsPool[addr] = conns
-	pool.registerAddrToDialerMapping(addr, noopDialer{})
-	pool.registerAddrToMagicNetworkMapping(addr, "tcp")
+	pool.h2ConnsPool[key] = conns
+	pool.registerAddrToDialerMapping(addr, noopDialer{}, "tcp")
 
 	oldH2 := &http2.ClientConn{}
 	conns.mu.Lock()
 	oldEle := conns.l.PushFront(&h2Conn{h2Conn: oldH2})
 	conns.mu.Unlock()
-	pool.h2Conn2Ident[oldH2] = &poolIdent{ele: oldEle, addr: addr}
+	pool.h2Conn2Ident[oldH2] = &poolIdent{ele: oldEle, key: key}
 
-	inUseConns, cached := pool.acquireConnList(addr)
+	inUseConns, cached := pool.acquireConnList(key)
 	if !cached {
 		t.Fatal("expected existing connection list to be reused")
 	}
@@ -62,44 +59,38 @@ func TestH2ConnsPoolMarkDeadKeepsAddressStateWhileConnListIsInUse(t *testing.T) 
 
 	pool.MarkDead(oldH2)
 
-	if got := pool.h2ConnsPool[addr]; got != conns {
+	if got := pool.h2ConnsPool[key]; got != conns {
 		t.Fatal("expected MarkDead to keep the address state while GetConn still holds a reference")
 	}
-	if _, ok := pool.addr2Dialer.Load(addr); !ok {
+	if _, ok := pool.addr2Dialer[addr]; !ok {
 		t.Fatal("expected dialer mapping to remain while list is in use")
-	}
-	if _, ok := pool.addr2Somark.Load(addr); !ok {
-		t.Fatal("expected magic-network mapping to remain while list is in use")
 	}
 
 	newH2 := &http2.ClientConn{}
 	conns.mu.Lock()
 	newEle := conns.l.PushFront(&h2Conn{h2Conn: newH2})
 	conns.mu.Unlock()
-	pool.h2Conn2Ident[newH2] = &poolIdent{ele: newEle, addr: addr}
+	pool.h2Conn2Ident[newH2] = &poolIdent{ele: newEle, key: key}
 
-	pool.releaseConnList(addr, inUseConns)
+	pool.releaseConnList(key, inUseConns)
 
-	if got := pool.h2ConnsPool[addr]; got != conns {
+	if got := pool.h2ConnsPool[key]; got != conns {
 		t.Fatal("expected address state to remain after a replacement h2 connection is added")
 	}
-	if _, ok := pool.addr2Dialer.Load(addr); !ok {
+	if _, ok := pool.addr2Dialer[addr]; !ok {
 		t.Fatal("expected dialer mapping to remain after replacement h2 connection is added")
-	}
-	if _, ok := pool.addr2Somark.Load(addr); !ok {
-		t.Fatal("expected magic-network mapping to remain after replacement h2 connection is added")
 	}
 }
 
 func TestH2ConnsPoolReleaseConnListCleansUpDeferredEmptyAddressState(t *testing.T) {
 	pool := newH2ConnsPool()
 	addr := "proxy.example:443"
+	key := "|" + "tcp" + "|" + addr
 	conns := newLockedList()
-	pool.h2ConnsPool[addr] = conns
-	pool.registerAddrToDialerMapping(addr, noopDialer{})
-	pool.registerAddrToMagicNetworkMapping(addr, "tcp")
+	pool.h2ConnsPool[key] = conns
+	pool.registerAddrToDialerMapping(addr, noopDialer{}, "tcp")
 
-	inUseConns, cached := pool.acquireConnList(addr)
+	inUseConns, cached := pool.acquireConnList(key)
 	if !cached {
 		t.Fatal("expected existing connection list to be reused")
 	}
@@ -107,16 +98,60 @@ func TestH2ConnsPoolReleaseConnListCleansUpDeferredEmptyAddressState(t *testing.
 		t.Fatal("expected acquireConnList to return the existing list")
 	}
 
-	pool.releaseConnList(addr, inUseConns)
+	pool.releaseConnList(key, inUseConns)
 
-	if _, ok := pool.h2ConnsPool[addr]; ok {
+	if _, ok := pool.h2ConnsPool[key]; ok {
 		t.Fatal("expected deferred cleanup to remove the empty connection list once the last reference is released")
 	}
-	if _, ok := pool.addr2Dialer.Load(addr); ok {
+	if _, ok := pool.addr2Dialer[addr]; ok {
 		t.Fatal("expected deferred cleanup to remove the dialer mapping")
 	}
-	if _, ok := pool.addr2Somark.Load(addr); ok {
-		t.Fatal("expected deferred cleanup to remove the magic-network mapping")
+}
+
+type scopedDialer struct {
+	noopDialer
+	ns string
+}
+
+func (d scopedDialer) TransportCacheNamespace() string { return d.ns }
+
+func TestH2ConnsPoolMarkDeadUsesScopedKey(t *testing.T) {
+	pool := newH2ConnsPool()
+	addr := "proxy.example:443"
+	keyA := "ns-a|tcp|" + addr
+	keyB := "ns-b|tcp|" + addr
+
+	listA := newLockedList()
+	listB := newLockedList()
+	pool.h2ConnsPool[keyA] = listA
+	pool.h2ConnsPool[keyB] = listB
+	pool.registerAddrToDialerMapping(addr, scopedDialer{ns: "ns-a"}, "tcp")
+	pool.registerAddrToDialerMapping(addr, scopedDialer{ns: "ns-b"}, "tcp")
+
+	h2a := &http2.ClientConn{}
+	h2b := &http2.ClientConn{}
+	listA.mu.Lock()
+	eleA := listA.l.PushFront(&h2Conn{h2Conn: h2a})
+	listA.mu.Unlock()
+	listB.mu.Lock()
+	eleB := listB.l.PushFront(&h2Conn{h2Conn: h2b})
+	listB.mu.Unlock()
+	pool.h2Conn2Ident[h2a] = &poolIdent{ele: eleA, key: keyA}
+	pool.h2Conn2Ident[h2b] = &poolIdent{ele: eleB, key: keyB}
+
+	pool.MarkDead(h2a)
+
+	if _, ok := pool.h2ConnsPool[keyA]; ok {
+		t.Fatal("expected ns-a list to be removed after MarkDead")
+	}
+	if got := pool.h2ConnsPool[keyB]; got != listB {
+		t.Fatal("expected ns-b list to survive MarkDead of an ns-a conn")
+	}
+	if listB.l.Len() != 1 {
+		t.Fatalf("ns-b list len = %d, want 1", listB.l.Len())
+	}
+	if _, ok := pool.addr2Dialer[addr]; !ok {
+		t.Fatal("expected shared addr dialer mapping to remain while ns-b is live")
 	}
 }
 
