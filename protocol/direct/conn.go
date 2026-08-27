@@ -26,7 +26,6 @@ type directPacketConn struct {
 	receiverGeneration uint64
 	cachedDialTgt      atomic.Value // stores netip.AddrPort
 	writeTgtCache      common.LastStringValue[netip.AddrPort]
-	cacheOnce          sync.Once
 	cacheMu            sync.Mutex // protects cacheErr
 	cacheErr           error
 	resolver           *net.Resolver
@@ -181,24 +180,25 @@ func (c *directPacketConn) writeBatchAlloc(items []netproxy.BatchItem) (int, err
 }
 
 func (c *directPacketConn) resolveTarget() error {
-	c.cacheOnce.Do(func() {
-		ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
-		c.cacheMu.Lock()
-		if err != nil {
-			c.cacheErr = err
-			c.cacheMu.Unlock()
-			return
-		}
-		// Store the value directly, not a pointer to a stack variable.
-		// atomic.Value stores the value on heap, ensuring memory safety.
-		ap := ua.AddrPort()
-		c.cachedDialTgt.Store(ap)
-		c.cacheMu.Unlock()
-	})
+	// Retryable by design: a failure must not be memoized for the lifetime
+	// of the conn (fullcone UDP relays live for hours — a transient resolver
+	// outage at first write would otherwise fail every later write).
 	c.cacheMu.Lock()
-	err := c.cacheErr
-	c.cacheMu.Unlock()
-	return err
+	defer c.cacheMu.Unlock()
+	if c.cachedDialTgt.Load() != nil {
+		return nil
+	}
+	c.cacheErr = nil
+	ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
+	if err != nil {
+		c.cacheErr = err
+		return err
+	}
+	// Store the value directly, not a pointer to a stack variable.
+	// atomic.Value stores the value on heap, ensuring memory safety.
+	ap := ua.AddrPort()
+	c.cachedDialTgt.Store(ap)
+	return nil
 }
 
 func (c *directPacketConn) writeTargetAddrPort(addr string) (netip.AddrPort, error) {
@@ -229,7 +229,7 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 
 	// Lazy target resolution with thread-safe initialization.
 	// Thread-safety guarantees:
-	// 1. sync.Once in resolveTarget() provides happens-before relationship
+	// 1. cacheMu in resolveTarget() provides happens-before relationship
 	// 2. atomic.Value.Load/Store provides atomic access to the cached value
 	// 3. The netip.AddrPort value is stored directly in atomic.Value (heap-allocated)
 	if c.cachedDialTgt.Load() == nil {

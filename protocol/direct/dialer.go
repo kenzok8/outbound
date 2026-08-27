@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	outbounderrors "github.com/daeuniverse/outbound/common/errors"
@@ -13,12 +14,25 @@ import (
 )
 
 var (
-	SymmetricDirect  netproxy.Dialer = &lazyDirectDialer{fullcone: false}
-	FullconeDirect   netproxy.Dialer = &lazyDirectDialer{fullcone: true}
-	directOnce       sync.Once
-	_symmetricDirect netproxy.Dialer
-	_fullconeDirect  netproxy.Dialer
+	SymmetricDirect netproxy.Dialer = &lazyDirectDialer{fullcone: false}
+	FullconeDirect  netproxy.Dialer = &lazyDirectDialer{fullcone: true}
+	directOnce      sync.Once
+	// directFallbackDNS records InitDirectDialers' argument atomically so a
+	// dial racing ahead of that call still builds with the configured
+	// resolver instead of baking a no-fallback dialer forever.
+	directFallbackDNS atomic.Value // string
+	_symmetricDirect  netproxy.Dialer
+	_fullconeDirect   netproxy.Dialer
 )
+
+func buildDirectDialers(fallbackDNS string) {
+	fallback := Option{}
+	if fallbackDNS != "" {
+		fallback = Option{FallbackDNS: fallbackDNS}
+	}
+	_symmetricDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: false, FallbackDNS: fallback.FallbackDNS})
+	_fullconeDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: true, FallbackDNS: fallback.FallbackDNS})
+}
 
 // lazyDirectDialer provides lazy initialization for direct dialers.
 // It ensures InitDirectDialers is called before any dial operation.
@@ -28,8 +42,11 @@ type lazyDirectDialer struct {
 
 func (d *lazyDirectDialer) ensureInit() {
 	directOnce.Do(func() {
-		_symmetricDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: false})
-		_fullconeDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: true})
+		var fallbackDNS string
+		if v, ok := directFallbackDNS.Load().(string); ok {
+			fallbackDNS = v
+		}
+		buildDirectDialers(fallbackDNS)
 	})
 }
 
@@ -44,9 +61,9 @@ func (d *lazyDirectDialer) getDialer() netproxy.Dialer {
 // InitDirectDialers initializes the global direct dialers with optional fallback DNS.
 // If not called, dialers will be lazily initialized without fallback DNS on first use.
 func InitDirectDialers(fallbackDNS string) {
+	directFallbackDNS.Store(fallbackDNS)
 	directOnce.Do(func() {
-		_symmetricDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: false, FallbackDNS: fallbackDNS})
-		_fullconeDirect = NewDirectDialerLaddr(netip.Addr{}, Option{FullCone: true, FallbackDNS: fallbackDNS})
+		buildDirectDialers(fallbackDNS)
 	})
 }
 
