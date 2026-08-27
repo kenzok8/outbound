@@ -15,10 +15,12 @@ import (
 
 const (
 	directPacketReceiverBufferSize = 65535
-	// Small tier matching dae-side ingress buffers (the EthernetMtu / 2 KiB
-	// bucket): the overwhelming majority of proxy replies fit well under
-	// 2 KiB, and a 256-deep reply queue of 64 KiB buffers can pin ~16 MiB.
-	directPacketReceiverSmallBufferSize = 2048
+	// Small tier covers EDNS/DNSSEC and almost all QUIC initial/handshake
+	// datagrams. A 256-deep reply queue of 64 KiB buffers can pin ~16 MiB,
+	// so jumbo/GSO stays on the upgrade path. MSG_TRUNC still consumes the
+	// datagram that trips the upgrade; recovering it would require MSG_PEEK
+	// on every packet, which this path does not pay.
+	directPacketReceiverSmallBufferSize = 8192
 	directPacketReceiverBatchSize       = 64
 )
 
@@ -251,6 +253,15 @@ func directPacketReceiverAddrPort(sockaddr unix.Sockaddr) (netip.AddrPort, bool)
 		return netip.AddrPortFrom(netip.AddrFrom4(addr.Addr), uint16(addr.Port)), true
 	case *unix.SockaddrInet6:
 		return netip.AddrPortFrom(netip.AddrFrom16(addr.Addr), uint16(addr.Port)), true
+	case *unix.SockaddrUnix:
+		// Production sockets are UDP; unnamed unix datagrams are used by
+		// tests to inject oversize payloads past this environment's
+		// loopback UDP ~1472-byte ceiling.
+		return netip.AddrPort{}, true
+	case nil:
+		// Recvfrom on a connected socket (including SOCK_DGRAM socketpair)
+		// reports no peer address.
+		return netip.AddrPort{}, true
 	default:
 		return netip.AddrPort{}, false
 	}
