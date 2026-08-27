@@ -107,8 +107,10 @@ func NewTCPConn(conn netproxy.Conn, metadata protocol.Metadata, masterKey []byte
 	}
 	if metadata.IsClient {
 		time.AfterFunc(100*time.Millisecond, func() {
-			// avoid the situation where the server sends messages first
-			if _, err = c.Write(nil); err != nil {
+			// avoid the situation where the server sends messages first.
+			// Use a local error: capturing the named return here would race
+			// with the caller's frame after NewTCPConn returns.
+			if _, werr := c.Write(nil); werr != nil {
 				return
 			}
 		})

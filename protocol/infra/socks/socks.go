@@ -43,6 +43,9 @@ const (
 // MaxAddrLen is the maximum size of SOCKS address in bytes
 const MaxAddrLen = 1 + 1 + 255 + 2
 
+// Success is the SOCKS5 reply byte for a succeeded request (RFC 1928 §6).
+const Success = 0x00
+
 // Errors are socks5 errors
 var Errors = []error{
 	errors.New(""),

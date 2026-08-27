@@ -249,51 +249,66 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			req.Header.Del("Proxy-Connection")
 		}
 
-		connectHttp1 := func(handshakeCtx context.Context, rawConn netproxy.Conn) (n int, err error) {
+		connectHttp1 := func(handshakeCtx context.Context, rawConn netproxy.Conn) (conn netproxy.Conn, n int, err error) {
 			restoreDeadline, err := netproxy.ApplyConnDeadlineFromContext(handshakeCtx, rawConn)
 			if err != nil {
-				return 0, err
+				return nil, 0, err
 			}
 			defer restoreDeadline()
 
 			proxyReq := req.Clone(context.Background())
 			err = proxyReq.WriteProxy(rawConn)
 			if err != nil {
-				return 0, err
+				return nil, 0, err
 			}
 
 			if isHttpReq {
+				// Forward-proxy request: the proxy streams the origin's
+				// response verbatim, so the caller keeps reading rawConn.
 				// Allow read here to void race.
-				return len(b), nil
-			} else {
-				// We should read tcp connection here, and we will be guaranteed higher priority by chShakeFinished.
-				resp, err := http.ReadResponse(bufio.NewReader(rawConn), proxyReq)
-				if err != nil {
-					if resp != nil {
-						_ = resp.Body.Close()
-					}
-					return 0, err
-				}
-				_ = resp.Body.Close()
-				if resp.StatusCode != 200 {
-					err = fmt.Errorf("connect server using proxy error, StatusCode [%d]", resp.StatusCode)
-					return 0, err
-				}
-				written, err := rawConn.Write(payload)
-				if err != nil {
-					if written <= bufferedPrefixLen {
-						return 0, err
-					}
-					return written - bufferedPrefixLen, err
-				}
-				if written < len(payload) {
-					if written <= bufferedPrefixLen {
-						return 0, io.ErrShortWrite
-					}
-					return written - bufferedPrefixLen, io.ErrShortWrite
-				}
-				return len(b), nil
+				return rawConn, len(b), nil
 			}
+
+			// We should read tcp connection here, and we will be guaranteed higher priority by chShakeFinished.
+			// The response is consumed through a bufio.Reader so any bytes the
+			// reader pulled past the header (coalesced early tunnel data) are
+			// preserved via prefixedConn instead of being lost to the kernel
+			// buffer.
+			br := bufio.NewReaderSize(rawConn, 4096)
+			resp, err := http.ReadResponse(br, proxyReq)
+			if err != nil {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				return nil, 0, err
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != 200 {
+				err = fmt.Errorf("connect server using proxy error, StatusCode [%d]", resp.StatusCode)
+				return nil, 0, err
+			}
+			conn = rawConn
+			if buffered := br.Buffered(); buffered > 0 {
+				prefix := make([]byte, buffered)
+				read, _ := io.ReadFull(br, prefix)
+				if read > 0 {
+					conn = &prefixedConn{Conn: rawConn, prefix: prefix[:read]}
+				}
+			}
+			written, err := conn.Write(payload)
+			if err != nil {
+				if written <= bufferedPrefixLen {
+					return conn, 0, err
+				}
+				return conn, written - bufferedPrefixLen, err
+			}
+			if written < len(payload) {
+				if written <= bufferedPrefixLen {
+					return conn, 0, io.ErrShortWrite
+				}
+				return conn, written - bufferedPrefixLen, io.ErrShortWrite
+			}
+			return conn, len(b), nil
 		}
 
 		// Thanks to v2fly/v2ray-core.
@@ -358,7 +373,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				return 0, err
 			}
 			c.conn = conn
-			return connectHttp1(ctx, conn)
+			effConn, n, err := connectHttp1(ctx, conn)
+			if err == nil {
+				c.conn = effConn
+			}
+			return n, err
 		}
 
 		handshakeCtx, cancel := c.newHandshakeContext()
@@ -377,7 +396,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			return n, nil
 		} else {
 			c.conn = rawConn
-			return connectHttp1(handshakeCtx, rawConn)
+			effConn, n, err := connectHttp1(handshakeCtx, rawConn)
+			if err == nil {
+				c.conn = effConn
+			}
+			return n, err
 		}
 	}
 }
@@ -436,6 +459,23 @@ func (c *Conn) Close() error {
 
 func newHTTP2Conn(c net.Conn, pipedReqBody *io.PipeWriter, respBody io.ReadCloser) *http2Conn {
 	return &http2Conn{Conn: c, in: pipedReqBody, out: respBody}
+}
+
+// prefixedConn replays bytes a handshake bufio.Reader consumed past the
+// CONNECT response before handing reads to the underlying tunnel, so
+// coalesced early application data is not dropped.
+type prefixedConn struct {
+	netproxy.Conn
+	prefix []byte
+}
+
+func (p *prefixedConn) Read(b []byte) (n int, err error) {
+	if len(p.prefix) > 0 {
+		n = copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
 }
 
 type http2Conn struct {

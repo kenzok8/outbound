@@ -151,15 +151,14 @@ func (s *Socks5) connect(conn netproxy.Conn, target string, cmd byte) (addr sock
 		return addr, errors.New("proxy: failed to read connect reply from SOCKS5 proxy at " + s.addr + ": " + err.Error())
 	}
 
-	failure := "unknown error"
-	if int(buf[1]) < len(socks.Errors) {
-		failure = socks.Errors[buf[1]].Error()
-		if strings.Contains(failure, "command not supported") {
-			failure += " by socks5 server: " + socks.Command[cmd]
+	if buf[1] != socks.Success {
+		failure := "unknown error"
+		if int(buf[1]) < len(socks.Errors) {
+			failure = socks.Errors[buf[1]].Error()
+			if strings.Contains(failure, "command not supported") {
+				failure += " by socks5 server: " + socks.Command[cmd]
+			}
 		}
-	}
-
-	if len(failure) > 0 {
 		return addr, errors.New("proxy: SOCKS5 proxy at " + s.addr + " failed to connect: " + failure)
 	}
 
