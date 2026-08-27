@@ -183,6 +183,8 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 			// Each uni stream carries exactly one packet command; parse it
 			// incrementally instead of wrapping the stream in a fresh
 			// bufio.Reader and routing every field through binary.Read.
+			// A non-Packet command is a spec violation: readPacketFromStream
+			// errors and deferQuicConn forceCloses the tunnel.
 			var packet *Packet
 			packet, err = readPacketFromStream(stream)
 			if err != nil {

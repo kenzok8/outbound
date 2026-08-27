@@ -23,6 +23,21 @@ func buildPacketMessage(b *testing.B, dataSize int) []byte {
 	return buf.Bytes()
 }
 
+// BenchmarkReadPacketFromStream measures the QUIC uni-stream parser used
+// when UdpRelayMode=quic. Native processDatagram is a different path.
+func BenchmarkReadPacketFromStream(b *testing.B) {
+	msg := buildPacketMessage(b, 100)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pkt, err := readPacketFromStream(bytes.NewReader(msg))
+		if err != nil {
+			b.Fatal(err)
+		}
+		pkt.releaseData()
+	}
+}
+
 // BenchmarkProcessDatagram measures the UDP receive hot path: every QUIC
 // datagram carrying a Packet is parsed via processDatagram. No network, no
 // QUIC connection — this isolates the protocol parse + dispatch cost that

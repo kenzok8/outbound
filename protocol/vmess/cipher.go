@@ -154,7 +154,7 @@ func ReqInstructionDataFromPool(metadata Metadata) []byte {
 	P := fastrand.Intn(1 << 4)
 	// 1 + 16 + 16 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + metadata.AddrLen() + P + 4
 	buf := pool.Get(metadata.AddrLen() + P + 45)
-	buf[0] = 1               // version
+	buf[0] = 1                      // version
 	_, _ = fastrand.Read(buf[1:34]) // random IV(16), Key(16), V(1)
 	// https://github.com/v2fly/v2ray-core/blob/a66bb28aee661caa191b5746ba4915eb99e12c59/proxy/vmess/outbound/outbound.go#L112
 	//buf[34] = OptionChunkStream | OptionChunkLengthMasking | OptionGlobalPadding

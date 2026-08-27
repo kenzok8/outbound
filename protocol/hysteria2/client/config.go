@@ -20,8 +20,8 @@ const (
 	defaultConnReceiveWindow      = 20 * 1024 * 1024 // 20MB initial (stream x2.5)
 	defaultMaxStreamReceiveWindow = 32 * 1024 * 1024 // 32MB ceiling - netem sweep peak (1Gbps x 200ms BDP)
 	defaultMaxConnReceiveWindow   = 64 * 1024 * 1024 // 64MB ceiling - stream x2, measured peak combo
-	defaultMaxIdleTimeout         = 60 * time.Second  // 30→60: tolerate loss bursts of up to 12 keepalives (at 5s interval) instead of 3 (at 10s)
-	defaultKeepAlivePeriod        = 5 * time.Second   // 10→5: more frequent keepalives to maintain NAT binding on lossy links
+	defaultMaxIdleTimeout         = 60 * time.Second // 30→60: tolerate loss bursts of up to 12 keepalives (at 5s interval) instead of 3 (at 10s)
+	defaultKeepAlivePeriod        = 5 * time.Second  // 10→5: more frequent keepalives to maintain NAT binding on lossy links
 )
 
 type Config struct {

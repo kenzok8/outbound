@@ -13,7 +13,7 @@ import (
 func BenchmarkUDPRealistic(b *testing.B) {
 	masterKey := make([]byte, 32)
 	key := &Key{
-		MasterKey: masterKey,
+		MasterKey:  masterKey,
 		CipherConf: ciphers.AeadCiphersConf["aes-256-gcm"],
 	}
 	reusedInfo := []byte("ss-subkey")
@@ -42,7 +42,7 @@ func BenchmarkUDPRealistic(b *testing.B) {
 func BenchmarkUDPSameSalt(b *testing.B) {
 	masterKey := make([]byte, 32)
 	key := &Key{
-		MasterKey: masterKey,
+		MasterKey:  masterKey,
 		CipherConf: ciphers.AeadCiphersConf["aes-256-gcm"],
 	}
 	reusedInfo := []byte("ss-subkey")
@@ -64,7 +64,7 @@ func BenchmarkUDPSameSalt(b *testing.B) {
 func BenchmarkTCPRealistic(b *testing.B) {
 	masterKey := make([]byte, 32)
 	key := &Key{
-		MasterKey: masterKey,
+		MasterKey:  masterKey,
 		CipherConf: ciphers.AeadCiphersConf["aes-256-gcm"],
 	}
 	reusedInfo := []byte("ss-subkey")
@@ -97,7 +97,7 @@ func BenchmarkTCPRealistic(b *testing.B) {
 func BenchmarkTCPOverheadIncludingInit(b *testing.B) {
 	masterKey := make([]byte, 32)
 	key := &Key{
-		MasterKey: masterKey,
+		MasterKey:  masterKey,
 		CipherConf: ciphers.AeadCiphersConf["aes-256-gcm"],
 	}
 	reusedInfo := []byte("ss-subkey")
@@ -128,7 +128,7 @@ func BenchmarkTCPOverheadIncludingInit(b *testing.B) {
 func BenchmarkUDPSmallPacketRealistic(b *testing.B) {
 	masterKey := make([]byte, 32)
 	key := &Key{
-		MasterKey: masterKey,
+		MasterKey:  masterKey,
 		CipherConf: ciphers.AeadCiphersConf["aes-128-gcm"],
 	}
 	reusedInfo := []byte("ss-subkey")
