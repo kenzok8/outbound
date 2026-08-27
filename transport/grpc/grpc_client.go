@@ -399,15 +399,20 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
 // systemCertPoolCached resolves the system pool once: GetSystemCertPool is
 // not free and previously ran on every dial, even on cache-hit paths.
 var (
-	systemCertPoolOnce sync.Once
-	systemCertPool     *x509.CertPool
-	systemCertPoolErr  error
+	systemCertPoolMu  sync.Mutex
+	systemCertPool    *x509.CertPool
+	systemCertPoolErr error
 )
 
+// Success is memoized; a failure (e.g. CA bundle briefly missing at cold
+// start) must stay retryable or every gRPC dial fails until restart.
 func systemCertPoolCached() (*x509.CertPool, error) {
-	systemCertPoolOnce.Do(func() {
-		systemCertPool, systemCertPoolErr = cert.GetSystemCertPool()
-	})
+	systemCertPoolMu.Lock()
+	defer systemCertPoolMu.Unlock()
+	if systemCertPool != nil {
+		return systemCertPool, nil
+	}
+	systemCertPool, systemCertPoolErr = cert.GetSystemCertPool()
 	return systemCertPool, systemCertPoolErr
 }
 
