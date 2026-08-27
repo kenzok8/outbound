@@ -17,7 +17,7 @@ func TestDeferQuicConnKeepsAliveOnDatagramQueueTimeout(t *testing.T) {
 	client.onClose = func() { closed.Store(true) }
 
 	client.deferQuicConn(nil, quic.ErrDatagramQueueFullTimeout)
-	if client.closed {
+	if client.closed.Load() {
 		t.Fatal("datagram send-queue timeout must not mark the shared TUIC client closed")
 	}
 	if closed.Load() {
@@ -25,7 +25,7 @@ func TestDeferQuicConnKeepsAliveOnDatagramQueueTimeout(t *testing.T) {
 	}
 
 	client.deferQuicConn(nil, errors.Join(errors.New("association write"), quic.ErrDatagramQueueFullTimeout))
-	if client.closed {
+	if client.closed.Load() {
 		t.Fatal("wrapped datagram send-queue timeout must not close the shared TUIC client")
 	}
 	if closed.Load() {
@@ -41,7 +41,7 @@ func TestDeferQuicConnStillClosesOnPermanentError(t *testing.T) {
 	client.onClose = func() { close(done) }
 
 	client.deferQuicConn(nil, errors.New("connection lost"))
-	if !client.closed {
+	if !client.closed.Load() {
 		t.Fatal("permanent errors must still close the shared TUIC client")
 	}
 	select {

@@ -525,7 +525,16 @@ func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandl
 	q.maybeCleanupDeFraggers(nowNano)
 	bucketAny, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFraggerBucket{})
 	bucket := bucketAny.(*deFraggerBucket)
-	buffer := pool.GetFullCap(1 << 16)
+	// Size the assembly buffer from this message's own declared geometry
+	// (per-fragment SIZE x FRAG_TOTAL) instead of always renting the 64KiB
+	// top bucket: pool.GetFullCap rounds up to a power-of-two bucket, so a
+	// 4KiB payload in 3 fragments now costs one 16KiB rental rather than a
+	// 64KiB one on every inbound fragment.
+	assembledLen := int(packet.SIZE) * int(packet.FRAG_TOTAL)
+	if assembledLen < len(packet.DATA) {
+		assembledLen = len(packet.DATA)
+	}
+	buffer := pool.GetFullCap(assembledLen)
 	n, addr, assembled := bucket.feed(packet, buffer, nowNano)
 	if !assembled {
 		buffer.Put()

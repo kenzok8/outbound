@@ -37,12 +37,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 	// ensure server's incoming stream can handle correctly, increase to 1.1x
 	maxDatagramFrameSize := 1452 // = quic-go MaxPacketBufferSize (Ethernet PMTU)
+	// UdpRelayMode is intentionally pinned to NATIVE: the QUIC unistream
+	// relay mode has known throughput problems and is not selectable from
+	// configuration. The ClientOption field and the packet.go QUIC branch
+	// stay for API compatibility.
 	udpRelayMode := common.NATIVE
-	if header.Flags&protocol.Flags_Tuic_UdpRelayModeQuic > 0 {
-		_ = header // avoid empty branch warning
-		// FIXME: QUIC has severe performance problems.
-		// udpRelayMode = common.QUIC
-	}
 	// cwnd doubles as the brutal congestion controller's target bandwidth
 	// (bytes per second) when congestion_control=brutal; 0 lets the
 	// controller fall back to BBR.

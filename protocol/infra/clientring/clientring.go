@@ -8,26 +8,29 @@ import (
 	"container/list"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 )
 
 // IsFailoverError reports whether err is one of the conditions the ring
 // treats as "try the next client": stream exhaustion, a closed client, or
-// the capability hold gate. errors.Is so wrapped transport errors fail over
-// too.
+// the capability hold gate. Stream exhaustion additionally matches the
+// quic-go native *quic.StreamLimitReachedError via its message, so a raw
+// transport error fails over instead of aborting the attempt.
 func IsFailoverError(err error) bool {
-	return errors.Is(err, outbounderrors.ErrStreamExhausted) ||
+	return outbounderrors.IsStreamExhausted(err) ||
 		errors.Is(err, outbounderrors.ErrClientClosed) ||
 		errors.Is(err, outbounderrors.ErrOperationHold)
 }
 
 // Node is one ring entry: the protocol client plus its last reported
-// capability. capability is written by the transport's congestion feedback
-// and read under the ring lock (-1 until the first report).
+// capability. capability is written by quic-go's stream-table goroutine and
+// read from dial attempts holding the ring lock; the atomic keeps that
+// cross-goroutine pair race-free without coupling the two locks.
 type Node[T any] struct {
 	Client     T
-	capability int64
+	capability atomic.Int64
 }
 
 // Capability returns the node's last reported capability (-1 = unknown).
@@ -35,7 +38,7 @@ func (n *Node[T]) Capability() int64 {
 	if n == nil {
 		return -1
 	}
-	return n.capability
+	return n.capability.Load()
 }
 
 // Ring is the shared failover ring. The protocol-specific dial bodies are
@@ -114,10 +117,11 @@ func (r *Ring[T]) tryNext(current **list.Element, f func(*Node[T]) error) (err e
 
 getNew:
 	newNode := &Node[T]{
-		Client:     *new(T),
-		capability: -1,
+		Client: *new(T),
 	}
-	newCli := r.newClient(func(n int64) { newNode.capability = n })
+	// -1 = unknown until the first capability report arrives.
+	newNode.capability.Store(-1)
+	newCli := r.newClient(func(n int64) { newNode.capability.Store(n) })
 	newNode.Client = newCli
 	r.current = r.insertAfterCurrent(newNode)
 	*current = r.current

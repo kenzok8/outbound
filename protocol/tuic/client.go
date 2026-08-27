@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	outbounderrors "github.com/daeuniverse/outbound/common/errors"
@@ -54,7 +55,9 @@ type clientImpl struct {
 	quicConn  quic.Connection
 	connMutex sync.Mutex
 
-	closed bool
+	// closed is read without connMutex on the per-dial fast path and set
+	// under it in forceClose; atomicity keeps those entry checks race-free.
+	closed atomic.Bool
 
 	udpIncomingPacketsMap sync.Map
 
@@ -260,21 +263,24 @@ func (t *clientImpl) processDatagram(quicConn quic.Connection, message []byte) {
 }
 
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {
-	// Only close connection on non-temporary errors
+	// Only close connection on non-temporary errors. Stream exhaustion is a
+	// per-attempt condition: quic-go reports it as *quic.StreamLimitReachedError
+	// ("too many open streams"), which IsStreamExhausted matches, so the shared
+	// tunnel survives and callers fall back instead of tearing it down.
 	if err != nil &&
 		!outbounderrors.IsTemporaryError(err) &&
-		err != outbounderrors.ErrStreamExhausted {
+		!outbounderrors.IsStreamExhausted(err) {
 		t.forceClose(quicConn, err)
 	}
 }
 
 func (t *clientImpl) forceClose(quicConn quic.Connection, err error) {
 	t.connMutex.Lock()
-	if t.closed {
+	if t.closed.Load() {
 		t.connMutex.Unlock()
 		return
 	}
-	t.closed = true
+	t.closed.Store(true)
 	if t.onClose != nil {
 		go t.onClose()
 		t.onClose = nil
@@ -309,7 +315,7 @@ func (t *clientImpl) forceClose(quicConn quic.Connection, err error) {
 			_ = quicConn.CloseWithError(ProtocolError, errStr)
 		}
 		if t.underConn != nil {
-			err = t.underConn.Close()
+			_ = t.underConn.Close()
 			t.underConn = nil
 		}
 	})
@@ -380,7 +386,7 @@ func waitForImmediateTUICConnectFailure(ctx context.Context, quicConn quic.Conne
 }
 
 func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (netproxy.Conn, error) {
-	if t.closed {
+	if t.closed.Load() {
 		return nil, common.ErrClientClosed
 	}
 	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
@@ -426,7 +432,7 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protoc
 }
 
 func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*quicStreamPacketConn, error) {
-	if t.closed {
+	if t.closed.Load() {
 		return nil, common.ErrClientClosed
 	}
 	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
