@@ -557,8 +557,12 @@ func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error
 }
 
 func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
-	conns, cachedConnsFound := p.acquireConnList(addr)
-	defer p.releaseConnList(addr, conns)
+	// Key by address + network + the chained dialer's transport namespace:
+	// a config reload that swaps the underlying chain must not reuse
+	// connections dialed through the previous generation.
+	scopeKey := string(netproxy.TransportCacheNamespace(nextDialer)) + "|" + magicNetwork
+	conns, cachedConnsFound := p.acquireConnList(scopeKey + "|" + addr)
+	defer p.releaseConnList(scopeKey+"|"+addr, conns)
 
 	if cachedConnsFound {
 		conns.mu.Lock()
