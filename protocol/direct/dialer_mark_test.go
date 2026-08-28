@@ -4,6 +4,7 @@ package direct
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"syscall"
@@ -28,6 +29,9 @@ func TestDirectUDPDialAppliesSocketMark(t *testing.T) {
 		server.LocalAddr().String(),
 	)
 	if err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			t.Skipf("SO_MARK requires CAP_NET_ADMIN: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer conn.Close()
