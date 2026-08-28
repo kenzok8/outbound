@@ -101,7 +101,8 @@ func (c *juicityTestQUICConn) SetCongestionControl(congestion.CongestionControl)
 func (c *juicityTestQUICConn) ReleaseDatagram([]byte) {}
 
 type juicityTestStream struct {
-	ctx context.Context
+	ctx     context.Context
+	writeFn func([]byte) (int, error)
 }
 
 func (s *juicityTestStream) StreamID() quic.StreamID {
@@ -113,6 +114,9 @@ func (s *juicityTestStream) Read([]byte) (int, error) {
 }
 
 func (s *juicityTestStream) Write(p []byte) (int, error) {
+	if s.writeFn != nil {
+		return s.writeFn(p)
+	}
 	return len(p), nil
 }
 
@@ -494,6 +498,113 @@ func TestDialContextTemporaryOpenStreamDoesNotCloseTunnel(t *testing.T) {
 	}
 	if client.quicConn != origin || origin.closed.Load() {
 		t.Fatal("temporary OpenStream error closed the shared tunnel")
+	}
+}
+
+func TestUnderlayAuthenticationWriterReportsEachWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &clientImpl{ClientOption: &ClientOption{
+		Ctx:          ctx,
+		Cancel:       cancel,
+		UnderlayAuth: make(chan *UnderlayAuth, 1),
+	}}
+	conn := &juicityTestQUICConn{ctx: context.Background()}
+	stream := &juicityTestStream{}
+	done := make(chan struct{})
+	go func() {
+		client.writeUnderlayAuthentications(conn, stream, client.UnderlayAuth)
+		close(done)
+	}()
+
+	auth := &UnderlayAuth{
+		IV:  make([]byte, CipherConf.SaltLen),
+		Psk: make([]byte, CipherConf.KeyLen),
+		Metadata: &trojanc.Metadata{
+			Metadata: protocol.Metadata{Type: protocol.MetadataTypeDomain, Hostname: "example.com", Port: 443},
+			Network:  "tcp",
+		},
+		result: make(chan error, 1),
+	}
+	client.UnderlayAuth <- auth
+	select {
+	case err := <-auth.result:
+		if err != nil {
+			t.Fatalf("authentication write: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authentication writer did not report the write result")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("authentication writer did not stop with the client context")
+	}
+}
+
+func TestUnderlayAuthenticationWritersAreConnectionBound(t *testing.T) {
+	clientCtx, cancelClient := context.WithCancel(context.Background())
+	defer cancelClient()
+	client := &clientImpl{ClientOption: &ClientOption{Ctx: clientCtx, Cancel: cancelClient}}
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	newCtx, cancelNew := context.WithCancel(context.Background())
+	defer cancelOld()
+	defer cancelNew()
+	oldCh := make(chan *UnderlayAuth, 1)
+	newCh := make(chan *UnderlayAuth, 1)
+	var oldWrites atomic.Int32
+	var newWrites atomic.Int32
+	oldDone := make(chan struct{})
+	newDone := make(chan struct{})
+	go func() {
+		client.writeUnderlayAuthentications(
+			&juicityTestQUICConn{ctx: oldCtx},
+			&juicityTestStream{writeFn: func(p []byte) (int, error) { oldWrites.Add(1); return len(p), nil }},
+			oldCh,
+		)
+		close(oldDone)
+	}()
+	go func() {
+		client.writeUnderlayAuthentications(
+			&juicityTestQUICConn{ctx: newCtx},
+			&juicityTestStream{writeFn: func(p []byte) (int, error) { newWrites.Add(1); return len(p), nil }},
+			newCh,
+		)
+		close(newDone)
+	}()
+
+	auth := &UnderlayAuth{
+		IV:  make([]byte, CipherConf.SaltLen),
+		Psk: make([]byte, CipherConf.KeyLen),
+		Metadata: &trojanc.Metadata{
+			Metadata: protocol.Metadata{Type: protocol.MetadataTypeDomain, Hostname: "example.com", Port: 443},
+			Network:  "tcp",
+		},
+		result: make(chan error, 1),
+	}
+	newCh <- auth
+	select {
+	case err := <-auth.result:
+		if err != nil {
+			t.Fatalf("new connection auth write: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new connection auth writer did not respond")
+	}
+	if oldWrites.Load() != 0 || newWrites.Load() != 1 {
+		t.Fatalf("auth used wrong writer: old=%d new=%d", oldWrites.Load(), newWrites.Load())
+	}
+	cancelOld()
+	cancelNew()
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("old auth writer did not stop")
+	}
+	select {
+	case <-newDone:
+	case <-time.After(time.Second):
+		t.Fatal("new auth writer did not stop")
 	}
 }
 

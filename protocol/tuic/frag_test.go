@@ -13,7 +13,10 @@ func TestFragmentPacketsDoesNotPoisonCachedAddress(t *testing.T) {
 	addr := &Address{TYPE: AtypIPv4, ADDR: netip.AddrFrom4([4]byte{1, 2, 3, 4}).AsSlice(), PORT: 443}
 	packet := NewPacket(7, 9, 1, 0, uint16(len(bytes.Repeat([]byte{0xAA}, 100))), addr, bytes.Repeat([]byte{0xBB}, 300), Ver5)
 
-	frags := fragmentPackets(packet, 128)
+	frags, err := fragmentPackets(packet, 128)
+	if err != nil {
+		t.Fatalf("fragmentPackets: %v", err)
+	}
 	if len(frags) < 3 {
 		t.Fatalf("expected at least 3 fragments, got %d", len(frags))
 	}
@@ -61,7 +64,10 @@ func TestFragmentPacketsReassemblesInOrder(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xC3}, 600)
 	packet := NewPacket(11, 12, 1, 0, uint16(len(payload)), addr, append([]byte(nil), payload...), Ver5)
 
-	frags := fragmentPackets(packet, 256)
+	frags, err := fragmentPackets(packet, 256)
+	if err != nil {
+		t.Fatalf("fragmentPackets: %v", err)
+	}
 	if int(packet.FRAG_TOTAL) != len(frags) {
 		t.Fatalf("FRAG_TOTAL %d does not match fragment count %d", packet.FRAG_TOTAL, len(frags))
 	}
@@ -71,5 +77,15 @@ func TestFragmentPacketsReassemblesInOrder(t *testing.T) {
 	}
 	if !bytes.Equal(reassembled, payload) {
 		t.Fatal("reassembly in fragment order does not reproduce the payload")
+	}
+}
+
+func TestFragmentPacketsRejectsProtocolCountOverflow(t *testing.T) {
+	packet := NewPacket(1, 2, 1, 0, 256, &Address{TYPE: AtypNone}, make([]byte, 256), Ver5)
+	if _, err := fragmentPackets(packet, 1); err == nil {
+		t.Fatal("256 fragments must exceed the uint8 wire limit")
+	}
+	if _, err := fragmentPackets(packet, 0); err == nil {
+		t.Fatal("zero fragment size must be rejected")
 	}
 }

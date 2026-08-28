@@ -47,34 +47,28 @@ func readPacketFromMessage(msg []byte) (*Packet, error) {
 	off += n
 
 	var data []byte
-	dataFromPool := false
+	var dataOwner *packetDataOwner
 	if size > 0 {
 		if len(msg[off:]) < int(size) {
 			return nil, fmt.Errorf("tuic: data truncated: need %d have %d", size, len(msg[off:]))
 		}
-		// Unfragmented packets take DATA from the pool to avoid a per-datagram
-		// heap allocation scaling with payload size. Fragmented packets keep make:
-		// their DATA is sliced during reassembly (frag.go) and outlives the parse,
-		// which the pool cannot track safely.
-		if fragTotal <= 1 {
-			data = pool.Get(int(size))
-			dataFromPool = true
-		} else {
-			data = make([]byte, size)
-		}
+		// Every parsed payload is pool-backed. Fragment defraggers own their
+		// packets until assembly, timeout, rejection, or association teardown.
+		data = pool.Get(int(size))
+		dataOwner = &packetDataOwner{}
 		copy(data, msg[off:off+int(size)])
 	}
 
 	return &Packet{
-		CommandHead:  &CommandHead{VER: ver, TYPE: PacketType},
-		ASSOC_ID:     assocId,
-		PKT_ID:       pktId,
-		FRAG_TOTAL:   fragTotal,
-		FRAG_ID:      fragId,
-		SIZE:         size,
-		ADDR:         addr,
-		DATA:         data,
-		dataFromPool: dataFromPool,
+		CommandHead: &CommandHead{VER: ver, TYPE: PacketType},
+		ASSOC_ID:    assocId,
+		PKT_ID:      pktId,
+		FRAG_TOTAL:  fragTotal,
+		FRAG_ID:     fragId,
+		SIZE:        size,
+		ADDR:        addr,
+		DATA:        data,
+		dataOwner:   dataOwner,
 	}, nil
 }
 
@@ -158,35 +152,26 @@ func readPacketFromStream(r io.Reader) (*Packet, error) {
 	}
 
 	var data []byte
-	dataFromPool := false
+	var dataOwner *packetDataOwner
 	if size > 0 {
-		// Same split as readPacketFromMessage: unfragmented packets take
-		// DATA from the pool; fragmented packets keep make because their
-		// DATA is sliced during reassembly and outlives the parse.
-		if fragTotal <= 1 {
-			data = pool.Get(int(size))
-			dataFromPool = true
-		} else {
-			data = make([]byte, size)
-		}
+		data = pool.Get(int(size))
+		dataOwner = &packetDataOwner{}
 		if _, err := io.ReadFull(r, data); err != nil {
-			if dataFromPool {
-				pool.Put(data)
-			}
+			pool.Put(data)
 			return nil, err
 		}
 	}
 
 	return &Packet{
-		CommandHead:  &CommandHead{VER: head[0], TYPE: PacketType},
-		ASSOC_ID:     assocId,
-		PKT_ID:       pktId,
-		FRAG_TOTAL:   fragTotal,
-		FRAG_ID:      fragId,
-		SIZE:         size,
-		ADDR:         addr,
-		DATA:         data,
-		dataFromPool: dataFromPool,
+		CommandHead: &CommandHead{VER: head[0], TYPE: PacketType},
+		ASSOC_ID:    assocId,
+		PKT_ID:      pktId,
+		FRAG_TOTAL:  fragTotal,
+		FRAG_ID:     fragId,
+		SIZE:        size,
+		ADDR:        addr,
+		DATA:        data,
+		dataOwner:   dataOwner,
 	}, nil
 }
 

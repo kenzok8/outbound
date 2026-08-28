@@ -2,29 +2,25 @@ package direct
 
 import (
 	"net"
-	"runtime"
 	"testing"
+
+	"golang.org/x/net/ipv6"
 )
 
-func TestReleaseDirectBatchScratchClearsPayloadReferences(t *testing.T) {
-	oldProcs := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(oldProcs)
-
-	scratch := directBatchScratchPool.Get().(*directBatchScratch)
+func TestResetDirectBatchScratchClearsPayloadReferences(t *testing.T) {
+	scratch := &directBatchScratch{
+		msgs: make([]ipv6.Message, 1),
+		iovs: make([][]byte, 1),
+	}
 	payload := []byte("payload")
 	scratch.iovs[0] = payload
 	scratch.msgs[0].Buffers = scratch.iovs[:1]
-	releaseDirectBatchScratch(scratch, 1)
+	resetDirectBatchScratch(scratch, 1)
 
-	reused := directBatchScratchPool.Get().(*directBatchScratch)
-	defer directBatchScratchPool.Put(reused)
-	if reused != scratch {
-		t.Fatal("sync.Pool did not return the just-released scratch")
-	}
-	if reused.iovs[0] != nil {
+	if scratch.iovs[0] != nil {
 		t.Fatal("scratch retained payload reference")
 	}
-	if reused.msgs[0].Buffers != nil || reused.msgs[0].Addr != nil {
+	if scratch.msgs[0].Buffers != nil || scratch.msgs[0].Addr != nil {
 		t.Fatal("scratch retained message references")
 	}
 }

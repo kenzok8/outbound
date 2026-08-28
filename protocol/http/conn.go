@@ -529,21 +529,20 @@ type poolIdent struct {
 	// MarkDead / cleanup must use this, not the bare host:port.
 	key string
 }
-type addrDialerEntry struct {
+type addrDialerBinding struct {
+	key          string
 	dialer       netproxy.Dialer
 	magicNetwork string
-	refs         int
 }
 
 type h2ConnsPool struct {
 	mu           sync.Mutex
 	h2ConnsPool  map[string]*lockedList
 	h2Conn2Ident map[*http2.ClientConn]*poolIdent
-	// addr2Dialer is keyed by bare host:port because http2.ClientConnPool
-	// GetClientConn only supplies addr. refs tracks live scoped lists that
-	// still need this mapping; cleanup of one namespace must not drop it
-	// while another namespace is still using the same host:port.
-	addr2Dialer map[string]*addrDialerEntry
+	// addr2Dialer keeps all live scoped bindings in insertion order for each
+	// bare host:port. GetClientConn uses the latest binding; removing it falls
+	// back to the previous live scope.
+	addr2Dialer map[string][]addrDialerBinding
 }
 
 func newH2ConnsPool() *h2ConnsPool {
@@ -551,38 +550,48 @@ func newH2ConnsPool() *h2ConnsPool {
 		mu:           sync.Mutex{},
 		h2ConnsPool:  make(map[string]*lockedList),
 		h2Conn2Ident: make(map[*http2.ClientConn]*poolIdent),
-		addr2Dialer:  make(map[string]*addrDialerEntry),
+		addr2Dialer:  make(map[string][]addrDialerBinding),
 	}
 }
 
 func (p *h2ConnsPool) registerAddrToDialerMapping(addr string, dialer netproxy.Dialer, magicNetwork string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.retainAddrDialerLocked(addr, dialer, magicNetwork)
+	key := string(netproxy.TransportCacheNamespace(dialer)) + "|" + magicNetwork + "|" + addr
+	p.retainAddrDialerLocked(addr, key, dialer, magicNetwork)
 }
 
-func (p *h2ConnsPool) retainAddrDialerLocked(addr string, dialer netproxy.Dialer, magicNetwork string) {
-	if e, ok := p.addr2Dialer[addr]; ok {
-		e.dialer = dialer
-		e.magicNetwork = magicNetwork
-		e.refs++
-		return
+func (p *h2ConnsPool) retainAddrDialerLocked(addr, key string, dialer netproxy.Dialer, magicNetwork string) {
+	bindings := p.addr2Dialer[addr]
+	for i := range bindings {
+		if bindings[i].key == key {
+			bindings[i].dialer = dialer
+			bindings[i].magicNetwork = magicNetwork
+			p.addr2Dialer[addr] = bindings
+			return
+		}
 	}
-	p.addr2Dialer[addr] = &addrDialerEntry{
+	p.addr2Dialer[addr] = append(bindings, addrDialerBinding{
+		key:          key,
 		dialer:       dialer,
 		magicNetwork: magicNetwork,
-		refs:         1,
-	}
+	})
 }
 
-func (p *h2ConnsPool) releaseAddrDialerLocked(addr string) {
-	e, ok := p.addr2Dialer[addr]
-	if !ok {
+func (p *h2ConnsPool) releaseAddrDialerLocked(addr, key string) {
+	bindings := p.addr2Dialer[addr]
+	for i := range bindings {
+		if bindings[i].key != key {
+			continue
+		}
+		copy(bindings[i:], bindings[i+1:])
+		bindings = bindings[:len(bindings)-1]
+		if len(bindings) == 0 {
+			delete(p.addr2Dialer, addr)
+		} else {
+			p.addr2Dialer[addr] = bindings
+		}
 		return
-	}
-	e.refs--
-	if e.refs <= 0 {
-		delete(p.addr2Dialer, addr)
 	}
 }
 
@@ -618,15 +627,9 @@ func (p *h2ConnsPool) acquireConnListForDialer(key string, addr string, dialer n
 	if conns == nil {
 		conns = newLockedList()
 		p.h2ConnsPool[key] = conns
-		p.retainAddrDialerLocked(addr, dialer, magicNetwork)
+		p.retainAddrDialerLocked(addr, key, dialer, magicNetwork)
 	} else {
-		// Keep GetClientConn on the latest chain for this host:port.
-		if e := p.addr2Dialer[addr]; e != nil {
-			e.dialer = dialer
-			e.magicNetwork = magicNetwork
-		} else {
-			p.retainAddrDialerLocked(addr, dialer, magicNetwork)
-		}
+		p.retainAddrDialerLocked(addr, key, dialer, magicNetwork)
 	}
 	conns.refs++
 	return conns, cached
@@ -652,7 +655,7 @@ func (p *h2ConnsPool) cleanupConnListLocked(addr string, conns *lockedList) {
 		return
 	}
 	delete(p.h2ConnsPool, addr)
-	p.releaseAddrDialerLocked(poolKeyBareAddr(addr))
+	p.releaseAddrDialerLocked(poolKeyBareAddr(addr), addr)
 }
 
 func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error) {
@@ -740,9 +743,14 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 
 func (p *h2ConnsPool) GetClientConn(req *http.Request, addr string) (*http2.ClientConn, error) {
 	p.mu.Lock()
-	e, ok := p.addr2Dialer[addr]
+	bindings := p.addr2Dialer[addr]
+	if len(bindings) == 0 {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("no valid dialer for h2ConnsPool.GetClientConn")
+	}
+	e := bindings[len(bindings)-1]
 	p.mu.Unlock()
-	if !ok || e == nil || e.dialer == nil {
+	if e.dialer == nil {
 		return nil, fmt.Errorf("no valid dialer for h2ConnsPool.GetClientConn")
 	}
 	_, h2Conn, err := p.GetConn(req.Context(), e.dialer, addr, e.magicNetwork)

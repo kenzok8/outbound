@@ -16,10 +16,9 @@ import (
 const (
 	directPacketReceiverBufferSize = 65535
 	// Small tier covers EDNS/DNSSEC and almost all QUIC initial/handshake
-	// datagrams. A 256-deep reply queue of 64 KiB buffers can pin ~16 MiB,
-	// so jumbo/GSO stays on the upgrade path. MSG_TRUNC still consumes the
-	// datagram that trips the upgrade; recovering it would require MSG_PEEK
-	// on every packet, which this path does not pay.
+	// datagrams. The receiver peeks only the datagram length, then consumes it
+	// into the smallest fitting tier so a queue never permanently pins 64 KiB
+	// buffers and the first jumbo datagram is preserved.
 	directPacketReceiverSmallBufferSize = 8192
 	directPacketReceiverBatchSize       = 64
 )
@@ -38,10 +37,6 @@ type directPacketReceiverEntry struct {
 	fd      int
 	handler netproxy.PacketReceiveHandler
 	active  atomic.Bool
-	// needBigBuffers flips on the first datagram that exceeded the small
-	// tier (observed via MSG_TRUNC) and switches the entry to full-size
-	// buffers from then on.
-	needBigBuffers atomic.Bool
 }
 
 var defaultPacketReceiverRegistry = &packetReceiverRegistry{}
@@ -176,15 +171,27 @@ func (r *packetReceiverRegistry) drain(entry *directPacketReceiverEntry) {
 		if !entry.active.Load() {
 			return
 		}
+		var peek [1]byte
+		packetLen, _, err := unix.Recvfrom(entry.fd, peek[:], unix.MSG_DONTWAIT|unix.MSG_PEEK|unix.MSG_TRUNC)
+		if err != nil {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR {
+				if err == unix.EINTR {
+					continue
+				}
+				return
+			}
+			r.deliverError(entry, err)
+			return
+		}
 		bufSize := directPacketReceiverSmallBufferSize
-		if entry.needBigBuffers.Load() {
-			bufSize = directPacketReceiverBufferSize
+		if packetLen > bufSize {
+			bufSize = packetLen
+			if bufSize > directPacketReceiverBufferSize {
+				bufSize = directPacketReceiverBufferSize
+			}
 		}
 		buf := pool.GetFullCap(bufSize)
-		// MSG_TRUNC makes Recvfrom return the real datagram length even
-		// when it exceeded the buffer, which is how oversize traffic is
-		// detected on the small tier.
-		n, sockaddr, err := unix.Recvfrom(entry.fd, buf, unix.MSG_DONTWAIT|unix.MSG_TRUNC)
+		n, sockaddr, err := unix.Recvfrom(entry.fd, buf, unix.MSG_DONTWAIT)
 		if err != nil {
 			pool.Put(buf)
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK || err == unix.EINTR {
@@ -195,14 +202,6 @@ func (r *packetReceiverRegistry) drain(entry *directPacketReceiverEntry) {
 			}
 			r.deliverError(entry, err)
 			return
-		}
-		if n > len(buf) {
-			// Real size (via MSG_TRUNC) exceeded the small tier: this one
-			// datagram is lost; upgrade the entry so the rest of the burst
-			// survives on full-size buffers.
-			entry.needBigBuffers.Store(true)
-			pool.Put(buf)
-			continue
 		}
 
 		from, ok := directPacketReceiverAddrPort(sockaddr)

@@ -123,9 +123,13 @@ func (c *directPacketConn) getBatchWriter() packetBatchWriter {
 	return c.batchWriter
 }
 
-func releaseDirectBatchScratch(scratch *directBatchScratch, n int) {
+func resetDirectBatchScratch(scratch *directBatchScratch, n int) {
 	clear(scratch.msgs[:n])
 	clear(scratch.iovs[:n])
+}
+
+func releaseDirectBatchScratch(scratch *directBatchScratch, n int) {
+	resetDirectBatchScratch(scratch, n)
 	directBatchScratchPool.Put(scratch)
 }
 
@@ -196,7 +200,8 @@ func (c *directPacketConn) resolveTarget() error {
 	}
 	// Store the value directly, not a pointer to a stack variable.
 	// atomic.Value stores the value on heap, ensuring memory safety.
-	ap := ua.AddrPort()
+	resolved := ua.AddrPort()
+	ap := netip.AddrPortFrom(resolved.Addr().Unmap(), resolved.Port())
 	c.cachedDialTgt.Store(ap)
 	return nil
 }
@@ -217,7 +222,8 @@ func (c *directPacketConn) writeTargetAddrPort(addr string) (netip.AddrPort, err
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
-	target := uAddr.AddrPort()
+	resolved := uAddr.AddrPort()
+	target := netip.AddrPortFrom(resolved.Addr().Unmap(), resolved.Port())
 	c.writeTgtCache.Store(addr, target)
 	return target, nil
 }

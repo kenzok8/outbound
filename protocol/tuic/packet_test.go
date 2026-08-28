@@ -1,6 +1,7 @@
 package tuic
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"net/netip"
@@ -179,6 +180,94 @@ func TestQuicStreamPacketConnPacketReceiverAssemblesFragments(t *testing.T) {
 		t.Fatal("packet receiver did not assemble fragments")
 	}
 	_ = q.Close()
+}
+
+func TestDefraggerAllocatesFromActualFragmentSum(t *testing.T) {
+	addr := &Address{TYPE: AtypIPv4, ADDR: []byte{198, 51, 100, 9}, PORT: 443}
+	payloadA := bytes.Repeat([]byte{'a'}, 1400)
+	payloadB := bytes.Repeat([]byte{'b'}, 53)
+	bucket := &deFraggerBucket{}
+
+	_, _, assembled, size := bucket.feed(&Packet{PKT_ID: 1, FRAG_TOTAL: 2, FRAG_ID: 0, ADDR: addr, SIZE: uint16(len(payloadA)), DATA: payloadA}, nil, time.Now().UnixNano())
+	if assembled || size != 0 {
+		t.Fatalf("first fragment assembled=%v size=%d", assembled, size)
+	}
+	_, _, assembled, size = bucket.feed(&Packet{PKT_ID: 1, FRAG_TOTAL: 2, FRAG_ID: 1, ADDR: &Address{TYPE: AtypNone}, SIZE: uint16(len(payloadB)), DATA: payloadB}, nil, time.Now().UnixNano())
+	if assembled || size != len(payloadA)+len(payloadB) {
+		t.Fatalf("complete set assembled=%v size=%d, want %d", assembled, size, len(payloadA)+len(payloadB))
+	}
+	buffer := pool.GetFullCap(size)
+	defer buffer.Put()
+	n, _, assembled, _ := bucket.feed(nil, buffer, time.Now().UnixNano())
+	if !assembled || n != size {
+		t.Fatalf("assembled=%v n=%d, want %d", assembled, n, size)
+	}
+	if !bytes.Equal(buffer[:n], append(payloadA, payloadB...)) {
+		t.Fatal("assembled payload mismatch")
+	}
+}
+
+func TestPacketHandlerCanUnregisterItself(t *testing.T) {
+	packets := NewPackets()
+	var unregister func()
+	called := make(chan struct{})
+	var ok bool
+	unregister, ok = packets.registerPacketHandler(func(*Packet) bool {
+		unregister()
+		close(called)
+		return true
+	})
+	if !ok {
+		t.Fatal("registerPacketHandler failed")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		packets.PushBack(NewPacket(0, 0, 1, 0, 0, nil, nil, Ver5))
+		close(done)
+	}()
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("handler deadlocked while unregistering itself")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PushBack did not return after self-unregister")
+	}
+	_ = packets.Close()
+}
+
+func TestPacketHandlerCanClosePackets(t *testing.T) {
+	packets := NewPackets()
+	called := make(chan struct{})
+	_, ok := packets.registerPacketHandler(func(*Packet) bool {
+		if err := packets.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(called)
+		return true
+	})
+	if !ok {
+		t.Fatal("registerPacketHandler failed")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		packets.PushBack(NewPacket(0, 0, 1, 0, 0, nil, nil, Ver5))
+		close(done)
+	}()
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("handler deadlocked while closing packets")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PushBack did not return after handler Close")
+	}
 }
 
 func TestConcurrentPushClose(t *testing.T) {

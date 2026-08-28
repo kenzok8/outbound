@@ -71,7 +71,7 @@ func TestTcp(t *testing.T) {
 	}
 }
 
-func TestTcpReturnsErrorWhenRemoteConnectFailsImmediately(t *testing.T) {
+func TestTcpReturnsStreamLocalErrorAfterImmediateDialSuccess(t *testing.T) {
 	server := startTestTUICServer(t, testTUICPassword)
 	defer server.Close()
 
@@ -86,12 +86,17 @@ func TestTcpReturnsErrorWhenRemoteConnectFailsImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	started := time.Now()
 	conn, err := dialer.DialContext(ctx, "tcp", backendAddr)
-	if err == nil {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		t.Fatal("DialContext() error = nil, want remote connect failure")
+	if err != nil {
+		t.Fatalf("DialContext() error = %v, want immediate stream", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 15*time.Millisecond {
+		t.Fatalf("DialContext() took %v, want no fixed confirmation delay", elapsed)
+	}
+	defer conn.Close()
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stream read error = nil, want remote connect failure")
 	}
 }
 

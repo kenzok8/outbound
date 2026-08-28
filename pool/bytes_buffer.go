@@ -11,22 +11,11 @@ import (
 // this caps worst-case retention at roughly 256 x 32KB = 8MB.
 const maxBufferPoolLen = 256
 
-// bufferPool recycles serialization buffers for tuic/juicity per-packet
-// encode/decode. It is a GC-stable LIFO pool: sync.Pool is cleared on every
-// GC cycle, and under GC pressure the pool stays empty so every packet
-// re-grows its backing slice, feeding the GC loop. LIFO keeps the temporal
-// locality that a FIFO channel pool lacks — a buffer grown to one packet size
-// is immediately reused by the next packet of the same size.
-//
-// Benchmarked (pool/bytes_buffer_bench_test.go, i7-14650HX): the single
-// mutex costs at most ~160 ns per Get/Put cycle at full 12-core parallelism;
-// a fastrand-sharded LIFO only wins at >=8 cores (~15%) and loses ~15% at 4
-// cores, which is the common router shape; sync.Pool is ~20-30x faster in
-// the microbenchmark but forfeits the GC-stability property above. Verdict:
-// keep until a load-level profile shows this path materially hot — do not
-// unify onto sync.Pool or shards on intuition. Since then tuic's per-datagram
-// send moved to a conn-private scratch (quicStreamPacketConn.writeScratch),
-// so this pool now serves only once-per-connection frames.
+// bufferPool recycles bounded serialization buffers for connection-level
+// TUIC and Juicity frames. The explicit LIFO provides deterministic retention;
+// sync.Pool instead uses a one-GC victim cache and may discard entries later.
+// Per-datagram sends use connection-private scratch buffers, so this mutex is
+// not on the packet hot path and carries no throughput claim.
 var bufferPool = newBufferPool()
 
 type bufferPoolT struct {

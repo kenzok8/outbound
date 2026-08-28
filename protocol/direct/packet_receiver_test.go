@@ -163,7 +163,6 @@ func assertDirectReceiverPacket(t *testing.T, packets <-chan *netproxy.ReceivedP
 			t.Fatalf("received packet from = %s, want %s", packet.From, wantFrom)
 		}
 		packet.Release()
-		packet.Release()
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %q", wantData)
 	}
@@ -190,12 +189,9 @@ func TestDirectPacketReceiverDeliversBelow8KiBOnSmallTier(t *testing.T) {
 	mustUnixSend(t, peer, mid)
 	defaultPacketReceiverRegistry.drain(entry)
 	assertDirectReceiverPacket(t, packets, string(mid), netip.AddrPort{})
-	if entry.needBigBuffers.Load() {
-		t.Fatal("3000-byte datagram should fit the 8KiB small tier")
-	}
 }
 
-func TestDirectPacketReceiverUpgradesAfterJumboDrop(t *testing.T) {
+func TestDirectPacketReceiverDeliversFirstJumboDatagram(t *testing.T) {
 	entry, peer, cleanup := newUnixDatagramReceiverEntry(t)
 	defer cleanup()
 
@@ -208,15 +204,10 @@ func TestDirectPacketReceiverUpgradesAfterJumboDrop(t *testing.T) {
 	jumbo := bytes.Repeat([]byte("z"), 20000)
 	mustUnixSend(t, peer, jumbo)
 	defaultPacketReceiverRegistry.drain(entry)
-	if !entry.needBigBuffers.Load() {
-		t.Fatal("expected needBigBuffers after jumbo datagram")
-	}
-	select {
-	case packet := <-packets:
-		t.Fatalf("upgrade datagram should be dropped, got %d bytes", len(packet.Data))
-	default:
-	}
-	mustUnixSend(t, peer, jumbo)
-	defaultPacketReceiverRegistry.drain(entry)
 	assertDirectReceiverPacket(t, packets, string(jumbo), netip.AddrPort{})
+
+	small := bytes.Repeat([]byte("s"), 512)
+	mustUnixSend(t, peer, small)
+	defaultPacketReceiverRegistry.drain(entry)
+	assertDirectReceiverPacket(t, packets, string(small), netip.AddrPort{})
 }

@@ -41,10 +41,11 @@ func TestTuicUnfragmentedDataPooled(t *testing.T) {
 
 	small := bop(64)
 	large := bop(4096)
-	// Flat (~144 B/op) when pooled; large scales with payload (~4 KB+) when not.
-	if large > small*4 {
+	// Race instrumentation adds size-dependent bookkeeping, but a pooled 4 KiB
+	// payload must still stay well below one fresh payload allocation per parse.
+	if large > small+2048 {
 		t.Fatalf("tuic unfragmented DATA not pooled: small=%d large=%d B/op "+
-			"(large should stay flat, not scale with payload)", small, large)
+			"(large should stay below one payload allocation)", small, large)
 	}
 }
 

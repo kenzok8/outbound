@@ -39,6 +39,7 @@ type UnderlayAuth struct {
 	IV       []byte
 	Psk      []byte
 	Metadata *trojanc.Metadata
+	result   chan error
 }
 
 func (a *UnderlayAuth) PackFromPool() (buf pool.PB) {
@@ -127,25 +128,34 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 
 	common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
 
-	go func() {
-		// Stream-limit exhaustion on the single auth unistream is a
-		// retryable condition, not a reason to destroy the fresh client;
-		// the dial attempt surfaces the error and the ring fails over.
-		if err := t.sendAuthentication(quicConn); err != nil && !isStreamLimitReached(err) {
-			_ = t.Close()
+	uniStream, err := quicConn.OpenUniStreamSync(ctx)
+	if err != nil {
+		_ = quicConn.CloseWithError(tuic.ProtocolError, err.Error())
+		_ = transport.Close()
+		if transport.Conn != nil {
+			_ = transport.Conn.Close()
 		}
-	}()
+		return nil, err
+	}
+	if err = t.writeAuthenticationHeader(quicConn, uniStream); err != nil {
+		_ = uniStream.Close()
+		_ = quicConn.CloseWithError(tuic.ProtocolError, err.Error())
+		_ = transport.Close()
+		if transport.Conn != nil {
+			_ = transport.Conn.Close()
+		}
+		return nil, err
+	}
 
+	authCh := make(chan *UnderlayAuth, 64)
 	t.underConn = transport.Conn
 	t.quicConn = quicConn
+	t.UnderlayAuth = authCh
+	go t.writeUnderlayAuthentications(quicConn, uniStream, authCh)
 	return quicConn, nil
 }
 
-func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
-	uniStream, err := quicConn.OpenUniStream()
-	if err != nil {
-		return err
-	}
+func (t *clientImpl) writeAuthenticationHeader(quicConn quic.Connection, uniStream quic.SendStream) (err error) {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 	token, err := tuic.GenToken(quicConn.ConnectionState(), t.Uuid, t.Password)
@@ -157,25 +167,27 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 		return err
 	}
 	_, err = buf.WriteTo(uniStream)
-	if err != nil {
-		return err
-	}
+	return err
+}
+
+func (t *clientImpl) writeUnderlayAuthentications(quicConn quic.Connection, uniStream quic.SendStream, authCh <-chan *UnderlayAuth) {
 	defer func() { _ = uniStream.Close() }()
 	for {
 		var auth *UnderlayAuth
 		select {
 		case <-t.Ctx.Done():
-			return t.Ctx.Err()
+			return
 		case <-quicConn.Context().Done():
-			return quicContextErr(quicConn.Context())
-		case auth = <-t.UnderlayAuth:
+			return
+		case auth = <-authCh:
 		}
 		buf := auth.PackFromPool()
-		_, err = uniStream.Write(buf)
+		_, err := uniStream.Write(buf)
 		buf.Put()
+		auth.result <- err
 		if err != nil {
 			_ = t.Close()
-			return err
+			return
 		}
 	}
 }
@@ -252,6 +264,10 @@ func (t *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connect
 	if err == nil {
 		return false
 	}
+	var streamErr *quic.StreamError
+	if errors.As(err, &streamErr) {
+		return false
+	}
 	if outbounderrors.IsTemporaryError(err) {
 		return false
 	}
@@ -321,12 +337,23 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 		return nil, nil, ctx.Err()
 	default:
 	}
-	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
-	if err != nil {
-		if errors.Is(err, common.ErrClientClosed) {
-			return nil, nil, err
+	var quicConn quic.Connection
+	var authCh chan *UnderlayAuth
+	for {
+		quicConn, err = t.getQuicConn(ctx, dialer, dialFn)
+		if err != nil {
+			if errors.Is(err, common.ErrClientClosed) {
+				return nil, nil, err
+			}
+			return nil, nil, fmt.Errorf("getQuicConn: %w", err)
 		}
-		return nil, nil, fmt.Errorf("getQuicConn: %w", err)
+		t.connMutex.Lock()
+		if t.quicConn == quicConn {
+			authCh = t.UnderlayAuth
+			t.connMutex.Unlock()
+			break
+		}
+		t.connMutex.Unlock()
 	}
 	iv = make([]byte, CipherConf.SaltLen)
 	psk = make([]byte, CipherConf.KeyLen)
@@ -337,9 +364,10 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 		IV:       iv,
 		Psk:      psk,
 		Metadata: metadata,
+		result:   make(chan error, 1),
 	}
 	select {
-	case t.UnderlayAuth <- auth:
+	case authCh <- auth:
 	case <-quicConn.Context().Done():
 		// The QUIC connection itself is gone. Detach that origin even if the
 		// context cause looks like a cancellation, but never close a replacement.
@@ -357,7 +385,19 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, d
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
 	}
-	return iv, psk, nil
+	select {
+	case err = <-auth.result:
+		if err != nil {
+			return nil, nil, err
+		}
+		return iv, psk, nil
+	case <-quicConn.Context().Done():
+		return nil, nil, quicContextErr(quicConn.Context())
+	case <-t.Ctx.Done():
+		return nil, nil, common.ErrClientClosed
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
 }
 
 func (t *clientImpl) setOnClose(f func()) {

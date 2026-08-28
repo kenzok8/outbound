@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -230,6 +231,10 @@ func (c Connect) BytesLen() int {
 	return c.CommandHead.BytesLen() + c.ADDR.BytesLen()
 }
 
+type packetDataOwner struct {
+	once sync.Once
+}
+
 type Packet struct {
 	*CommandHead
 	ASSOC_ID   uint16
@@ -240,20 +245,21 @@ type Packet struct {
 	ADDR       *Address
 	DATA       []byte
 
-	// dataFromPool marks DATA as pool-backed; only set for unfragmented packets
-	// parsed on the hot slice-based path so consumers can return it via releaseData.
-	dataFromPool bool
+	// dataOwner is present only for parsed pool-backed DATA. Keeping sync.Once
+	// behind a pointer makes outgoing Packet value copies safe.
+	dataOwner *packetDataOwner
 }
 
 // releaseData returns DATA to the pool if pool-backed; no-op otherwise and on
 // repeat calls. Call once the consumer is done with DATA.
 func (p *Packet) releaseData() {
-	if p == nil || !p.dataFromPool {
+	if p == nil || p.dataOwner == nil {
 		return
 	}
-	p.dataFromPool = false
-	pool.Put(p.DATA)
-	p.DATA = nil
+	p.dataOwner.once.Do(func() {
+		pool.Put(p.DATA)
+		p.DATA = nil
+	})
 }
 
 func NewPacket(ASSOC_ID uint16, PKT_ID uint16, FRGA_TOTAL uint8, FRAG_ID uint8, SIZE uint16, ADDR *Address, DATA []byte, VER byte) *Packet {

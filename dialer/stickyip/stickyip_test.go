@@ -474,6 +474,30 @@ func TestProxyIpCacheSetCleansOtherExpiredEntries(t *testing.T) {
 	}
 }
 
+func TestStickyIpDialerCycleInvalidationIsScopedToProxy(t *testing.T) {
+	cache := NewProxyIpCache()
+	parentA := &recordingLookupDialer{conn: nopConn{}}
+	parentB := &recordingLookupDialer{conn: nopConn{}}
+	cache.Set("proxy-a.example:443", "203.0.113.10:443", "tcp", "4", 0)
+	cache.Set("proxy-b.example:443", "203.0.113.20:443", "tcp", "4", 0)
+
+	dialerA := NewStickyIpDialer(parentA, "proxy-a.example:443", cache)
+	dialerB := NewStickyIpDialer(parentB, "proxy-b.example:443", cache)
+	dialerA.IncrementCheckCycle()
+
+	if _, err := dialerB.DialContext(context.Background(), "tcp", "proxy-b.example:443"); err != nil {
+		t.Fatalf("dialerB DialContext() error = %v", err)
+	}
+	parentB.mu.Lock()
+	defer parentB.mu.Unlock()
+	if len(parentB.dialCalls) != 1 || parentB.dialCalls[0][1] != "203.0.113.20:443" {
+		t.Fatalf("dialerB calls = %+v, want preserved cached address", parentB.dialCalls)
+	}
+	if parentB.lookupCalls != 0 {
+		t.Fatalf("dialerB lookup calls = %d, want 0", parentB.lookupCalls)
+	}
+}
+
 func TestStickyIpDialerCachedProxyCancellationDoesNotInvalidateCache(t *testing.T) {
 	cache := NewProxyIpCache()
 	cache.Set("proxy.example:443", "203.0.113.10:443", "tcp", "4", 0)

@@ -9,14 +9,10 @@ import (
 )
 
 // Benchmarks for the shared serialization buffer pool (bytes_buffer.go).
-// The pool design carries an explicit warning: do not replace the
-// mutex-guarded LIFO without benchmark evidence. These benchmarks provide
-// that evidence by racing Get/Write/Put cycles from every core, the shape of
-// tuic/juicity per-datagram serialization under multi-connection load.
-//
-// Read the results as: wall time per cycle at full machine parallelism.
-// sync.Pool's known GC-clear behavior is NOT modeled here; if its win is
-// marginal the LIFO (or a sharded LIFO) stays preferable for GC stability.
+// These microbenchmarks compare synchronization cost only. The production
+// pool serves connection-level frames, so results must not be presented as
+// packet-path throughput. They also do not model sync.Pool's victim-cache and
+// GC retention behavior.
 
 var (
 	benchFrameSmall = make([]byte, 128)  // ~TUIC fixed head + short addr

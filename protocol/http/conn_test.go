@@ -150,9 +150,29 @@ func TestH2ConnsPoolMarkDeadUsesScopedKey(t *testing.T) {
 	if listB.l.Len() != 1 {
 		t.Fatalf("ns-b list len = %d, want 1", listB.l.Len())
 	}
-	if _, ok := pool.addr2Dialer[addr]; !ok {
-		t.Fatal("expected shared addr dialer mapping to remain while ns-b is live")
+	bindings := pool.addr2Dialer[addr]
+	if len(bindings) != 1 || bindings[0].key != keyB {
+		t.Fatalf("bindings after ns-a removal = %+v, want only ns-b", bindings)
 	}
+}
+
+func TestH2ConnsPoolLatestBindingRemovalFallsBack(t *testing.T) {
+	pool := newH2ConnsPool()
+	addr := "proxy.example:443"
+	dialerA := scopedDialer{ns: "ns-a"}
+	dialerB := scopedDialer{ns: "ns-b"}
+	keyA := "ns-a|tcp|" + addr
+	keyB := "ns-b|tcp|" + addr
+
+	listA, _ := pool.acquireConnListForDialer(keyA, addr, dialerA, "tcp")
+	listB, _ := pool.acquireConnListForDialer(keyB, addr, dialerB, "tcp")
+	pool.releaseConnList(keyB, listB)
+
+	bindings := pool.addr2Dialer[addr]
+	if len(bindings) != 1 || bindings[0].key != keyA {
+		t.Fatalf("bindings after latest removal = %+v, want ns-a fallback", bindings)
+	}
+	pool.releaseConnList(keyA, listA)
 }
 
 func TestConnBuffersIncompleteInitialHTTPRequest(t *testing.T) {

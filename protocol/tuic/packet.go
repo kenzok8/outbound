@@ -48,27 +48,20 @@ func NewPackets() *Packets {
 }
 
 func (p *Packets) PushBack(packet *Packet) {
+	p.deliverMu.Lock()
+	defer p.deliverMu.Unlock()
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
-		// Queue torn down: return the pooled DATA so the buffer is not lost.
 		packet.releaseData()
 		return
 	}
 	if receiver := p.receiver; receiver != nil {
 		p.mu.Unlock()
-		// Serialize against registerPacketHandler's drain: acquiring
-		// deliverMu after dropping mu keeps lock order deliverMu > mu.
-		p.deliverMu.Lock()
 		if receiver.active.Load() {
-			// handler owns the packet on true; on false deliverPacket has
-			// already released DATA (or the packet was not pool-backed).
-			p.deliverMu.Unlock()
 			receiver.handler(packet)
 			return
 		}
-		p.deliverMu.Unlock()
-		// active=false (unregister race): handler never ran, release here.
 		packet.releaseData()
 		return
 	}
@@ -108,7 +101,10 @@ func (p *Packets) registerPacketHandler(handler func(*Packet) bool) (func(), boo
 drainLoop:
 	for {
 		select {
-		case pkt := <-p.ch:
+		case pkt, ok := <-p.ch:
+			if !ok {
+				break drainLoop
+			}
 			queued = append(queued, pkt)
 		default:
 			break drainLoop
@@ -117,14 +113,18 @@ drainLoop:
 	p.mu.Unlock()
 
 	for _, packet := range queued {
-		if !registration.active.Load() || !handler(packet) {
+		if !registration.active.Load() {
+			packet.releaseData()
 			continue
 		}
+		handler(packet)
 	}
 
 	var unregisterOnce sync.Once
 	return func() {
 		unregisterOnce.Do(func() {
+			// Do not take deliverMu here: handlers run while PushBack holds it,
+			// and are allowed to unregister themselves synchronously.
 			registration.active.Store(false)
 			p.mu.Lock()
 			if p.receiver == registration {
@@ -144,6 +144,8 @@ func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
 }
 
 func (p *Packets) Close() error {
+	// Do not take deliverMu: a synchronous receiver callback may close its
+	// association. p.mu still serializes channel close with PushBack sends.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed.Load() {
@@ -224,10 +226,24 @@ func (b *deFraggerBucket) removeAt(index int) {
 	if index < 0 || index >= len(b.deFraggers) {
 		return
 	}
+	if d := b.deFraggers[index]; d != nil {
+		d.release()
+	}
 	last := len(b.deFraggers) - 1
 	b.deFraggers[index] = b.deFraggers[last]
 	b.deFraggers[last] = nil
 	b.deFraggers = b.deFraggers[:last]
+}
+
+func (b *deFraggerBucket) release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, d := range b.deFraggers {
+		if d != nil {
+			d.release()
+		}
+	}
+	b.deFraggers = nil
 }
 
 func (b *deFraggerBucket) pruneExpired(nowNano int64) {
@@ -238,7 +254,11 @@ func (b *deFraggerBucket) pruneExpired(nowNano int64) {
 	}
 	dst := b.deFraggers[:0]
 	for _, d := range b.deFraggers {
-		if d == nil || d.IsExpired(nowNano, deFraggerIdleTimeout) {
+		if d == nil {
+			continue
+		}
+		if d.IsExpired(nowNano, deFraggerIdleTimeout) {
+			d.release()
 			continue
 		}
 		dst = append(dst, d)
@@ -249,9 +269,39 @@ func (b *deFraggerBucket) pruneExpired(nowNano int64) {
 	b.deFraggers = dst
 }
 
-func (b *deFraggerBucket) feed(packet *Packet, p []byte, nowNano int64) (n int, addr netip.AddrPort, assembled bool) {
+func (b *deFraggerBucket) feed(packet *Packet, p []byte, nowNano int64) (n int, addr netip.AddrPort, assembled bool, assembledLen int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if packet == nil {
+		for i, d := range b.deFraggers {
+			if d == nil {
+				continue
+			}
+			if size, ready := d.assembledLen(); ready && len(p) >= size {
+				var trigger *Packet
+				for _, frag := range d.frags {
+					if frag != nil {
+						trigger = frag
+						break
+					}
+				}
+				n, addr, assembled = d.Feed(trigger, p, nowNano)
+				if assembled {
+					last := len(b.deFraggers) - 1
+					b.deFraggers[i] = b.deFraggers[last]
+					b.deFraggers[last] = nil
+					b.deFraggers = b.deFraggers[:last]
+				}
+				return n, addr, assembled, size
+			}
+		}
+		return 0, netip.AddrPort{}, false, 0
+	}
+	if packet.FRAG_TOTAL <= 1 || packet.FRAG_ID >= packet.FRAG_TOTAL {
+		packet.releaseData()
+		return 0, netip.AddrPort{}, false, 0
+	}
 
 	var candidates []int
 	for i, d := range b.deFraggers {
@@ -295,26 +345,40 @@ func (b *deFraggerBucket) feed(packet *Packet, p []byte, nowNano int64) (n int, 
 			for _, idx := range candidates {
 				if d := b.deFraggers[idx]; d != nil && d.hasFirstFrag {
 					if selectedIndex != -1 {
-						return 0, netip.AddrPort{}, false
+						packet.releaseData()
+						return 0, netip.AddrPort{}, false, 0
 					}
 					selectedIndex = idx
 				}
 			}
 			if selectedIndex == -1 {
-				return 0, netip.AddrPort{}, false
+				packet.releaseData()
+				return 0, netip.AddrPort{}, false, 0
 			}
 		}
 	}
 
 	d := b.deFraggers[selectedIndex]
 	if d == nil {
-		return 0, netip.AddrPort{}, false
+		packet.releaseData()
+		return 0, netip.AddrPort{}, false, 0
+	}
+	assembledLen, ready := d.assembledLen()
+	if ready && len(p) < assembledLen {
+		return 0, netip.AddrPort{}, false, assembledLen
 	}
 	n, addr, assembled = d.Feed(packet, p, nowNano)
 	if assembled {
-		b.removeAt(selectedIndex)
+		last := len(b.deFraggers) - 1
+		b.deFraggers[selectedIndex] = b.deFraggers[last]
+		b.deFraggers[last] = nil
+		b.deFraggers = b.deFraggers[:last]
+		return n, addr, true, assembledLen
 	}
-	return n, addr, assembled
+	if size, ready := d.assembledLen(); ready {
+		return 0, netip.AddrPort{}, false, size
+	}
+	return 0, netip.AddrPort{}, false, 0
 }
 
 func (q *quicStreamPacketConn) Close() error {
@@ -374,7 +438,9 @@ func (q *quicStreamPacketConn) close() (err error) {
 
 func (q *quicStreamPacketConn) clearDeFraggers() {
 	q.deFraggers.Range(func(key, value any) bool {
-		q.deFraggers.Delete(key)
+		if q.deFraggers.CompareAndDelete(key, value) {
+			value.(*deFraggerBucket).release()
+		}
 		return true
 	})
 }
@@ -453,6 +519,10 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			return
 		}
 		if packet.FRAG_TOTAL <= 1 {
+			if packet.ADDR == nil {
+				packet.releaseData()
+				continue
+			}
 			n := copy(p, packet.DATA)
 			addr := packet.ADDR.UDPAddrPort()
 			packet.releaseData()
@@ -462,12 +532,23 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 		q.maybeCleanupDeFraggers(nowNano)
 		bucketAny, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFraggerBucket{})
 		bucket := bucketAny.(*deFraggerBucket)
-		var assembled bool
-		if n, addr, assembled = bucket.feed(packet, p, nowNano); assembled {
+		if n, addr, assembled, assembledLen := bucket.feed(packet, p, nowNano); assembled {
 			if bucket.len() == 0 {
 				q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
 			}
-			return
+			return n, addr, nil
+		} else if assembledLen > len(p) {
+			buffer := pool.GetFullCap(assembledLen)
+			n, addr, assembled, _ := bucket.feed(nil, buffer, nowNano)
+			if assembled {
+				copyN := copy(p, buffer[:n])
+				buffer.Put()
+				if bucket.len() == 0 {
+					q.deFraggers.CompareAndDelete(packet.PKT_ID, bucket)
+				}
+				return copyN, addr, nil
+			}
+			buffer.Put()
 		}
 	}
 }
@@ -525,17 +606,12 @@ func (q *quicStreamPacketConn) deliverPacket(handler netproxy.PacketReceiveHandl
 	q.maybeCleanupDeFraggers(nowNano)
 	bucketAny, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFraggerBucket{})
 	bucket := bucketAny.(*deFraggerBucket)
-	// Size the assembly buffer from this message's own declared geometry
-	// (per-fragment SIZE x FRAG_TOTAL) instead of always renting the 64KiB
-	// top bucket: pool.GetFullCap rounds up to a power-of-two bucket, so a
-	// 4KiB payload in 3 fragments now costs one 16KiB rental rather than a
-	// 64KiB one on every inbound fragment.
-	assembledLen := int(packet.SIZE) * int(packet.FRAG_TOTAL)
-	if assembledLen < len(packet.DATA) {
-		assembledLen = len(packet.DATA)
+	_, _, assembled, assembledLen := bucket.feed(packet, nil, nowNano)
+	if !assembled && assembledLen == 0 {
+		return true
 	}
 	buffer := pool.GetFullCap(assembledLen)
-	n, addr, assembled := bucket.feed(packet, buffer, nowNano)
+	n, addr, assembled, _ := bucket.feed(nil, buffer, nowNano)
 	if !assembled {
 		buffer.Put()
 		return true
@@ -600,22 +676,19 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 			return
 		}
 	default: // native
-		if len(p) > q.maxUdpRelayPacketSize {
-			err = fragWriteNative(q.quicConn, packet, buf, q.maxUdpRelayPacketSize)
-			if err != nil {
-				return
-			}
-		} else {
-			err = packet.WriteTo(buf)
-			if err != nil {
-				return
-			}
-			data := buf.Bytes()
-			err = q.quicConn.SendDatagram(data)
+		err = packet.WriteTo(buf)
+		if err != nil {
+			return
 		}
+		err = q.quicConn.SendDatagram(buf.Bytes())
 		var tooLarge *quic.DatagramTooLargeError
 		if errors.As(err, &tooLarge) {
-			err = fragWriteNative(q.quicConn, packet, buf, int(tooLarge.MaxDataLen)-PacketOverHead)
+			firstHeaderLen := packet.BytesLen() - len(packet.DATA)
+			fragSize := int(tooLarge.MaxDataLen) - firstHeaderLen
+			if q.maxUdpRelayPacketSize > 0 && fragSize > q.maxUdpRelayPacketSize {
+				fragSize = q.maxUdpRelayPacketSize
+			}
+			err = fragWriteNative(q.quicConn, packet, buf, fragSize)
 		}
 		if err != nil {
 			return

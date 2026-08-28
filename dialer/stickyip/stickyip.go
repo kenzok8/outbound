@@ -286,17 +286,19 @@ func (c *ProxyIpCache) InvalidateProtocol(proxyAddr, network string) {
 	c.InvalidateProtocolAndIpVersion(proxyAddr, network, "6")
 }
 
-// InvalidateCycle removes all cache entries for a specific cycle.
-func (c *ProxyIpCache) InvalidateCycle(cycle uint64) {
+// InvalidateCycle is retained for source compatibility.
+// Deprecated: a bare dialer-local cycle is not globally unique, so this method
+// intentionally does nothing. Invalidation must include the proxy address.
+func (c *ProxyIpCache) InvalidateCycle(cycle uint64) { _ = cycle }
+
+func (c *ProxyIpCache) invalidateProxyCycle(proxyAddr string, cycle uint64) {
 	if c == nil {
 		return
 	}
 	c.Lock()
 	defer c.Unlock()
-	for addr, entry := range c.cache {
-		if entry.checkCycle == cycle {
-			delete(c.cache, addr)
-		}
+	if entry := c.cache[proxyAddr]; entry != nil && entry.checkCycle == cycle {
+		delete(c.cache, proxyAddr)
 	}
 }
 
@@ -341,9 +343,9 @@ func (d *StickyIpDialer) IncrementCheckCycle() {
 		"new_cycle":  newCycle,
 		"proxy_addr": d.proxyAddr,
 	}).Debug("[StickyIP] Check cycle incremented")
-	// Invalidate old cycle entries to force refresh
+	// Cycle values are local to this dialer, so only invalidate its proxy.
 	if newCycle > 0 {
-		d.cache.InvalidateCycle(newCycle - 1)
+		d.cache.invalidateProxyCycle(d.proxyAddr, newCycle-1)
 	}
 }
 
