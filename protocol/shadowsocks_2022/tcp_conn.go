@@ -13,6 +13,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
@@ -48,6 +49,7 @@ type TCPConn struct {
 	cipherWrite cipher.AEAD
 	onceRead    bool
 	onceWrite   bool
+	writeBroken bool
 	nonceRead   []byte
 	nonceWrite  []byte
 
@@ -483,6 +485,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	n = len(b)
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
 	if !c.onceWrite {
 		// Generate salt
 		salt := c.sg.Get()
@@ -543,12 +548,16 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		common.BytesIncLittleEndian(c.nonceWrite)
 
 		offset += c.sealPayload(frame[offset:], remainingPayload)
-		c.onceWrite = true
 		if !c.checkContextAndSetWriteDeadline() {
+			c.writeBroken = true
 			return 0, io.EOF
 		}
-		_, err = c.Conn.Write(frame[:offset])
-		return n, err
+		if _, err = iout.WriteFull(c.Conn, frame[:offset]); err != nil {
+			c.writeBroken = true
+			return 0, err
+		}
+		c.onceWrite = true
+		return n, nil
 	}
 	if c.cipherWrite == nil {
 		return 0, fmt.Errorf("cipher is not initialized")
@@ -557,8 +566,12 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	frame := c.borrowWriteFrame(frameSize)
 	offset := c.sealPayload(frame, b)
 	if !c.checkContextAndSetWriteDeadline() {
+		c.writeBroken = true
 		return 0, io.EOF
 	}
-	_, err = c.Conn.Write(frame[:offset])
-	return n, err
+	if _, err = iout.WriteFull(c.Conn, frame[:offset]); err != nil {
+		c.writeBroken = true
+		return 0, err
+	}
+	return n, nil
 }

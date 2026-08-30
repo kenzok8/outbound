@@ -2,6 +2,7 @@ package frag
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
@@ -124,11 +125,90 @@ func TestFragUDPMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := FragUDPMessage(tt.args.m, tt.args.maxSize); !reflect.DeepEqual(got, tt.want) {
+			got, err := FragUDPMessage(tt.args.m, tt.args.maxSize)
+			if err != nil {
+				t.Fatalf("FragUDPMessage() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("FragUDPMessage() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestFragUDPMessageNoFragAliasesAddrAndData(t *testing.T) {
+	addr := []byte("test:123")
+	data := []byte("hello")
+	msg := &protocol.UDPMessage{
+		SessionID: 123,
+		PacketID:  123,
+		FragID:    0,
+		FragCount: 1,
+		Addr:      addr,
+		Data:      data,
+	}
+	got, err := FragUDPMessage(msg, 100)
+	if err != nil {
+		t.Fatalf("FragUDPMessage: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if len(got[0].Addr) == 0 || &got[0].Addr[0] != &addr[0] {
+		t.Fatal("non-fragment Addr was copied; zero-copy alias required")
+	}
+	if len(got[0].Data) == 0 || &got[0].Data[0] != &data[0] {
+		t.Fatal("non-fragment Data was copied; zero-copy alias required")
+	}
+}
+
+func TestFragUDPMessageRejectsIllegalCapacity(t *testing.T) {
+	msg := &protocol.UDPMessage{
+		SessionID: 1,
+		PacketID:  1,
+		FragID:    0,
+		FragCount: 1,
+		Addr:      []byte("1.1.1.1:53"),
+		Data:      []byte("hello"),
+	}
+
+	t.Run("header-only max size", func(t *testing.T) {
+		got, err := FragUDPMessage(msg, msg.HeaderSize())
+		if err == nil {
+			t.Fatal("expected error for maxSize == HeaderSize")
+		}
+		if got != nil {
+			t.Fatalf("got fragments %v, want nil", got)
+		}
+		if !strings.Contains(err.Error(), "cannot hold UDP header") {
+			t.Fatalf("err = %v, want header-capacity message", err)
+		}
+	})
+
+	t.Run("negative payload capacity", func(t *testing.T) {
+		got, err := FragUDPMessage(msg, 1)
+		if err == nil {
+			t.Fatal("expected error for maxSize < HeaderSize")
+		}
+		if got != nil {
+			t.Fatalf("got fragments %v, want nil", got)
+		}
+	})
+
+	t.Run("fragCount overflow", func(t *testing.T) {
+		big := *msg
+		big.Data = make([]byte, 256)
+		got, err := FragUDPMessage(&big, big.HeaderSize()+1)
+		if err == nil {
+			t.Fatal("expected error for FragCount overflow")
+		}
+		if got != nil {
+			t.Fatalf("got fragments %v, want nil", got)
+		}
+		if !strings.Contains(err.Error(), "exceeds uint8 FragCount") {
+			t.Fatalf("err = %v, want FragCount overflow message", err)
+		}
+	})
 }
 
 func TestDefragger(t *testing.T) {

@@ -21,6 +21,9 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 	}
 	length := int(binary.BigEndian.Uint16(bLen[:]))
 	if len(p) < length {
+		if _, discardErr := io.CopyN(io.Discard, &netproxy.ReadWrapper{ReadFunc: c.read}, int64(length)); discardErr != nil {
+			return 0, netip.AddrPort{}, discardErr
+		}
 		return 0, netip.AddrPort{}, fmt.Errorf("buf size is not enough")
 	}
 	n, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, p[:length])

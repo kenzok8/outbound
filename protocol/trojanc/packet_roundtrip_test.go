@@ -38,8 +38,12 @@ func trojanPacketConnPair(t *testing.T) (*PacketConn, *PacketConn) {
 	t.Helper()
 	a, b := newStreamPipe()
 	md := Metadata{Metadata: protocol.Metadata{IsClient: true}, Network: "udp"}
-	left := &PacketConn{Conn: &Conn{Conn: a, metadata: md, onceWrite: true}}
-	right := &PacketConn{Conn: &Conn{Conn: b, metadata: md, onceWrite: true}}
+	leftConn := &Conn{Conn: a, metadata: md}
+	rightConn := &Conn{Conn: b, metadata: md}
+	leftConn.onceWrite.Store(true)
+	rightConn.onceWrite.Store(true)
+	left := &PacketConn{Conn: leftConn}
+	right := &PacketConn{Conn: rightConn}
 	t.Cleanup(func() {
 		_ = left.Close()
 		_ = right.Close()
@@ -158,11 +162,12 @@ func TestPacketConnReadFromRejectsInvalidCRLF(t *testing.T) {
 	wire[md.Len()+3] = 'Y'
 	raw.Write(wire)
 
-	pc := &PacketConn{Conn: &Conn{
-		Conn:      &bufferConn{Buffer: raw},
-		metadata:  Metadata{Metadata: protocol.Metadata{IsClient: true}, Network: "udp"},
-		onceWrite: true,
-	}}
+	rawConn := &Conn{
+		Conn:     &bufferConn{Buffer: raw},
+		metadata: Metadata{Metadata: protocol.Metadata{IsClient: true}, Network: "udp"},
+	}
+	rawConn.onceWrite.Store(true)
+	pc := &PacketConn{Conn: rawConn}
 	_, _, err := pc.ReadFrom(make([]byte, 64))
 	if err == nil {
 		t.Fatal("expected invalid CRLF error")

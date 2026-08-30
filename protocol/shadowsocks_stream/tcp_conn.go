@@ -3,8 +3,11 @@ package shadowsocks_stream
 import (
 	"fmt"
 	"io"
+	"net"
+	"sync"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -14,7 +17,10 @@ type TcpConn struct {
 	netproxy.Conn
 	cipher *ciphers.StreamCipher
 
-	init bool
+	init        bool
+	writeBroken bool
+	readMutex   sync.Mutex
+	writeMutex  sync.Mutex
 }
 
 func NewTcpConn(c netproxy.Conn, cipher *ciphers.StreamCipher) *TcpConn {
@@ -25,6 +31,8 @@ func NewTcpConn(c netproxy.Conn, cipher *ciphers.StreamCipher) *TcpConn {
 }
 
 func (c *TcpConn) Read(b []byte) (n int, err error) {
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
 	if !c.cipher.DecryptInited() {
 		buf := b
 		if len(buf) < c.cipher.InfoIVLen() {
@@ -63,16 +71,21 @@ func (c *TcpConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *TcpConn) Write(b []byte) (n int, err error) {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
 	lenToWrite := len(b)
 	ivLen := 0
+	firstWrite := !c.init
 	if !c.cipher.EncryptInited() {
 		_, err = c.cipher.InitEncrypt()
 		if err != nil {
 			return 0, err
 		}
 	}
-	if !c.init {
-		c.init = true
+	if firstWrite {
 		iv := c.cipher.IV()
 		buf := pool.Get(len(b) + len(iv))
 		defer pool.Put(buf)
@@ -94,9 +107,12 @@ func (c *TcpConn) Write(b []byte) (n int, err error) {
 		}
 	}
 	c.cipher.Encrypt(b[ivLen:], b[ivLen:])
-	_, err = c.Conn.Write(b)
-	if err != nil {
+	if _, err = iout.WriteFull(c.Conn, b); err != nil {
+		c.writeBroken = true
 		return 0, err
+	}
+	if firstWrite {
+		c.init = true
 	}
 	return lenToWrite, nil
 }

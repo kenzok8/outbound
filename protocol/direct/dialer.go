@@ -16,7 +16,8 @@ import (
 var (
 	SymmetricDirect netproxy.Dialer = &lazyDirectDialer{fullcone: false}
 	FullconeDirect  netproxy.Dialer = &lazyDirectDialer{fullcone: true}
-	directOnce      sync.Once
+	directMu        sync.Mutex
+	directInited    bool
 	// directFallbackDNS records InitDirectDialers' argument atomically so a
 	// dial racing ahead of that call still builds with the configured
 	// resolver instead of baking a no-fallback dialer forever.
@@ -41,13 +42,17 @@ type lazyDirectDialer struct {
 }
 
 func (d *lazyDirectDialer) ensureInit() {
-	directOnce.Do(func() {
-		var fallbackDNS string
-		if v, ok := directFallbackDNS.Load().(string); ok {
-			fallbackDNS = v
-		}
-		buildDirectDialers(fallbackDNS)
-	})
+	directMu.Lock()
+	defer directMu.Unlock()
+	if directInited {
+		return
+	}
+	var fallbackDNS string
+	if v, ok := directFallbackDNS.Load().(string); ok {
+		fallbackDNS = v
+	}
+	buildDirectDialers(fallbackDNS)
+	directInited = true
 }
 
 func (d *lazyDirectDialer) getDialer() netproxy.Dialer {
@@ -59,12 +64,15 @@ func (d *lazyDirectDialer) getDialer() netproxy.Dialer {
 }
 
 // InitDirectDialers initializes the global direct dialers with optional fallback DNS.
-// If not called, dialers will be lazily initialized without fallback DNS on first use.
+// Later calls rebuild the dialers so a restart or config reload can publish a
+// new fallback resolver. If never called, dialers are lazily initialized
+// without fallback DNS on first use.
 func InitDirectDialers(fallbackDNS string) {
 	directFallbackDNS.Store(fallbackDNS)
-	directOnce.Do(func() {
-		buildDirectDialers(fallbackDNS)
-	})
+	directMu.Lock()
+	defer directMu.Unlock()
+	buildDirectDialers(fallbackDNS)
+	directInited = true
 }
 
 func (d *lazyDirectDialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {

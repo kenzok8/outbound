@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
@@ -29,10 +30,10 @@ type Conn struct {
 	metadata Metadata
 	pass     [56]byte
 
-	writeMutex     sync.Mutex
-	readHeaderDone bool
-	headerErr      error
-	onceWrite      bool
+	writeMutex sync.Mutex
+	headerOnce sync.Once
+	headerErr  error
+	onceWrite  atomic.Bool
 
 	// packetWriteBuf is the reusable sealed-datagram scratch, guarded by
 	// writeMutex (see borrowPacketWriteBuffer).
@@ -116,13 +117,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 // writeLocked writes with writeMutex already held, so packet framing that
 // borrows the reusable scratch buffer can seal and send under one lock.
 func (c *Conn) writeLocked(b []byte) (n int, err error) {
-	if !c.onceWrite {
+	if !c.onceWrite.Load() {
 		if c.metadata.IsClient {
 			n, err = c.writeRequestHeader(b)
 			if err != nil {
 				return n, err
 			}
-			c.onceWrite = true
+			c.onceWrite.Store(true)
 			return n, nil
 		}
 	}
@@ -153,34 +154,29 @@ func (c *Conn) borrowPacketWriteBuffer(size int) []byte {
 func (c *Conn) ensureRequestHeader() error {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
-	if c.onceWrite || !c.metadata.IsClient {
+	if c.onceWrite.Load() || !c.metadata.IsClient {
 		return nil
 	}
 	if _, err := c.writeRequestHeader(nil); err != nil {
 		return err
 	}
-	c.onceWrite = true
+	c.onceWrite.Store(true)
 	return nil
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	if c.metadata.IsClient && c.metadata.Network == "tcp" && !c.onceWrite {
+	if c.metadata.IsClient && c.metadata.Network == "tcp" && !c.onceWrite.Load() {
 		if err = c.ensureRequestHeader(); err != nil {
 			return 0, err
 		}
 	}
-	if c.headerErr != nil {
-		return 0, c.headerErr
-	}
-	// Clients already wrote the request header on first Write. Only the
-	// server side consumes a request header from the stream. A failed
-	// io.ReadFull cannot be retried: those bytes are already gone.
-	if !c.readHeaderDone && !c.metadata.IsClient {
-		if err = c.ReadReqHeader(); err != nil {
-			c.headerErr = err
-			return 0, err
+	if !c.metadata.IsClient {
+		c.headerOnce.Do(func() {
+			c.headerErr = c.ReadReqHeader()
+		})
+		if c.headerErr != nil {
+			return 0, c.headerErr
 		}
-		c.readHeaderDone = true
 	}
 	return c.Conn.Read(b)
 }

@@ -70,6 +70,47 @@ func TestDefraggerReleaseExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestDefraggerReassemblyKeepsAddressAfterFragmentRelease poisons each
+// fragment's backing array on Release, matching quic-go pool reuse.
+// Reassembly used to return the trigger fragment's Addr after releaseHeld,
+// so the assembled message's address mutated to the poison fill.
+func TestDefraggerReassemblyKeepsAddressAfterFragmentRelease(t *testing.T) {
+	const address = "1.1.1.1:53"
+	newFragment := func(id uint8, payload byte) *protocol.UDPMessage {
+		backing := append([]byte(address), payload)
+		return &protocol.UDPMessage{
+			PacketID:  7,
+			FragID:    id,
+			FragCount: 2,
+			Addr:      backing[:len(address)],
+			Data:      backing[len(address):],
+			Release: func() {
+				for i := range backing {
+					backing[i] = 'x'
+				}
+			},
+		}
+	}
+
+	d := &Defragger{}
+	if got := d.Feed(newFragment(0, 'a')); got != nil {
+		t.Fatal("first fragment unexpectedly completed")
+	}
+	got := d.Feed(newFragment(1, 'b'))
+	if got == nil {
+		t.Fatal("second fragment did not complete reassembly")
+	}
+	if string(got.Addr) != address {
+		t.Fatalf("address changed after fragment release: got %q want %q", got.Addr, address)
+	}
+	if string(got.Data) != "ab" {
+		t.Fatalf("assembled data = %q, want %q", got.Data, "ab")
+	}
+	if got.Release != nil {
+		t.Fatal("assembled message still carries a Release")
+	}
+}
+
 // TestDefraggerReleaseOnSupercede verifies that when a new fragmented message
 // arrives before the previous one is complete, the superseded fragments are
 // released (not leaked).

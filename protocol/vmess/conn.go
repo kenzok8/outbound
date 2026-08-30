@@ -325,9 +325,12 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
 		n, _, err = c.ReadFrom(b)
 		return n, err
-	} else {
-		return c.read(b)
 	}
+	if c.metadata.Network == "udp" {
+		n, _, err = c.ReadFrom(b)
+		return n, err
+	}
+	return c.read(b)
 }
 
 func (c *Conn) read(b []byte) (n int, err error) {
@@ -462,6 +465,13 @@ func (c *Conn) read(b []byte) (n int, err error) {
 	// dump unread data
 	if c.indexToRead < len(c.leftToRead) {
 		n = copy(b, c.leftToRead[c.indexToRead:])
+		if c.metadata.Network == "udp" {
+			// One datagram per ReadFrom: leftover stream-chunk tails are
+			// not a second UDP packet.
+			c.leftToRead = nil
+			c.indexToRead = 0
+			return n, nil
+		}
 		c.indexToRead += n
 		if c.indexToRead >= len(c.leftToRead) {
 			c.leftToRead = nil
@@ -476,8 +486,15 @@ func (c *Conn) read(b []byte) (n int, err error) {
 	}
 	n = copy(b, chunk)
 	if n < len(chunk) {
-		c.leftToRead = chunk
-		c.indexToRead = n
+		if c.metadata.Network == "udp" {
+			// One datagram per ReadFrom: drop the remainder of this chunk
+			// instead of exposing it as a later packet.
+			c.leftToRead = nil
+			c.indexToRead = 0
+		} else {
+			c.leftToRead = chunk
+			c.indexToRead = n
+		}
 	}
 	return n, nil
 }

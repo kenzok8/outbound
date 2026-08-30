@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
@@ -465,11 +466,11 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 				}
 				// logrus.Debugln(pkt, "write", l, "len", remainPayloadLen, "remain", remainPayloadLen-l)
 				if remainPayloadLen > l { // this packet is all payload
-					_, err = s.conn.Write(b[:l])
+					wn, err := iout.WriteFull(s.conn, b[:l])
+					n += wn
 					if err != nil {
-						return 0, err
+						return n, err
 					}
-					n += l
 					b = b[l:]
 				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
 					paddingLen := l - remainPayloadLen - headerOverHeadSize
@@ -480,15 +481,22 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 						combined := pool.Get(len(b) + headerOverHeadSize + paddingLen)
 						copy(combined, b)
 						fillWasteFrame(combined[len(b):], paddingLen)
-						_, err = s.conn.Write(combined)
+						wn, err := iout.WriteFull(s.conn, combined)
 						pool.Put(combined)
+						if wn > remainPayloadLen {
+							wn = remainPayloadLen
+						}
+						n += wn
+						if err != nil {
+							return n, err
+						}
 					} else {
-						_, err = s.conn.Write(b)
+						wn, err := iout.WriteFull(s.conn, b)
+						n += wn
+						if err != nil {
+							return n, err
+						}
 					}
-					if err != nil {
-						return 0, err
-					}
-					n += remainPayloadLen
 					b = nil
 				} else { // this packet is all padding
 					if l > maxFramePayloadSize {
@@ -496,10 +504,10 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 					}
 					padding := pool.Get(headerOverHeadSize + l)
 					fillWasteFrame(padding, l)
-					_, err = s.conn.Write(padding)
+					_, err = iout.WriteFull(s.conn, padding)
 					pool.Put(padding)
 					if err != nil {
-						return 0, err
+						return n, err
 					}
 					b = nil
 				}
@@ -507,16 +515,15 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 			// maybe still remain payload to write
 			if len(b) == 0 {
 				return
-			} else {
-				n2, err := s.conn.Write(b)
-				return n + n2, err
 			}
+			n2, err := iout.WriteFull(s.conn, b)
+			return n + n2, err
 		} else {
 			s.sendPadding = false
 		}
 	}
 
-	return s.conn.Write(b)
+	return iout.WriteFull(s.conn, b)
 }
 
 func fillWasteFrame(frame []byte, payloadLen int) {

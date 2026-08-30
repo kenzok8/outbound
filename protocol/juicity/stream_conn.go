@@ -20,7 +20,7 @@ type Conn struct {
 	writeMutex     sync.Mutex
 	onceWrite      bool
 	packetWriteBuf []byte
-	readHeaderDone bool
+	headerOnce     sync.Once
 	headerErr      error
 
 	closeDeferFn  func()
@@ -97,18 +97,13 @@ func (c *Conn) writeLocked(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
-	if c.headerErr != nil {
-		return 0, c.headerErr
-	}
-	// Clients already wrote the request header on first Write. Only the
-	// server side consumes a request header from the stream. A failed
-	// io.ReadFull cannot be retried: those bytes are already gone.
-	if !c.readHeaderDone && c.Metadata != nil && !c.Metadata.IsClient {
-		if err = c.readReqHeader(); err != nil {
-			c.headerErr = err
-			return 0, err
+	if c.Metadata != nil && !c.Metadata.IsClient {
+		c.headerOnce.Do(func() {
+			c.headerErr = c.readReqHeader()
+		})
+		if c.headerErr != nil {
+			return 0, c.headerErr
 		}
-		c.readHeaderDone = true
 	}
 	return c.Stream.Read(b)
 }

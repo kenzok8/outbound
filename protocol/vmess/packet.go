@@ -33,8 +33,12 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 	if n < addrLen {
 		return 0, netip.AddrPort{}, fmt.Errorf("not enough data to read for PacketAddr")
 	}
-	copy(p, buf[addrLen:n])
-	return n - addrLen, address, err
+	payload := n - addrLen
+	copied := copy(p, buf[addrLen:n])
+	if copied < payload {
+		return copied, address, fmt.Errorf("buf size is not enough")
+	}
+	return copied, address, err
 }
 
 func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {

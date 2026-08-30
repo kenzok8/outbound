@@ -169,6 +169,12 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		}
 		length := int(binary.BigEndian.Uint16(bLen[:]))
 		if len(b) < length {
+			if _, discardErr := io.CopyN(io.Discard, &netproxy.ReadWrapper{ReadFunc: c.read}, int64(length)); discardErr != nil && err == nil {
+				err = discardErr
+			}
+			if err != nil {
+				return 0, err
+			}
 			return 0, fmt.Errorf("buf size is not enough")
 		}
 		// Read exactly one framed datagram: a plain c.read(b) here could

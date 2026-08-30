@@ -46,6 +46,7 @@ func (n *Node[T]) Capability() int64 {
 // close-registration differ per protocol.
 type Ring[T any] struct {
 	mu         sync.Mutex
+	closed     bool
 	ring       *list.List
 	current    *list.Element
 	newClient  func(capabilityCallback func(n int64)) T
@@ -79,6 +80,9 @@ func New[T any](
 func (r *Ring[T]) TryNext(f func(node *Node[T]) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return outbounderrors.ErrClientClosed
+	}
 	newCurrent := r.current
 	err := r.tryNext(&newCurrent, f)
 	r.current = newCurrent
@@ -116,6 +120,9 @@ func (r *Ring[T]) tryNext(current **list.Element, f func(*Node[T]) error) (err e
 	return r.tryNext(current, f)
 
 getNew:
+	if r.closed {
+		return outbounderrors.ErrClientClosed
+	}
 	newNode := &Node[T]{
 		Client: *new(T),
 	}
@@ -165,6 +172,7 @@ func (r *Ring[T]) Len() int {
 // Close tears down every client in the ring.
 func (r *Ring[T]) Close() error {
 	r.mu.Lock()
+	r.closed = true
 	clients := make([]T, 0, r.ring.Len())
 	for elem := r.ring.Front(); elem != nil; {
 		next := elem.Next()

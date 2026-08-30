@@ -448,11 +448,19 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		// HTTP/2 connections are managed by the connection pool, don't close them.
-		// HTTP/1.1 connections should be closed to prevent resource leaks.
-		if !c.isH2 && c.conn != nil {
-			err = c.conn.Close()
+		if c.cancelShakeFinished != nil {
+			c.cancelShakeFinished()
 		}
+		if c.conn == nil {
+			return
+		}
+		if c.isH2 {
+			// Close the logical stream (request pipe + response body).
+			// The pooled physical HTTP/2 connection stays in the pool.
+			err = c.conn.Close()
+			return
+		}
+		err = c.conn.Close()
 	})
 	return err
 }
@@ -737,6 +745,7 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 		p.mu.Unlock()
 		return rawConn, h2clientConn, nil
 	default:
+		_ = rawConn.Close()
 		return nil, nil, fmt.Errorf("negotiated unsupported application layer protocol: %v", nextProto)
 	}
 }

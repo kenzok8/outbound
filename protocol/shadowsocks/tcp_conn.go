@@ -9,11 +9,13 @@ import (
 	"hash/fnv"
 	"io"
 	"math"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -48,6 +50,7 @@ type TCPConn struct {
 	cipherWrite cipher.AEAD
 	onceRead    bool
 	onceWrite   bool
+	writeBroken bool
 	nonceRead   []byte
 	nonceWrite  []byte
 
@@ -294,11 +297,14 @@ func (c *TCPConn) initWriteFromPool(b []byte) (buf []byte, offset int, toWrite [
 func (c *TCPConn) Write(b []byte) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
 	var buf []byte
 	var toPack []byte
 	var offset int
-	if !c.onceWrite {
-		c.onceWrite = true
+	firstWrite := !c.onceWrite
+	if firstWrite {
 		buf, offset, toPack, err = c.initWriteFromPool(b)
 		if err != nil {
 			return 0, err
@@ -314,10 +320,13 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	if c.cipherWrite == nil {
 		return 0, fmt.Errorf("%v: %w", ErrFailInitCipher, err)
 	}
-	c.seal(buf[offset:], toPack)
-	_, err = c.Conn.Write(buf)
-	if err != nil {
+	sealed := c.seal(buf[offset:], toPack)
+	if _, err = iout.WriteFull(c.Conn, buf[:offset+len(sealed)]); err != nil {
+		c.writeBroken = true
 		return 0, err
+	}
+	if firstWrite {
+		c.onceWrite = true
 	}
 	return len(b), nil
 }

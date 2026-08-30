@@ -3,6 +3,7 @@ package juicity
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/daeuniverse/outbound/protocol"
@@ -92,5 +93,69 @@ func TestHeaderErrorIsStickyAfterPartialConsume(t *testing.T) {
 	_, err2 := c.Read(make([]byte, 8))
 	if err2 != err {
 		t.Fatalf("second Read = %v, want sticky %v", err2, err)
+	}
+}
+
+// serialBufferStream serializes underlay Read the way TCP/QUIC streams do.
+// The race under test is in Conn header state, not the byte source.
+type serialBufferStream struct {
+	bufferStream
+	mu sync.Mutex
+}
+
+func (s *serialBufferStream) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bufferStream.Read(p)
+}
+
+func TestServerRoleConcurrentReadParsesHeaderOnce(t *testing.T) {
+	clientStream := &bufferStream{buf: &bytes.Buffer{}}
+	client := NewConn(clientStream, &trojanc.Metadata{
+		Metadata: protocol.Metadata{
+			Type:     protocol.MetadataTypeIPv4,
+			Hostname: "203.0.113.10",
+			Port:     443,
+			IsClient: true,
+		},
+		Network: "tcp",
+	}, nil, nil)
+	payload := []byte("hello-from-client-0123456789abcd")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatalf("client Write: %v", err)
+	}
+
+	serverStream := &serialBufferStream{bufferStream: bufferStream{buf: bytes.NewBuffer(clientStream.buf.Bytes())}}
+	server := NewConn(serverStream, &trojanc.Metadata{
+		Metadata: protocol.Metadata{IsClient: false},
+	}, nil, nil)
+
+	var wg sync.WaitGroup
+	got := make([][]byte, 2)
+	errs := make([]error, 2)
+	ns := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			buf := make([]byte, len(payload))
+			n, err := server.Read(buf)
+			got[i], ns[i], errs[i] = buf, n, err
+		}(i)
+	}
+	wg.Wait()
+
+	delivered := 0
+	for i := 0; i < 2; i++ {
+		if errs[i] != nil && errs[i] != io.EOF {
+			t.Fatalf("server Read[%d]: %v", i, errs[i])
+		}
+		delivered += ns[i]
+	}
+	if delivered != len(payload) {
+		t.Fatalf("delivered %d bytes, want %d (header was consumed twice)", delivered, len(payload))
+	}
+	if server.Metadata.Hostname != "203.0.113.10" {
+		t.Fatalf("parsed hostname = %q", server.Metadata.Hostname)
 	}
 }

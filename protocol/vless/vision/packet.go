@@ -105,6 +105,9 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 		length := binary.BigEndian.Uint16(lengthBytes[:])
 
 		if length > uint16(len(p)) {
+			if _, discardErr := io.CopyN(io.Discard, c.Conn, int64(length)); discardErr != nil {
+				return 0, netip.AddrPort{}, discardErr
+			}
 			return 0, netip.AddrPort{}, fmt.Errorf("buffer too small")
 		}
 

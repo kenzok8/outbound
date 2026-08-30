@@ -311,6 +311,66 @@ func TestUDPConnReassembledPacketPreservesDefaultAddressAndRelease(t *testing.T)
 	}
 }
 
+func TestUDPConnReassembledPacketKeepsAddressAfterFragmentRelease(t *testing.T) {
+	m := &udpSessionManager{
+		io:     noopUDPTestIO{},
+		m:      make(map[uint32]*udpConn),
+		nextID: 1,
+		done:   make(chan struct{}),
+	}
+	const target = "192.0.2.10:5353"
+	connRaw, err := m.NewUDP(target)
+	if err != nil {
+		t.Fatalf("NewUDP() error = %v", err)
+	}
+	u := connRaw.(*udpConn)
+	defer m.close(u)
+
+	type received struct {
+		data []byte
+		from netip.AddrPort
+	}
+	receivedCh := make(chan received, 1)
+	if _, ok := u.RegisterPacketReceiver(func(packet *netproxy.ReceivedPacket) bool {
+		receivedCh <- received{data: append([]byte(nil), packet.Data...), from: packet.From}
+		packet.Release()
+		return true
+	}); !ok {
+		t.Fatal("RegisterPacketReceiver() = false")
+	}
+
+	newFragment := func(id uint8, payload []byte) *protocol.UDPMessage {
+		backing := append([]byte(target), payload...)
+		return &protocol.UDPMessage{
+			SessionID: u.ID,
+			PacketID:  7,
+			FragID:    id,
+			FragCount: 2,
+			Addr:      backing[:len(target)],
+			Data:      backing[len(target):],
+			Release: func() {
+				for i := range backing {
+					backing[i] = 'x'
+				}
+			},
+		}
+	}
+	if !u.deliverMessage(newFragment(0, []byte("hello "))) {
+		t.Fatal("deliverMessage(fragment 0) = false")
+	}
+	if !u.deliverMessage(newFragment(1, []byte("world"))) {
+		t.Fatal("deliverMessage(fragment 1) = false")
+	}
+
+	got := <-receivedCh
+	if string(got.data) != "hello world" {
+		t.Fatalf("reassembled data = %q, want %q", got.data, "hello world")
+	}
+	if want := netip.MustParseAddrPort(target); got.from != want {
+		t.Fatalf("reassembled address = %v, want %v", got.from, want)
+	}
+}
+
 func TestUDPConnReadFromReportsPerDatagramMessageAddress(t *testing.T) {
 	targetAddr := netip.MustParseAddrPort("192.0.2.10:5353")
 	messageAddrs := []netip.AddrPort{
@@ -684,6 +744,30 @@ func TestUDPConnWriteToFragmentsWhenLocalSendBufferIsTooSmall(t *testing.T) {
 	}
 	if !bytes.Equal(reassembled, payload) {
 		t.Fatalf("reassembled payload mismatch: got %d bytes want %d", len(reassembled), len(payload))
+	}
+}
+
+func TestUDPConnWriteToRejectsUnfragmentableDatagram(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	addr := "203.0.113.10:40000"
+	u := &udpConn{
+		ID:        7,
+		ReceiveCh: make(chan *protocol.UDPMessage, 1),
+		SendBuf:   make([]byte, 8),
+		SendFunc: func(_ []byte, _ *protocol.UDPMessage) error {
+			t.Fatal("SendFunc should not be called when fragmentation is impossible")
+			return nil
+		},
+		CloseFunc: func() {},
+		target:    addr,
+	}
+
+	n, err := u.WriteTo(payload, addr)
+	if err == nil {
+		t.Fatal("expected WriteTo to fail when the send buffer cannot hold a fragment header")
+	}
+	if n != 0 {
+		t.Fatalf("n = %d, want 0", n)
 	}
 }
 

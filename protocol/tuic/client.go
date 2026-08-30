@@ -211,6 +211,13 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 		message, err := quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
 			if outbounderrors.IsTemporaryError(err) {
+				// Some temporary errors (notably stateless reset) are
+				// delivered after the datagram queue is already closed, so
+				// Receive returns immediately from then on. Exit via the
+				// connection context instead of spinning in a tight loop.
+				if ctxErr := quicConn.Context().Err(); ctxErr != nil {
+					return ctxErr
+				}
 				continue
 			}
 			return err
@@ -262,6 +269,13 @@ func (t *clientImpl) processDatagram(quicConn quic.Connection, message []byte) {
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {
 	var streamErr *quic.StreamError
 	if errors.As(err, &streamErr) {
+		return
+	}
+	// A closed QUIC connection can surface as a temporary net.Error
+	// (stateless reset) or context.Canceled. Those must still retire the
+	// shared tunnel; otherwise getQuicConn keeps handing out the dead conn.
+	if quicConn != nil && quicConn.Context().Err() != nil {
+		t.forceClose(quicConn, err)
 		return
 	}
 	// Only close connection on non-temporary errors. Stream exhaustion is a

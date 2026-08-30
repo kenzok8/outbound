@@ -3,7 +3,18 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"io"
+	"math/big"
+	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,6 +297,91 @@ func TestConnBufferedPrefixFallbackKeepsPayload(t *testing.T) {
 	}
 }
 
+func TestCloseUnblocksHandshakeRead(t *testing.T) {
+	conn := NewConn(context.Background(), &recordingDialer{conn: &recordingConn{}}, &HttpProxy{Addr: "proxy.example:8080"}, "example.com:443", "tcp")
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.Read(make([]byte, 8))
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != io.EOF {
+			t.Fatalf("Read after Close: %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read remained blocked after Close")
+	}
+}
+
+func TestHTTP2LogicalCloseDoesNotClosePooledPhysicalConn(t *testing.T) {
+	physical := &closeCountConn{}
+	pr, pw := io.Pipe()
+	logical := newHTTP2Conn(physical, pw, pr)
+	c := NewConn(context.Background(), &recordingDialer{conn: physical}, &HttpProxy{Addr: "proxy.example:443", https: true}, "example.com:443", "tcp")
+	c.conn = logical
+	c.isH2 = true
+	c.cancelShakeFinished()
+
+	if err := c.Close(); err != nil && err != io.ErrClosedPipe {
+		t.Fatalf("logical Close: %v", err)
+	}
+	if physical.closes.Load() != 0 {
+		t.Fatalf("physical conn closed %d times, want 0", physical.closes.Load())
+	}
+}
+
+func TestHTTP2LogicalCloseClosesRequestPipeAndResponseBody(t *testing.T) {
+	physical := &closeCountConn{}
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pr.Close() })
+	body := &closeCountReadCloser{Reader: bytes.NewReader(nil)}
+	logical := newHTTP2Conn(physical, pw, body)
+	c := NewConn(context.Background(), &recordingDialer{conn: physical}, &HttpProxy{Addr: "proxy.example:443", https: true}, "example.com:443", "tcp")
+	c.conn = logical
+	c.isH2 = true
+	c.cancelShakeFinished()
+
+	if err := c.Close(); err != nil && err != io.ErrClosedPipe {
+		t.Fatalf("logical Close: %v", err)
+	}
+	if _, err := pw.Write([]byte("x")); err == nil {
+		t.Fatal("request pipe still writable after logical Close")
+	}
+	if body.closes.Load() != 1 {
+		t.Fatalf("resp.Body closed %d times, want 1", body.closes.Load())
+	}
+	if physical.closes.Load() != 0 {
+		t.Fatalf("physical conn closed %d times, want 0", physical.closes.Load())
+	}
+}
+
+type closeCountReadCloser struct {
+	io.Reader
+	closes atomic.Int32
+}
+
+func (c *closeCountReadCloser) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+type closeCountConn struct {
+	recordingConn
+	closes atomic.Int32
+}
+
+func (c *closeCountConn) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+func (c *closeCountConn) LocalAddr() net.Addr  { return nil }
+func (c *closeCountConn) RemoteAddr() net.Addr { return nil }
+
 type recordingDialer struct {
 	conn  netproxy.Conn
 	calls int
@@ -317,4 +413,109 @@ func (c *recordingConnWithRead) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	return c.read.Read(p)
+}
+
+func TestH2PoolClosesRawConnOnUnsupportedALPN(t *testing.T) {
+	cert := mustSelfSignedCert(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"foo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c
+		_ = c.(*tls.Conn).Handshake()
+	}()
+
+	raw, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"foo"},
+		ServerName:         "example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := &recordingDialer{conn: raw}
+	pool := newH2ConnsPool()
+	_, _, err = pool.GetConn(context.Background(), dialer, "proxy.example:443", "tcp")
+	if err == nil {
+		t.Fatal("expected unsupported ALPN error")
+	}
+	if !strings.Contains(err.Error(), "unsupported application layer protocol") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, writeErr := raw.Write([]byte{1}); writeErr == nil {
+		t.Fatal("client rawConn still writable after unsupported ALPN")
+	}
+
+	select {
+	case serverConn := <-accepted:
+		done := make(chan error, 1)
+		go func() {
+			_, readErr := serverConn.Read(make([]byte, 1))
+			done <- readErr
+		}()
+		select {
+		case readErr := <-done:
+			if readErr == nil {
+				t.Fatal("server still readable after unsupported ALPN; client rawConn was not closed")
+			}
+			var ne net.Error
+			if errors.As(readErr, &ne) && ne.Timeout() {
+				t.Fatal("server Read timed out; client rawConn was not closed")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("server Read remained blocked; client rawConn was not closed")
+		}
+		_ = serverConn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept")
+	}
+}
+
+func mustSelfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		DNSNames:              []string{"example.com"},
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: mustMarshalEC(t, key),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func mustMarshalEC(t *testing.T, key *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	b, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

@@ -76,11 +76,11 @@ func writeFrameWithDeadline(session *session, frame frame, deadline time.Time) (
 	}
 	buffer := session.borrowWriteBuf(size)
 	encodeFrame(buffer, frame)
-	_, err = session.writeConnLockedWithDeadline(buffer, deadline)
-	session.connLock.Unlock()
-	if err != nil {
+	if _, err = session.writeConnLockedWithDeadline(buffer, deadline); err != nil {
+		session.connLock.Unlock()
 		return 0, err
 	}
+	session.connLock.Unlock()
 	return len(frame.data), nil
 }
 
@@ -106,11 +106,11 @@ func writeFrames(session *session, frames ...frame) (int, error) {
 	for _, frame := range frames {
 		offset += encodeFrame(buffer[offset:], frame)
 	}
-	_, err := session.writeConnLocked(buffer)
-	session.connLock.Unlock()
-	if err != nil {
+	if _, err := session.writeConnLocked(buffer); err != nil {
+		session.connLock.Unlock()
 		return 0, err
 	}
+	session.connLock.Unlock()
 	return totalData, nil
 }
 
