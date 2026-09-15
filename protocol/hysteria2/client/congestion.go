@@ -16,12 +16,12 @@ const (
 // when a link carries no explicit cc_override. This package keeps its own
 // allowlist copy, so the default is mirrored here as well.
 //
-// The hy2 default is bbr, not bbr3: the experimental bbr3 estimator does not
-// grow its bandwidth estimate on low-RTT (LAN/local) paths, which pins pacing
-// near the initial window and caps throughput at a few hundred Mbps even on a
-// healthy path (measured: bbr3 0.31 Gbps vs bbr 4.0 Gbps on a loopback veth
-// lab after the GSO transport fix). bbr3 stays selectable via cc_override=bbr3.
-const defaultCongestionController = ccBBR
+// The default is bbr3 again now that its low-RTT pacing-cwnd deadlock is
+// fixed (see the bbr3 sender): on a loopback/veth lab bbr3 measured
+// 3.80-3.97 Gbps p1 and 3.97 Gbps p4 against bbr's 3.74 and brutal's 3.62,
+// and on the shaped-path regime bbr3 already measured better than bbr (see
+// protocol/tuic/common/congestion.go). cc_override=bbr remains available.
+const defaultCongestionController = ccBbr3
 
 // ValidateCongestionOverride reports whether override can be installed by this
 // client before any connection is attempted. An empty value is always valid and

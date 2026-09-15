@@ -35,7 +35,7 @@ func TestResolveCongestion(t *testing.T) {
 			rxAuto:   true,
 			serverRx: mbps5,
 			clientTx: mbps10,
-			wantName: ccBBR,
+			wantName: ccBbr3,
 			wantTx:   mbps10,
 		},
 		{
@@ -65,7 +65,7 @@ func TestResolveCongestion(t *testing.T) {
 			// ~0.3 Gbps cap on a loopback veth lab while bbr reached 4 Gbps
 			// over the same path). bbr3 stays reachable via cc_override.
 			name:     "empty override without any bandwidth probes purely",
-			wantName: ccBBR,
+			wantName: ccBbr3,
 			wantTx:   0,
 		},
 		{
@@ -74,7 +74,7 @@ func TestResolveCongestion(t *testing.T) {
 			name:     "empty override ignores server limit when clientTx is unset",
 			serverRx: mbps5,
 			clientTx: 0,
-			wantName: ccBBR,
+			wantName: ccBbr3,
 			wantTx:   0,
 		},
 		{
