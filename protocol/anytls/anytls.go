@@ -31,6 +31,13 @@ const (
 	// and forcing a heap allocation per write — a ~67x slowdown near 64KB.
 	// The receiver reads by the wire Length field, so the sender's chunking
 	// choice does not affect protocol compatibility.
+	//
+	// Downstream contract: consumers (e.g. dae's TCP relay, buffer 32 KiB)
+	// hand whole read buffers to stream.Write. Keep relayCopyBufferSize an
+	// integer multiple of this value or a 32 KiB read splits into a full
+	// frame plus a one-byte tail frame (measured as a large regression on
+	// other implementations). TestRelayBufferAlignment locks this property
+	// for the common buffer sizes.
 	maxFramePayloadSize = 32768
 	maxUDPPayloadSize   = math.MaxUint16
 )
