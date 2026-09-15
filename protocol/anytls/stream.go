@@ -432,6 +432,68 @@ func (ps *packetStream) WriteTo(p []byte, addr string) (n int, err error) {
 	return len(p), nil
 }
 
+// WriteBatch implements netproxy.PacketBatchWriter: several datagrams for
+// the same target leave in one framed write burst (one TLS record batch,
+// one socket write). Callers aggregate by endpoint, so every item shares
+// ps.addr; the first item carries the address header when this stream has
+// not announced it yet. Pre-send validation is all-or-nothing per the
+// interface contract (n == 0 on validation failure).
+func (ps *packetStream) WriteBatch(items []netproxy.BatchItem) (n int, err error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	for _, item := range items {
+		if len(item.Data) > maxUDPPayloadSize {
+			return 0, fmt.Errorf("anytls udp payload too large: %d > %d", len(item.Data), maxUDPPayloadSize)
+		}
+	}
+	if ps.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	ps.writeMutex.Lock()
+	defer ps.writeMutex.Unlock()
+	if ps.closed.Load() {
+		return 0, net.ErrClosed
+	}
+
+	first := true
+	datas := make([][]byte, 0, len(items))
+	for _, item := range items {
+		addr := ps.addr
+		if item.Addr != "" {
+			addr = item.Addr
+		}
+		var data []byte
+		if first && ps.udpWriteAddr.CompareAndSwap(false, true) {
+			tgtAddr, err := socks.ParseAddr(addr)
+			if err != nil {
+				return 0, err
+			}
+			data = pool.Get(1 + len(tgtAddr) + 2 + len(item.Data))
+			// connected mode
+			data[0] = 1
+			copy(data[1:], tgtAddr)
+			binary.BigEndian.PutUint16(data[1+len(tgtAddr):], uint16(len(item.Data)))
+			copy(data[1+len(tgtAddr)+2:], item.Data)
+			first = false
+		} else {
+			data = pool.Get(2 + len(item.Data))
+			binary.BigEndian.PutUint16(data, uint16(len(item.Data)))
+			copy(data[2:], item.Data)
+		}
+		datas = append(datas, data)
+	}
+	defer func() {
+		for _, data := range datas {
+			pool.Put(data)
+		}
+	}()
+	if _, err := writeDataFramesBatch(ps.session, ps.id, datas, unixNanoToTime(ps.writeDeadline.Load())); err != nil {
+		return 0, err
+	}
+	return len(items), nil
+}
+
 func timeToUnixNano(t time.Time) int64 {
 	if t.IsZero() {
 		return 0

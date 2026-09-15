@@ -137,6 +137,55 @@ func encodeFrame(dst []byte, frame frame) int {
 	return headerOverHeadSize + dataLen
 }
 
+// writeDataFramesBatch encodes several datagram payloads as consecutive PSH
+// frames for one stream and pushes them with a single TLS write burst (one
+// socket write after the coalescer drains). It exists for the
+// netproxy.PacketBatchWriter path so N datagrams cost one syscall instead
+// of N. Sizes must be pre-validated; deadline semantics match
+// writeConnLockedWithDeadline.
+func writeDataFramesBatch(session *session, sid uint32, datas [][]byte, deadline time.Time) (int, error) {
+	frames := make([]frame, 0, len(datas))
+	totalSize := 0
+	totalData := 0
+	for _, data := range datas {
+		for written := 0; written < len(data); {
+			end := written + maxFramePayloadSize
+			if end > len(data) {
+				end = len(data)
+			}
+			frame := newFrame(cmdPSH, sid)
+			frame.data = data[written:end]
+			size, err := encodedFrameSize(frame)
+			if err != nil {
+				return 0, err
+			}
+			frames = append(frames, frame)
+			totalSize += size
+			totalData += len(frame.data)
+			written = end
+		}
+	}
+	if len(frames) == 0 {
+		return 0, nil
+	}
+	session.connLock.Lock()
+	if session.closed.Load() {
+		session.connLock.Unlock()
+		return 0, net.ErrClosed
+	}
+	buffer := session.borrowWriteBuf(totalSize)
+	offset := 0
+	for _, frame := range frames {
+		offset += encodeFrame(buffer[offset:], frame)
+	}
+	if _, err := session.writeConnLockedWithDeadline(buffer, deadline); err != nil {
+		session.connLock.Unlock()
+		return 0, err
+	}
+	session.connLock.Unlock()
+	return totalData, nil
+}
+
 func writeDataFrames(session *session, sid uint32, data []byte, deadline time.Time) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
