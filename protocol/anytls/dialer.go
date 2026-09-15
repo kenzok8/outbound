@@ -187,8 +187,17 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 		return nil, fmt.Errorf("anytls requires net.Conn, got %T", rawConn)
 	}
 
-	tlsConn := tls.Client(conn, d.tlsConfig)
+	// Coalesce TLS records: crypto/tls issues one socket write per record;
+	// the coalescer batches the records of one write burst into one write.
+	coConn := newCoalesceConn(conn)
+	tlsConn := tls.Client(coConn, d.tlsConfig)
 	if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
+		_ = tlsConn.Close()
+		return nil, err
+	}
+	// The TLS handshake writes through the coalescer; drain it so the
+	// handshake bytes actually leave before the authentication packet.
+	if err := coConn.Flush(); err != nil {
 		_ = tlsConn.Close()
 		return nil, err
 	}
@@ -216,6 +225,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	bufferedConn := bufferred_conn.NewBufferedConnSize(tlsConn, sessionReadBufferSize)
 	seq := d.sessionCounter.Add(1)
 	s := newSessionWithPadding(bufferedConn, seq, &d.padding)
+	s.flusher = coConn
 	d.idleSessionLock.Lock()
 	if d.closed {
 		d.idleSessionLock.Unlock()

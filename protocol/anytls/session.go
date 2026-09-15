@@ -57,7 +57,13 @@ type session struct {
 	// stay within maxFramePayloadSize, so this avoids pool.Get/Put per write
 	// without overflowing the pool cliff.
 	writeBuf []byte
+
+	// flusher drains the TLS record coalescing layer after each framed write
+	// burst. Nil when the transport writes through directly (tests, non-TLS).
+	flusher flusher
 }
+
+type flusher interface{ Flush() error }
 
 func newSession(conn net.Conn, seq uint64) *session {
 	padding := &atomic.Pointer[paddingFactory]{}
@@ -425,7 +431,19 @@ func (s *session) writeConnLockedWithDeadline(b []byte, deadline time.Time) (n i
 		}
 		defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
 	}
-	return s.writeConnLocked(b)
+	n, err = s.writeConnLocked(b)
+	if err != nil {
+		return n, err
+	}
+	// Drain the TLS record coalescer so the burst leaves in one socket write.
+	// Without this the caller believes the data is out while records sit in
+	// the coalescing buffer.
+	if s.flusher != nil {
+		if ferr := s.flusher.Flush(); ferr != nil {
+			return n, ferr
+		}
+	}
+	return n, nil
 }
 
 func (s *session) writeConnLocked(b []byte) (n int, err error) {

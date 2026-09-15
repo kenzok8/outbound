@@ -110,6 +110,12 @@ func writeFrames(session *session, frames ...frame) (int, error) {
 		session.connLock.Unlock()
 		return 0, err
 	}
+	if session.flusher != nil {
+		if ferr := session.flusher.Flush(); ferr != nil {
+			session.connLock.Unlock()
+			return 0, ferr
+		}
+	}
 	session.connLock.Unlock()
 	return totalData, nil
 }
