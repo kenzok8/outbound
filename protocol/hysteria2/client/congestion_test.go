@@ -28,11 +28,14 @@ func TestResolveCongestion(t *testing.T) {
 			// The server asked for detection, so a fixed rate would ignore the
 			// request; serverRx is not meaningful here and a declared clientTx
 			// only caps the prober.
+			// The probing default is bbr (see congestion.go): bbr3's estimator
+			// stalls on low-RTT paths. The clientTx cap is carried through
+			// but ignored by UseBBR, which probes with its own estimator.
 			name:     "empty override with RxAuto probes and caps at clientTx",
 			rxAuto:   true,
 			serverRx: mbps5,
 			clientTx: mbps10,
-			wantName: ccBbr3,
+			wantName: ccBBR,
 			wantTx:   mbps10,
 		},
 		{
@@ -57,8 +60,12 @@ func TestResolveCongestion(t *testing.T) {
 			wantTx:   mbps10,
 		},
 		{
+			// The probing default is bbr: the experimental bbr3 estimator does
+			// not grow its bandwidth estimate on low-RTT paths (measured:
+			// ~0.3 Gbps cap on a loopback veth lab while bbr reached 4 Gbps
+			// over the same path). bbr3 stays reachable via cc_override.
 			name:     "empty override without any bandwidth probes purely",
-			wantName: ccBbr3,
+			wantName: ccBBR,
 			wantTx:   0,
 		},
 		{
@@ -67,7 +74,7 @@ func TestResolveCongestion(t *testing.T) {
 			name:     "empty override ignores server limit when clientTx is unset",
 			serverRx: mbps5,
 			clientTx: 0,
-			wantName: ccBbr3,
+			wantName: ccBBR,
 			wantTx:   0,
 		},
 		{

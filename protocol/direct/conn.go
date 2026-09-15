@@ -71,11 +71,18 @@ func (c *directPacketConn) WriteTo(b []byte, addr string) (int, error) {
 }
 
 func (c *directPacketConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error) {
+	// Always forward to the real WriteMsgUDP. The previous symmetric-mode
+	// shortcut (plain Write on the connected socket) silently dropped the
+	// OOB control messages, which discards UDP_SEGMENT for QUIC GSO batches:
+	// a batch of N segments then leaves as one oversized datagram that QUIC
+	// receivers discard (>3x max_udp_payload, RFC 9000 s14.4.1), blackholing
+	// a large fraction of packets. In symmetric mode the socket is
+	// pre-connected to the single peer, and Go's net package rejects an
+	// explicit destination on a pre-connected UDP socket, so pass nil (the
+	// connected destination) there.
 	if !c.FullCone {
-		n, err = c.Write(b)
-		return n, 0, err
+		return c.UDPConn.WriteMsgUDP(b, oob, nil)
 	}
-
 	return c.UDPConn.WriteMsgUDP(b, oob, addr)
 }
 

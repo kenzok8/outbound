@@ -15,7 +15,13 @@ const (
 // protocol/tuic/common.DefaultCongestionController: the controller installed
 // when a link carries no explicit cc_override. This package keeps its own
 // allowlist copy, so the default is mirrored here as well.
-const defaultCongestionController = ccBbr3
+//
+// The hy2 default is bbr, not bbr3: the experimental bbr3 estimator does not
+// grow its bandwidth estimate on low-RTT (LAN/local) paths, which pins pacing
+// near the initial window and caps throughput at a few hundred Mbps even on a
+// healthy path (measured: bbr3 0.31 Gbps vs bbr 4.0 Gbps on a loopback veth
+// lab after the GSO transport fix). bbr3 stays selectable via cc_override=bbr3.
+const defaultCongestionController = ccBBR
 
 // ValidateCongestionOverride reports whether override can be installed by this
 // client before any connection is attempted. An empty value is always valid and
