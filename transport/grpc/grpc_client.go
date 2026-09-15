@@ -105,7 +105,6 @@ type ClientConn struct {
 	closer    context.CancelFunc
 	muReading sync.Mutex // muReading protects reading
 	muWriting sync.Mutex // muWriting protects writing
-	muSend    sync.Mutex // muSend serializes stream sends
 	buf       []byte
 	offset    int
 
@@ -115,6 +114,14 @@ type ClientConn struct {
 	recvCh   chan RecvResp
 	pumpOnce sync.Once
 	recvErr  error
+
+	// sendCh feeds a single lazily-started sender goroutine that owns every
+	// tun.Send, replacing the per-Write goroutine + result channel (one
+	// goroutine, one channel and one proto.Hunk allocated per chunk).
+	// muWriting serializes writers to at most one request in flight, which
+	// is what makes the pooled request below safe to recycle.
+	sendCh     chan *sendRequest
+	senderOnce sync.Once
 
 	deadlineMu    sync.Mutex
 	readDeadline  *time.Timer
@@ -164,6 +171,45 @@ func (c *ClientConn) ensureRecvPump() {
 	})
 }
 
+// sendRequest carries one Write's payload through the sender goroutine.
+// Requests are pooled; each one owns a buffered(1) done channel so the
+// sender never blocks delivering the result of a Send whose writer already
+// returned at a write deadline (deadline expiry is terminal; see Write).
+type sendRequest struct {
+	hunk proto.Hunk
+	done chan error
+}
+
+var sendReqPool = sync.Pool{
+	New: func() any { return &sendRequest{done: make(chan error, 1)} },
+}
+
+// ensureSender starts the single sender goroutine. It exits once the conn
+// context is done (Close); a Send wedged inside the sender is unwedged by
+// c.closer cancelling the stream context, the same mechanism the write
+// deadline path relies on.
+func (c *ClientConn) ensureSender() {
+	c.senderOnce.Do(func() {
+		go func() {
+			for {
+				select {
+				case req := <-c.sendCh:
+					// grpc-go v1.57 marshals the message synchronously
+					// inside SendMsg (prepareMsg -> codec.Marshal, before
+					// the transport write) and never retains it afterwards,
+					// so the pooled hunk can be recycled as soon as Send
+					// returns. done is buffered: this cannot block on a
+					// writer that already abandoned the request.
+					req.done <- c.tun.Send(&req.hunk)
+					sendReqPool.Put(req)
+				case <-c.ctx.Done():
+					return
+				}
+			}
+		}()
+	})
+}
+
 func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *ClientConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctxRead, cancelRead := context.WithCancel(context.Background())
@@ -171,6 +217,7 @@ func NewClientConn(tun proto.GunService_TunClient, closer context.CancelFunc) *C
 	return &ClientConn{
 		tun:         tun,
 		closer:      closer,
+		sendCh:      make(chan *sendRequest, 1),
 		ctx:         ctx,
 		cancel:      cancel,
 		ctxRead:     ctxRead,
@@ -258,27 +305,47 @@ func (c *ClientConn) Write(p []byte) (n int, err error) {
 	// Refresh after acquiring the write lock so deadline changes made while
 	// this operation waited for another writer apply to the pending I/O.
 	ctxWrite = c.writeCtx()
-	// set 1 to avoid channel leak
-	sendDone := make(chan error, 1)
-	// pass channel to the function to avoid closure leak
-	go func(sendDone chan error) {
-		c.muSend.Lock()
-		defer c.muSend.Unlock()
-		e := c.tun.Send(&proto.Hunk{Data: p})
-		sendDone <- e
-	}(sendDone)
+	c.ensureSender()
+
+	req := sendReqPool.Get().(*sendRequest)
+	// A previous writer may have abandoned this recycled request at a write
+	// deadline, leaving the aborted Send's error queued; drop it.
+	select {
+	case <-req.done:
+	default:
+	}
+	// Whole-struct assignment, not a field write: it also resets the legacy
+	// proto XXX_ cache fields, so a recycled hunk marshals like a fresh one.
+	req.hunk = proto.Hunk{Data: p}
+	select {
+	case c.sendCh <- req:
+		// The sender dequeues a request before calling Send, and muWriting
+		// admits one writer at a time, so this handoff only blocks while an
+		// earlier wedged Send (already released by c.closer below or by
+		// Close) is still draining; the deadline/close arms keep that wait
+		// interruptible.
+	case <-ctxWrite.Done():
+		c.closer()
+		sendReqPool.Put(req)
+		return 0, os.ErrDeadlineExceeded
+	case <-c.ctx.Done():
+		sendReqPool.Put(req)
+		return 0, io.EOF
+	}
 	select {
 	case <-ctxWrite.Done():
 		// A wedged gRPC Send cannot be aborted or bypassed, and a second
 		// Send must not overtake it (that would reorder stream data), so
 		// cancelling the stream is the only way to unblock writers. Write
 		// deadlines are therefore terminal for this conn, unlike read
-		// deadlines above.
-		c.closer() // Cancel stream context so the Send goroutine can exit
+		// deadlines above. The sender goroutine stays alive: it reports the
+		// aborted Send's error into req.done (buffered, never blocking) and
+		// recycles the request for later writers.
+		c.closer() // Cancel stream context so the wedged Send can return
 		return 0, os.ErrDeadlineExceeded
 	case <-c.ctx.Done():
 		return 0, io.EOF
-	case err = <-sendDone:
+	case err = <-req.done:
 		if err != nil {
 			// A gRPC hunk is atomic at the message level: either the whole
 			// Hunk was accepted by the stream or none of it was, so there is
