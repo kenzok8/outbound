@@ -1,4 +1,4 @@
-package anytls
+package coalesce
 
 import (
 	"errors"
@@ -32,7 +32,7 @@ func (r *coalesceRecConn) SetWriteDeadline(t time.Time) error { r.wdCount++; ret
 
 func TestCoalesceMergesBurstIntoOneWrite(t *testing.T) {
 	rec := &coalesceRecConn{}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	if _, err := c.Write([]byte("record-one--")); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestCoalesceMergesBurstIntoOneWrite(t *testing.T) {
 
 func TestCoalesceFlushEmptyIsNoop(t *testing.T) {
 	rec := &coalesceRecConn{}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	if err := c.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestCoalesceFlushEmptyIsNoop(t *testing.T) {
 
 func TestCoalesceDeadlineExpiredFailsFlush(t *testing.T) {
 	rec := &coalesceRecConn{}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	if _, err := c.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestCoalesceDeadlineExpiredFailsFlush(t *testing.T) {
 
 func TestCoalesceFlushPropagatesWriteError(t *testing.T) {
 	rec := &coalesceRecConn{failOn: 1}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	if _, err := c.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
@@ -105,17 +105,20 @@ func TestCoalesceFlushPropagatesWriteError(t *testing.T) {
 	}
 }
 
-func TestCoalesceCloseFlushesFirst(t *testing.T) {
+func TestCoalesceCloseClosesRawWithoutDrain(t *testing.T) {
 	rec := &coalesceRecConn{}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	if _, err := c.Write([]byte("close_notify")); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.writes) != 1 || string(rec.writes[0]) != "close_notify" {
-		t.Fatalf("close_notify not flushed: %+v", rec.writes)
+	// Close deliberately does NOT drain: a flush blocked mid-write holds
+	// mu, and draining first would deadlock the deadline escape hatches
+	// that call Close. The contract is raw close, pending bytes dropped.
+	if len(rec.writes) != 0 {
+		t.Fatalf("pending bytes were flushed on Close: %+v", rec.writes)
 	}
 	if !rec.closed {
 		t.Fatal("underlying conn not closed")
@@ -124,7 +127,7 @@ func TestCoalesceCloseFlushesFirst(t *testing.T) {
 
 func TestCoalesceHardLimitSelfFlushes(t *testing.T) {
 	rec := &coalesceRecConn{}
-	c := newCoalesceConn(rec)
+	c := New(rec)
 	chunk := make([]byte, 40<<10)
 	for i := 0; i < 4; i++ { // 160KB total, crosses the 128KB limit
 		if _, err := c.Write(chunk); err != nil {
@@ -134,7 +137,44 @@ func TestCoalesceHardLimitSelfFlushes(t *testing.T) {
 	if len(rec.writes) == 0 {
 		t.Fatal("hard limit did not trigger a self-flush")
 	}
-	if c.Pending() >= coalesceBufHardLimit {
+	if c.Pending() >= bufHardLimit {
 		t.Fatalf("pending = %d still above limit", c.Pending())
+	}
+}
+
+// TestCloseNotDeadlockedByBlockedFlush reproduces the deadlock escape: with
+// a synchronous pipe whose peer never reads, a Read-triggered flush blocks
+// mid-write holding mu. Close must still return promptly (deadline escape
+// hatches wait on it), not queue behind the blocked flush forever.
+func TestCloseNotDeadlockedByBlockedFlush(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	c := New(client)
+	// Accumulate more than the pipe buffers (net.Pipe is unbuffered, so
+	// any record blocks until the peer reads; the peer never does).
+	if _, err := c.Write(make([]byte, 4096)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		// Read flushes first and blocks on the pipe write.
+		buf := make([]byte, 64)
+		_, _ = c.Read(buf)
+	}()
+	time.Sleep(20 * time.Millisecond) // let the read-side flush block
+	go func() {
+		done <- c.Close()
+	}()
+	select {
+	case <-done:
+		if time.Since(start) > time.Second {
+			t.Fatalf("Close() took %v, want deadline-bounded return", time.Since(start))
+		}
+		// The flush failure may or may not surface from Close (a
+		// deadline-class drain loss is deliberately swallowed); what
+		// matters is that Close returned within the bound.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() deadlocked behind a blocked flush")
 	}
 }

@@ -335,6 +335,12 @@ func (s *session) Close() error {
 		for _, stream := range streams {
 			stream.markClosed(net.ErrClosed)
 		}
+		// Drain the coalescer before the raw close: Close itself no
+		// longer flushes (a blocked flush must not delay teardown), so a
+		// pending close_notify or final frame is pushed here instead.
+		if s.flusher != nil {
+			_ = s.flusher.Flush()
+		}
 		_ = s.conn.Close()
 		s.connLock.Lock()
 		s.writeBuf = nil

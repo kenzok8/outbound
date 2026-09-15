@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"net/url"
 	"strconv"
 	"strings"
@@ -134,13 +135,18 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 			Handshake() error
 		}
 
+		// Coalesce the TLS records of one write burst into one socket
+		// write. Both crypto/tls and utls issue one underlying Write per
+		// record; on bulk relay paths that is ~3 write syscalls per 32KB.
+		co := coalesce.New(&netproxy.FakeNetConn{
+			Conn:  rc,
+			LAddr: nil,
+			RAddr: nil,
+		})
+
 		switch s.tlsImplentation {
 		case "tls":
-			tlsConn = tls.Client(&netproxy.FakeNetConn{
-				Conn:  rc,
-				LAddr: nil,
-				RAddr: nil,
-			}, s.tlsConfig)
+			tlsConn = tls.Client(co, s.tlsConfig)
 
 		case "utls":
 			clientHelloID, err := nameToUtlsClientHelloID(s.utlsImitate)
@@ -150,11 +156,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 				return nil, err
 			}
 
-			tlsConn = utls.UClient(&netproxy.FakeNetConn{
-				Conn:  rc,
-				LAddr: nil,
-				RAddr: nil,
-			}, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
+			tlsConn = utls.UClient(co, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
 
 		default:
 			_ = rc.Close()
@@ -165,7 +167,16 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 			_ = tlsConn.Close()
 			return nil, err
 		}
-		return tlsConn, err
+		// The handshake writes through the coalescer; a read that blocks on
+		// the peer flushes it, but push it out now so the first application
+		// write ordering is deterministic.
+		if err := co.Flush(); err != nil {
+			_ = tlsConn.Close()
+			return nil, err
+		}
+		// Flush after every protocol Write so unmanaged Write/Read users
+		// never observe stalled records.
+		return coalesce.NewFlushConn(tlsConn, co), nil
 	case "udp":
 		if s.passthroughUdp {
 			return s.dialer.DialContext(ctx, network, addr)

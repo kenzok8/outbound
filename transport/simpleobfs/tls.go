@@ -25,21 +25,30 @@ type TLSObfs struct {
 	remain        int
 	firstRequest  bool
 	firstResponse bool
-	rMu           sync.Mutex
-	wMu           sync.Mutex
+	// writeFrame is a per-connection scratch holding the 5-byte record
+	// header plus one chunk payload; allocating it per chunk (a fresh
+	// bytes.Buffer growing to ~16.4KB) put a ~1:1 allocation rate on bulk
+	// relay paths, which measurably doubles engine CPU per GB.
+	writeFrame []byte
+	// readDiscard/readSizeBuf are per-connection scratch for the record
+	// framing on the receive side; the discard length varies (3 regular,
+	// 105 first hello) but never exceeds 105.
+	readDiscard [105]byte
+	readSizeBuf [2]byte
+	rMu         sync.Mutex
+	wMu         sync.Mutex
 }
 
 func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
-	// The discard must be sized at runtime: discardN is 3 for regular
-	// records but 105 for the first server hello, so a fixed-size array
-	// would panic on the slice below.
-	discard := make([]byte, discardN)
+	// discardN is 3 for regular records but 105 for the first server
+	// hello, so the scratch is sized for the 105 maximum.
+	discard := to.readDiscard[:discardN]
 	if _, err := io.ReadFull(to.Conn, discard); err != nil {
 		return 0, err
 	}
 	// A truncated size header must surface as an error: returning
 	// (0, nil) here made relay loops spin forever on success-with-no-data.
-	sizeBuf := make([]byte, 2)
+	sizeBuf := to.readSizeBuf[:]
 	if _, err := io.ReadFull(to.Conn, sizeBuf); err != nil {
 		return 0, err
 	}
@@ -159,11 +168,18 @@ func (to *TLSObfs) write(b []byte) (int, error) {
 		return len(b), nil
 	}
 
-	buf := &bytes.Buffer{}
-	buf.Write([]byte{0x17, 0x03, 0x03})
-	_ = binary.Write(buf, binary.BigEndian, uint16(len(b)))
-	buf.Write(b)
-	if _, err := iout.WriteFull(to.Conn, buf.Bytes()); err != nil {
+	// Frame into the reusable scratch: 5-byte header + payload in one
+	// WriteFull, replacing the per-chunk bytes.Buffer (which allocated a
+	// fresh ~16.4KB buffer per 16KB chunk plus several small escapes).
+	if cap(to.writeFrame) < 5+len(b) {
+		to.writeFrame = make([]byte, 5+chunkSize)
+	}
+	frame := to.writeFrame[:5+len(b)]
+	frame[0], frame[1], frame[2] = 0x17, 0x03, 0x03
+	frame[3] = byte(uint16(len(b)) >> 8)
+	frame[4] = byte(len(b))
+	copy(frame[5:], b)
+	if _, err := iout.WriteFull(to.Conn, frame); err != nil {
 		return 0, err
 	}
 	return len(b), nil

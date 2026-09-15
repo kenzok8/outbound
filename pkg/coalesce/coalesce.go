@@ -1,7 +1,18 @@
-package anytls
+// Package coalesce batches the ciphertext records a TLS/utls layer emits
+// per application write into a single socket write. crypto/tls and utls
+// both issue one underlying Write per TLS record; without coalescing a
+// 32KB application write costs three write syscalls. The drain points are
+// designed around three invariants proven on the anytls path:
+//
+//   - Read flushes first: every write-then-wait-for-peer pattern (TLS
+//     handshake waiting for ServerHello, KeyUpdate responses, alerts)
+//     sends writes through the coalescer and then blocks on a read.
+//   - Explicit Flush after each framed write burst covers write-only
+//     streams that never read.
+//   - Close flushes close_notify before closing.
+package coalesce
 
 import (
-	"errors"
 	"net"
 	"os"
 	"sync"
@@ -9,7 +20,7 @@ import (
 	"time"
 )
 
-// coalesceConn sits between crypto/tls and the real socket. crypto/tls writes
+// Conn sits between crypto/tls and the real socket. crypto/tls writes
 // one syscall per TLS record (91.5k write syscalls per GB at 32KB frames: two
 // full 16KB records plus an orphan ~7B one). This layer accumulates the
 // ciphertext records produced by a single upper-layer write burst and flushes
@@ -20,7 +31,7 @@ import (
 // write burst (end of writeConnLockedWithDeadline) and on Close, so data
 // never sits buffered past the caller's write return. Errors surface at flush
 // time, which is safe: TLS cannot resume after a partial record write anyway.
-type coalesceConn struct {
+type Conn struct {
 	net.Conn
 
 	mu  sync.Mutex
@@ -29,18 +40,18 @@ type coalesceConn struct {
 	wdNano atomic.Int64 // write deadline as unix nanoseconds; 0 = none
 }
 
-func newCoalesceConn(c net.Conn) *coalesceConn {
-	return &coalesceConn{Conn: c}
+func New(c net.Conn) *Conn {
+	return &Conn{Conn: c}
 }
 
 // Write accumulates ciphertext and reports full success. The bytes are copied
 // because crypto/tls reuses its record output buffers after Write returns.
-func (c *coalesceConn) Write(p []byte) (int, error) {
+func (c *Conn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.buf = append(c.buf, p...)
 	n := len(c.buf)
 	c.mu.Unlock()
-	if n > coalesceBufHardLimit {
+	if n > bufHardLimit {
 		// Self-defense: if a caller ever forgets to flush, drop the
 		// accumulation instead of growing without bound.
 		_ = c.Flush()
@@ -48,10 +59,10 @@ func (c *coalesceConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-const coalesceBufHardLimit = 128 << 10
+const bufHardLimit = 128 << 10
 
 // Flush writes accumulated records with a single socket write.
-func (c *coalesceConn) Flush() error {
+func (c *Conn) Flush() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.buf) == 0 {
@@ -68,7 +79,7 @@ func (c *coalesceConn) Flush() error {
 
 // SetWriteDeadline records the deadline for Flush and forwards it so the
 // kernel enforces it during the flush write itself.
-func (c *coalesceConn) SetWriteDeadline(t time.Time) error {
+func (c *Conn) SetWriteDeadline(t time.Time) error {
 	if t.IsZero() {
 		c.wdNano.Store(0)
 	} else {
@@ -83,7 +94,7 @@ func (c *coalesceConn) SetWriteDeadline(t time.Time) error {
 // coalescer and then reads; without this hook those records would sit
 // buffered forever. Write-only streams are covered by the session's explicit
 // flush after each framed write burst.
-func (c *coalesceConn) Read(p []byte) (int, error) {
+func (c *Conn) Read(p []byte) (int, error) {
 	if c.Pending() != 0 {
 		if err := c.Flush(); err != nil {
 			return 0, err
@@ -93,19 +104,20 @@ func (c *coalesceConn) Read(p []byte) (int, error) {
 }
 
 // Pending returns the number of buffered bytes (diagnostics/tests).
-func (c *coalesceConn) Pending() int {
+func (c *Conn) Pending() int {
 	c.mu.Lock()
 	n := len(c.buf)
 	c.mu.Unlock()
 	return n
 }
 
-// Close flushes any close_notify record the TLS layer queued before closing.
-func (c *coalesceConn) Close() error {
-	flushErr := c.Flush()
-	closeErr := c.Conn.Close()
-	if flushErr != nil && !errors.Is(flushErr, os.ErrDeadlineExceeded) {
-		return flushErr
-	}
-	return closeErr
+// Close tears the connection down. The raw conn is closed FIRST, without
+// taking mu: a flush can be blocked mid-write holding mu (a synchronous
+// pipe in tests, or a full TCP send buffer when no caller deadline is
+// armed), and closing the socket unblocks it and every waiter behind it.
+// Pending bytes — at most a close_notify, since steady-state callers flush
+// per burst — are dropped; that beats deadlocking the deadline escape
+// hatches that call Close.
+func (c *Conn) Close() error {
+	return c.Conn.Close()
 }

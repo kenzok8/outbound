@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"net"
 	"strconv"
 	"sync"
@@ -189,7 +190,7 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 
 	// Coalesce TLS records: crypto/tls issues one socket write per record;
 	// the coalescer batches the records of one write burst into one write.
-	coConn := newCoalesceConn(conn)
+	coConn := coalesce.New(conn)
 	tlsConn := tls.Client(coConn, d.tlsConfig)
 	if err := netproxy.HandshakeWithContext(ctx, tlsConn); err != nil {
 		_ = tlsConn.Close()
