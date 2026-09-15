@@ -440,7 +440,12 @@ func (b *Bbr3Sender) recalc() {
 		// divergence; the inflight_hi overshoot cap below still applies.
 		if rate > 0 && b.rttStats != nil {
 			if srtt := b.rttStats.SmoothedRTT(); srtt > 0 {
-				if support := congestion.ByteCount(uint64(rate) * uint64(srtt) / 1e9); cwnd < support {
+				// Scaled by CwndGain so that on a path where smoothedRTT has
+				// not diverged from minRTT the floor equals the BDP term
+				// exactly (inert); it exceeds it only by the divergence
+				// ratio, and it keeps the probe headroom CwndGain provides.
+				support := congestion.ByteCount(float64(b.params.CwndGain) * float64(rate) * float64(srtt) / 1e9)
+				if cwnd < support {
 					cwnd = support
 				}
 			}
