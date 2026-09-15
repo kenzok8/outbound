@@ -427,6 +427,24 @@ func (b *Bbr3Sender) recalc() {
 		cwnd = m.probeRttTarget()
 	} else {
 		cwnd = congestion.ByteCount(b.params.CwndGain * float64(bdpFrom(est, m.minRttValue())))
+		// Pacing-support floor on the BDP term: the window must be able to
+		// hold the intended pacing rate over the RTT the connection actually
+		// experiences. BDP uses minRTT, but when pacing gaps drive minRTT far
+		// below smoothedRTT (measured 3x divergence on a us-RTT path), the
+		// BDP term collapses below the 4-packet minimum and the window - not
+		// the path - caps the rate at minCwnd/smoothedRTT forever: every
+		// sample then equals the pacing rate, so PROBE_UP can never observe a
+		// higher delivery rate and the estimate stops compounding. The floor
+		// is inert while pacingRate x smoothedRTT stays under the cwnd gain
+		// multiple of BDP(minRTT), which holds on paths without that
+		// divergence; the inflight_hi overshoot cap below still applies.
+		if rate > 0 && b.rttStats != nil {
+			if srtt := b.rttStats.SmoothedRTT(); srtt > 0 {
+				if support := congestion.ByteCount(uint64(rate) * uint64(srtt) / 1e9); cwnd < support {
+					cwnd = support
+				}
+			}
+		}
 		if m.inflightLo > 0 && cwnd < m.inflightLo {
 			cwnd = m.inflightLo
 		}
