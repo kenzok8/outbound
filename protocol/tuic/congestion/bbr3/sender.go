@@ -270,14 +270,18 @@ func (b *Bbr3Sender) onAckEvent(now time.Time, acked []congestion.AckedPacketInf
 		if roundStart {
 			m.checkFullBwReached()
 		}
-		if lostBytes > 0 && m.lossRateExceeded() {
-			// Sustained loss during the ramp means the path is saturated: stop
-			// probing and drain the queue. The upper bound is left unset so
-			// PROBE_UP owns it in this local policy.
-			cur = modeDrain
-		} else if m.fullBwReached {
+		if m.fullBwReached {
 			cur = modeDrain
 		}
+		// Loss must NOT abort STARTUP. Background loss of a few percent is
+		// common on real paths, and a per-round loss gate fires on it as
+		// soon as the round carries enough packets (measured: with a 2%
+		// random-loss, 250 ms RTT path, STARTUP exited at ~1/30th of path
+		// capacity and PROBE_BW never recovered, while bbr - whose startup
+		// ignores loss - reached capacity on the same path; with the exit
+		// removed bbr3 matched or beat bbr on every degraded scenario
+		// tested). Overshoot protection stays: fullBwReached ends the ramp,
+		// and PROBE_UP's inflight_hi cap answers loss once probing begins.
 	case modeDrain:
 		if m.bytesInFlight <= m.bdp() {
 			cur = modeProbeBWDown

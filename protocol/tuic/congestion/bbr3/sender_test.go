@@ -122,17 +122,23 @@ func TestOnPacketSentTracksTheStackInFlightAccounting(t *testing.T) {
 	}
 }
 
-func TestStartupOvershootExitsWithoutSettingInflightHi(t *testing.T) {
+func TestStartupSurvivesSustainedLossWithoutSettingInflightHi(t *testing.T) {
 	s := newTestSender(0)
 	now := time.Now()
 	now = drive(s, now, 6, 80*time.Millisecond)
 
 	s.mode.Store(uint32(modeStartup))
 	s.model.inflightHi = 0
+	// Background loss must not abort STARTUP: a per-round loss gate fires on
+	// a few percent of random loss as soon as rounds carry enough packets,
+	// which stranded the sender at a fraction of path capacity on degraded
+	// paths (see the STARTUP case in sender.go). Overshoot is answered by
+	// the full-bandwidth test and, once probing, by PROBE_UP's inflight_hi
+	// cap.
 	losePackets(s, now, 100_000, 5_000)
 
-	if mode(s.mode.Load()) != modeDrain {
-		t.Fatalf("mode = %s, want DRAIN after sustained startup loss", s.Mode())
+	if mode(s.mode.Load()) != modeStartup {
+		t.Fatalf("mode = %s, want STARTUP to survive sustained loss", s.Mode())
 	}
 	// PROBE_UP owns the upper bound; pinning it from a startup loss would clamp
 	// the sender to a tiny window for the rest of the connection.
