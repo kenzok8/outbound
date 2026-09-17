@@ -1030,7 +1030,12 @@ func (p *h2ConnsPool) GetConn(ctx context.Context, nextDialer netproxy.Dialer, a
 		return nil, nil, fmt.Errorf("h2ConnsPool.GetClientConn: %w", err)
 	}
 	nextProto := ""
-	if tlsConn, ok := rawConn.(*tls.Conn); ok {
+	// An https proxy reaches this pool through transport/tls, which returns a
+	// coalescer wrapper around the *tls.Conn: peeling before the assertion is
+	// what makes the negotiated ALPN visible here. Asserting on rawConn alone
+	// left nextProto empty and silently downgraded every https proxy to
+	// HTTP/1.1 CONNECT.
+	if tlsConn, ok := netproxy.UnwrapIntrinsicConn(rawConn).(*tls.Conn); ok {
 		if err := netproxy.HandshakeWithContext(dialCtx, tlsConn); err != nil {
 			_ = rawConn.Close()
 			return nil, nil, err

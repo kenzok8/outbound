@@ -230,7 +230,10 @@ func (d *naiveDialer) newClientConn(ctx context.Context, magicNetwork string) (n
 		return nil, nil, fmt.Errorf("naive: TLS dial: %w", err)
 	}
 
-	if tc, ok := rawConn.(*tls.Conn); ok {
+	// The TLS dialer hands back a conn the record coalescer wraps, so the
+	// *tls.Conn is one IntrinsicConn hop away: asserting on rawConn directly
+	// would skip both the handshake and the mandatory h2 ALPN check below.
+	if tc, ok := netproxy.UnwrapIntrinsicConn(rawConn).(*tls.Conn); ok {
 		if err = tc.HandshakeContext(ctx); err != nil {
 			_ = rawConn.Close()
 			return nil, nil, fmt.Errorf("naive: TLS handshake: %w", err)

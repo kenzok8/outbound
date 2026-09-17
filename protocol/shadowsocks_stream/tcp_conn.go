@@ -118,16 +118,24 @@ func (c *TcpConn) Write(b []byte) (n int, err error) {
 		copy(buf[ivLen:], b)
 		b = buf
 
-		// For SSR obfs.
-		if innerConn, ok := c.Conn.(interface {
-			SetCipher(cipher *ciphers.StreamCipher)
-		}); ok {
-			innerConn.SetCipher(c.cipher)
-		}
-		if innerConn, ok := c.Conn.(interface {
-			SetAddrLen(addrLen int)
-		}); ok {
-			innerConn.SetAddrLen(lenToWrite)
+		// For SSR obfs. The obfs conn is not necessarily c.Conn:
+		// shadowsocks_stream installs a netproxy.BufferedReaderConn between this
+		// TcpConn and the dialed underlay, and any wrapper hides the obfs hooks
+		// from a single-level type assertion. The ok-form assertion then failed
+		// silently, the obfs cipher stayed nil, and the first write returned
+		// "outer conn did not init cipher of Obfs" - killing every TCP flow of
+		// that node while UDP (which never takes this wrapper) stayed up.
+		if hook := netproxy.UnwrapIntrinsicConn(c.Conn); hook != nil {
+			if innerConn, ok := hook.(interface {
+				SetCipher(cipher *ciphers.StreamCipher)
+			}); ok {
+				innerConn.SetCipher(c.cipher)
+			}
+			if innerConn, ok := hook.(interface {
+				SetAddrLen(addrLen int)
+			}); ok {
+				innerConn.SetAddrLen(lenToWrite)
+			}
 		}
 	} else {
 		buf := pool.Get(len(b))

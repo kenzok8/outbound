@@ -136,6 +136,51 @@ func (w *testCloseWriteWrapper) CloseWrite() error {
 	return ForwardCloseWrite(w.Conn)
 }
 
+// testIntrinsicWrapper is a minimal IntrinsicConnProvider layer.
+type testIntrinsicWrapper struct {
+	Conn
+	inner Conn
+}
+
+func (w *testIntrinsicWrapper) IntrinsicConn() Conn { return w.inner }
+
+// testIntrinsicLoopWrapper reports itself as its own intrinsic conn.
+type testIntrinsicLoopWrapper struct {
+	Conn
+}
+
+func (w *testIntrinsicLoopWrapper) IntrinsicConn() Conn { return w }
+
+func TestUnwrapIntrinsicConnPeelsWrappers(t *testing.T) {
+	leaf := &testLoopWrapper{}
+	inner := &testIntrinsicWrapper{inner: leaf}
+	outer := &testIntrinsicWrapper{inner: inner}
+
+	if got := UnwrapIntrinsicConn(outer); got != Conn(leaf) {
+		t.Fatalf("UnwrapIntrinsicConn = %T, want the leaf %T", got, leaf)
+	}
+
+	// The read-buffering wrapper participates in the same convention.
+	buffered := NewBufferedReaderConn(outer, 0)
+	if got := UnwrapIntrinsicConn(buffered); got != Conn(leaf) {
+		t.Fatalf("UnwrapIntrinsicConn over BufferedReaderConn = %T, want the leaf %T", got, leaf)
+	}
+}
+
+func TestUnwrapIntrinsicConnWithoutWrapperReturnsInput(t *testing.T) {
+	leaf := &testLoopWrapper{}
+	if got := UnwrapIntrinsicConn(leaf); got != Conn(leaf) {
+		t.Fatalf("UnwrapIntrinsicConn = %T, want the input %T", got, leaf)
+	}
+}
+
+func TestUnwrapIntrinsicConnCycleGuard(t *testing.T) {
+	loop := &testIntrinsicLoopWrapper{}
+	if got := UnwrapIntrinsicConn(loop); got != Conn(loop) {
+		t.Fatalf("UnwrapIntrinsicConn = %T, want the cycle wrapper %T", got, loop)
+	}
+}
+
 func TestForwardCloseWriteTCP(t *testing.T) {
 	client, server := tcpPair(t)
 	if err := ForwardCloseWrite(client); err != nil {
