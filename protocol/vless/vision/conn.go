@@ -102,10 +102,12 @@ func (vc *Conn) CloseWrite() error {
 	vc.muWrite.Lock()
 	defer vc.muWrite.Unlock()
 	if vc.toWriteDirect {
-		if tcp, ok := vc.Conn.(*net.TCPConn); ok {
-			return tcp.CloseWrite()
-		}
-		return nil
+		// Direct mode hands the payload to the underlay conn itself (see
+		// writeWrapper.Write), so the half-close has to reach that same conn.
+		// Asserting *net.TCPConn here never matched: the underlay is the TLS
+		// conn's NetConn(), i.e. the record coalescer or a FakeNetConn, so the
+		// FIN was silently dropped while the socket stayed open.
+		return netproxy.ForwardCloseWrite(vc.Conn)
 	}
 	return netproxy.ForwardCloseWrite(vc.overlayConn)
 }

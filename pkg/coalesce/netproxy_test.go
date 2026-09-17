@@ -73,6 +73,32 @@ func TestFlushConnForwardsWrappedCapabilities(t *testing.T) {
 	}
 }
 
+// TestFlushConnCloseWriteFlushesCoalescedClose guards the flush half of the
+// forwarded half-close contract: CloseWrite's close_notify goes through the
+// coalescer like any other record, so the forward is only complete once the
+// buffer has been pushed (Write behaves the same way).
+func TestFlushConnCloseWriteFlushesCoalescedClose(t *testing.T) {
+	inner := &capabilityConn{}
+	co := New(inner)
+	fc := NewFlushConn(inner, co)
+
+	if _, err := co.Write([]byte("close-notify")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if co.Pending() == 0 {
+		t.Fatal("expected the alert buffered before CloseWrite")
+	}
+	if err := fc.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	if inner.closeWrites != 1 {
+		t.Fatalf("inner CloseWrite calls = %d, want 1", inner.closeWrites)
+	}
+	if got := co.Pending(); got != 0 {
+		t.Fatalf("pending after CloseWrite = %d, want the coalescer flushed", got)
+	}
+}
+
 // bareConn implements only netproxy.Conn (plus the net.Conn address surface),
 // so a wrapper over it must fall back to the wrapped conn itself instead of
 // inventing an intrinsic target.

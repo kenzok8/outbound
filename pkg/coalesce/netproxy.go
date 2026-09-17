@@ -67,11 +67,19 @@ func (f *FlushConn) WriteDeadlineClosesSession() bool {
 	return netproxy.WriteDeadlineClosesSession(f.Conn)
 }
 
-// CloseWrite forwards half-close. crypto/tls.Conn implements CloseWrite, but
-// the promoted method set of an embedded netproxy.Conn does not include it, so
-// without this forward every TLS-based transport silently lost half-close.
+// CloseWrite forwards half-close and then flushes the coalesced records that
+// carried it. crypto/tls.Conn implements CloseWrite, but the promoted method
+// set of an embedded netproxy.Conn does not include it, so without this forward
+// every TLS-based transport silently lost half-close. The flush mirrors Write's
+// contract: CloseWrite's close_notify is just more ciphertext in the coalescer,
+// and a forwarded close that stayed buffered would not reach the socket until
+// the next read.
 func (f *FlushConn) CloseWrite() error {
-	return netproxy.ForwardCloseWrite(f.Conn)
+	err := netproxy.ForwardCloseWrite(f.Conn)
+	if ferr := f.co.Flush(); ferr != nil && err == nil {
+		err = ferr
+	}
+	return err
 }
 
 // LocalAddr exposes the wrapped TLS conn's local address so FlushConn keeps the

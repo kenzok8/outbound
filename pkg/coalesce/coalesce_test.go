@@ -2,6 +2,7 @@ package coalesce
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"testing"
@@ -176,5 +177,81 @@ func TestCloseNotDeadlockedByBlockedFlush(t *testing.T) {
 		// matters is that Close returned within the bound.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close() deadlocked behind a blocked flush")
+	}
+}
+
+// coalesceTCPPair returns a connected TCP pair, which is the only layered conn
+// that can observe a real half-close (a *net.TCPConn is what actually sends the
+// FIN). The caller owns both ends; they are closed on cleanup.
+func coalesceTCPPair(t *testing.T) (client, server net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- c
+	}()
+	client, err = net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	select {
+	case server = <-accepted:
+	case err := <-acceptErr:
+		t.Fatalf("accept: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("accept timed out")
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	return client, server
+}
+
+// TestCoalesceCloseWriteFlushesPendingThenHalfCloses is the regression guard for
+// XTLS/Vision direct mode: it writes payload through the coalescer and then
+// half-closes, so the buffered records have to reach the peer before the FIN.
+// CloseWrite on the embedded net.Conn would have been a no-op (net.Conn has no
+// CloseWrite) with the records still sitting in c.buf.
+func TestCoalesceCloseWriteFlushesPendingThenHalfCloses(t *testing.T) {
+	client, server := coalesceTCPPair(t)
+	c := New(client)
+
+	if _, err := c.Write([]byte("pending-records")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if c.Pending() == 0 {
+		t.Fatal("expected records buffered before CloseWrite")
+	}
+	if err := c.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	if got := c.Pending(); got != 0 {
+		t.Fatalf("pending after CloseWrite = %d, want the records flushed", got)
+	}
+
+	if err := server.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := server.Read(buf)
+	if err != nil {
+		t.Fatalf("peer read: %v", err)
+	}
+	if got := string(buf[:n]); got != "pending-records" {
+		t.Fatalf("peer read = %q, want the flushed records", got)
+	}
+	if n, err := server.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("peer read after half-close = %d, %v, want 0, EOF", n, err)
 	}
 }

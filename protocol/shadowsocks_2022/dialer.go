@@ -118,7 +118,15 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		if npc, ok := conn.(netproxy.Conn); ok {
 			conn = netproxy.NewBufferedReaderConn(npc, 0)
 		}
-		return NewTCPConnWithContext(ctx, conn.(net.Conn), d.core, d.sg, addrInfo, nil), nil
+		// TCPConn embeds net.Conn. BufferedReaderConn carries the address
+		// accessors for exactly this assertion; turn a future wrapper that
+		// drops them into a dial error instead of a panic.
+		netConn, ok := conn.(net.Conn)
+		if !ok {
+			_ = conn.Close()
+			return nil, fmt.Errorf("shadowsocks_2022: TCP underlay does not implement net.Conn: %T", conn)
+		}
+		return NewTCPConnWithContext(ctx, netConn, d.core, d.sg, addrInfo, nil), nil
 	case "udp":
 		conn, err := d.ListenPacket(ctx, network, d.proxyAddress)
 		if err != nil {
