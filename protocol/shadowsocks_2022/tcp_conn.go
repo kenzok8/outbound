@@ -1,6 +1,7 @@
 package shadowsocks_2022
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -56,6 +57,14 @@ type TCPConn struct {
 
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
+
+	// requestSalt is the salt this client sent with its request stream. The
+	// response fixed-length header echoes it and SIP022 §3.1.3 requires the
+	// client to check the echoed value against the request salt, which binds
+	// a response stream to this request. Guarded by saltMu because the first
+	// Read and first Write may run on different goroutines.
+	requestSalt []byte
+	saltMu      sync.RWMutex
 
 	leftToRead    []byte
 	indexToRead   int
@@ -420,6 +429,18 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			return 0, err
 		}
 
+		// SIP022 §3.1.3: the client MUST check the request salt echoed in
+		// the response header against the salt it sent, which binds the
+		// response stream to this request.
+		c.saltMu.RLock()
+		sent := c.requestSalt
+		matched := len(sent) == c.CipherConf().SaltLen &&
+			bytes.Equal(sent, header[offset:offset+c.CipherConf().SaltLen])
+		c.saltMu.RUnlock()
+		if !matched {
+			return 0, protocol.ErrFailAuth
+		}
+
 		// Best-effort replay protection fallback for environments that provide bloom.
 		if c.bloom != nil {
 			if c.bloom.ExistOrAdd(salt) {
@@ -507,6 +528,10 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		// Generate salt
 		salt := c.sg.Get()
 		defer pool.Put(salt)
+
+		c.saltMu.Lock()
+		c.requestSalt = append(c.requestSalt[:0], salt...)
+		c.saltMu.Unlock()
 
 		// Setup encryption
 		c.cipherWrite, err = CreateCipher(c.UPSK(), salt, c.CipherConf())

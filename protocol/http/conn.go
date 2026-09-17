@@ -526,7 +526,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 
 		// Thanks to v2fly/v2ray-core.
-		connectHttp2 := func(handshakeCtx context.Context, rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+		// The candidate is typed netproxy.Conn, not *http2Conn: a plain nil
+		// *http2Conn on the failure paths below would wrap into a non-nil
+		// interface at the finishHandshake call, and discardCandidate would
+		// then call Close on a nil *http2Conn and panic. connectHttp1 has the
+		// same shape and already returns the interface.
+		connectHttp2 := func(handshakeCtx context.Context, rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn netproxy.Conn, n int, err error) {
 			if handshakeCtx != nil {
 				select {
 				case <-handshakeCtx.Done():

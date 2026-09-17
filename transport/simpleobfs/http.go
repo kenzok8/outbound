@@ -66,6 +66,10 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 // delivers whatever body bytes followed it. A single Read that does not yet
 // contain "\r\n\r\n" is NOT end of stream — the header may straddle TCP
 // segments — so bytes are accumulated and the JOINED buffer is searched.
+// The terminator search runs BEFORE the size bound: a single read can carry
+// the complete header plus kilobytes of body (the normal fast-relay case),
+// and that is success, not an oversized header. Only a terminator-less
+// accumulation beyond the bound is an error.
 func (ho *HTTPObfs) readFirstResponse(b []byte) (int, error) {
 	for {
 		buf := pool.Get(1 << 15)
@@ -75,15 +79,14 @@ func (ho *HTTPObfs) readFirstResponse(b []byte) (int, error) {
 			ho.headerBuf = nil
 			return 0, err
 		}
-		if len(ho.headerBuf)+n > maxResponseHeaderSize {
-			pool.Put(buf)
-			ho.headerBuf = nil
-			return 0, fmt.Errorf("simple-obfs http: response header exceeds %d bytes", maxResponseHeaderSize)
-		}
 		ho.headerBuf = append(ho.headerBuf, buf[:n]...)
 		pool.Put(buf)
 		idx := bytes.Index(ho.headerBuf, []byte("\r\n\r\n"))
 		if idx == -1 {
+			if len(ho.headerBuf) > maxResponseHeaderSize {
+				ho.headerBuf = nil
+				return 0, fmt.Errorf("simple-obfs http: response header exceeds %d bytes", maxResponseHeaderSize)
+			}
 			continue
 		}
 		ho.firstResponse = false

@@ -331,6 +331,22 @@ func TestShouldRetryNaiveRoundTrip(t *testing.T) {
 	assert.False(t, shouldRetryNaiveRoundTrip(io.EOF))
 }
 
+// TestRandIntStaysInBounds guards randInt against negative draws. randInt
+// reduces the raw crypto/rand uint32 in the uint32 domain; converting to int
+// before the modulo wraps negative on 32-bit platforms for half of the draws,
+// which used to panic generatePaddingHeader and corrupt writePadded padding
+// sizes. Run this file with GOARCH=386 to exercise the 32-bit arithmetic.
+func TestRandIntStaysInBounds(t *testing.T) {
+	for _, max := range []int{1, 2, 17, 94, 256, 65535} {
+		for i := 0; i < 512; i++ {
+			v := randInt(max)
+			if v < 0 || v >= max {
+				t.Fatalf("randInt(%d) = %d, want [0,%d)", max, v, max)
+			}
+		}
+	}
+}
+
 type deadlineTrackingConn struct {
 	setDeadlineCalls      int
 	setReadDeadlineCalls  int

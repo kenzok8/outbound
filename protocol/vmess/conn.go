@@ -135,8 +135,19 @@ func (c *Conn) dialTargetAddrPort() (netip.AddrPort, error) {
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
-	c.dialTgtAddrPort = tgt.AddrPort()
+	c.dialTgtAddrPort = unmapAddrPort(tgt.AddrPort())
 	return c.dialTgtAddrPort, nil
+}
+
+// unmapAddrPort normalizes the v4-in-v6 form net.ResolveUDPAddr yields for
+// literal IPv4 targets (its net.IP keeps the 16-byte ::ffff: representation
+// and UDPAddr.AddrPort does not unmap it). Without this, the fixed-target
+// ReadFrom reports datagram sources as [::ffff:a.b.c.d]:p instead of the
+// canonical a.b.c.d:p, and packet-addr writes would encode IPv4 targets with
+// the IPv6 address type. Unmap is the identity for IPv6 and clean IPv4
+// addresses, so only the mapped form changes.
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
 func (c *Conn) chunks(size int) (payloadSize int, numChunks int) {

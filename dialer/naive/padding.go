@@ -73,7 +73,11 @@ func randInt(max int) int {
 		// fast PRNG instead of deterministic zero padding.
 		return fastrand.Intn(max)
 	}
-	return int(binary.BigEndian.Uint32(buf[:])) % max
+	// Reduce in the uint32 domain. Converting the raw draw to int first
+	// wraps negative on 32-bit platforms for half of the draws (uint32 with
+	// the top bit set), and Go's % keeps the sign of the dividend, so the
+	// result fed negative sizes and indices into the padding codec.
+	return int(binary.BigEndian.Uint32(buf[:]) % uint32(max))
 }
 
 // paddedWriter wraps an io.Writer and applies naiveproxy payload padding
