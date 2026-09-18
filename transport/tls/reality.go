@@ -47,6 +47,22 @@ var (
 	Reality_Version_z byte = 10
 )
 
+// realityHelloAttempts bounds how many ClientHellos the dialer generates before
+// it gives up on a fingerprint. A fingerprint only authenticates when its hello
+// carries a TLS 1.3 key share, and uTLS's randomized parrots (fp=random,
+// fp=randomized) offer one in only about 40% of handshakes: measured over 3000
+// builds each with the pinned uTLS revision, HelloRandomized,
+// HelloRandomizedALPN and HelloRandomizedNoALPN landed at 37.7%-41.5%, while
+// Chrome, Firefox, Safari and iOS landed at 100%.
+//
+// A rebuild happens before anything is sent, costs about 0.035ms, and reuses
+// the same underlay, so it is free compared with the dial itself. Three attempts
+// left the randomized fingerprints failing 0.6^3 = 22% of the time; sixteen
+// bring that to 0.03%. Fingerprints that never carry a key share (for example
+// Android 11's OkHttp parrot or the pre-TLS1.3 360 parrots) still fail after a
+// bounded number of local rebuilds with an error that names the fingerprint.
+const realityHelloAttempts = 16
+
 // realitySealAuth seals the REALITY authentication payload into the ClientHello
 // session ID and copies the ciphertext back into the raw ClientHello.
 //
@@ -288,7 +304,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 		if err != nil {
 			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
 		}
-		retry := 0
+		retry := 1
 	retryHandshake:
 		uConn := &RealityUConn{}
 		utlsConfig := &utls.Config{
@@ -325,7 +341,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 			ecdheKey := realityECDHEKey(&uConn.HandshakeState)
 			if ecdheKey == nil {
 				// logrus.Println("wtf", retry, addr)
-				if retry > 2 {
+				if retry >= realityHelloAttempts {
 					_ = c.Close()
 					return nil, fmt.Errorf("REALITY: fingerprint %s %s does not provide a usable TLS 1.3 key share", x.fingerprint.Client, x.fingerprint.Version)
 				}
