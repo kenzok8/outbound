@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -62,6 +63,11 @@ var (
 // Android 11's OkHttp parrot or the pre-TLS1.3 360 parrots) still fail after a
 // bounded number of local rebuilds with an error that names the fingerprint.
 const realityHelloAttempts = 16
+
+// realityBothShapesBackoff is how long a REALITY server that rejected both
+// ClientHello shapes (post-quantum free and hybrid) is dialled with a single
+// attempt before the second shape is probed again.
+const realityBothShapesBackoff = 5 * time.Minute
 
 // realitySealAuth seals the REALITY authentication payload into the ClientHello
 // session ID and copies the ciphertext back into the raw ClientHello.
@@ -179,6 +185,70 @@ type Reality struct {
 	publicKey   *ecdh.PublicKey
 	spiderX     string
 	spiderY     []int64
+
+	// pqHybrid remembers whether this server authenticated with the
+	// fingerprint's original ClientHello, which keeps the post-quantum
+	// X25519MLKEM768 key share. Newest REALITY servers require that share and
+	// answer as the real website when it is missing, while post-quantum aware
+	// servers of the previous generation negotiate the hybrid group and then
+	// derive a different REALITY authentication key, so both shapes exist in
+	// the wild. The default shape is the pre-post-quantum one (see
+	// dropHybridKeyShare); a failed handshake retries the other shape once.
+	pqHybrid atomic.Bool
+	// pqRetryAfter suppresses that second shape probe until this UNIX time once
+	// both shapes failed, so a dead or blocked server is not dialled twice on
+	// every single connection.
+	pqRetryAfter atomic.Int64
+}
+
+// dropHybridKeyShare removes the post-quantum X25519MLKEM768 group from the
+// ClientHello: both its key share entry and its supported_groups entry.
+//
+// REALITY encrypts its authentication payload into the ClientHello before the
+// server chooses a key share, so the client has to keep the negotiated group
+// deterministic: the payload is sealed with the classic X25519 key share, while
+// a server that negotiates the hybrid X25519MLKEM768 group derives a different
+// authentication key and treats the client as a probe. Post-quantum capable
+// servers prefer that group as soon as the client advertises it (Go 1.24
+// curvePreferences, Chrome 131+ parrots), which makes "chrome" fingerprints
+// fail against them with "REALITY: processed invalid connection".
+//
+// Removing only the supported_groups entry is not enough: servers that validate
+// key shares against the advertised groups reject the hello with
+// "tls: illegal parameter". Removing both yields the pre-PQ Chrome hello shape
+// that Xray's pinned uTLS fingerprints produce.
+func dropHybridKeyShare(uConn *utls.UConn) {
+	changed := false
+	for _, ext := range uConn.Extensions {
+		switch e := ext.(type) {
+		case *utls.KeyShareExtension:
+			kept := e.KeyShares[:0]
+			for _, share := range e.KeyShares {
+				if share.Group == utls.X25519MLKEM768 {
+					changed = true
+					continue
+				}
+				kept = append(kept, share)
+			}
+			e.KeyShares = kept
+		case *utls.SupportedCurvesExtension:
+			kept := e.Curves[:0]
+			for _, curve := range e.Curves {
+				if curve == utls.X25519MLKEM768 {
+					changed = true
+					continue
+				}
+				kept = append(kept, curve)
+			}
+			e.Curves = kept
+		}
+	}
+	if !changed {
+		return
+	}
+	if err := uConn.BuildHandshakeState(); err != nil {
+		logger.Logger.WithError(err).Warn("REALITY: failed to rebuild ClientHello without X25519MLKEM768")
+	}
 }
 
 // realityECDHEKey returns the TLS 1.3 ECDHE private key used by REALITY.
@@ -305,6 +375,8 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
 		}
 		retry := 1
+		retryHybrid := false
+		hybridHello := x.pqHybrid.Load()
 	retryHandshake:
 		uConn := &RealityUConn{}
 		utlsConfig := &utls.Config{
@@ -325,6 +397,9 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 			if err != nil {
 				_ = c.Close()
 				return nil, err
+			}
+			if !hybridHello {
+				dropHybridKeyShare(uConn.UConn)
 			}
 			hello := uConn.HandshakeState.Hello
 			hello.SessionId = make([]byte, 32)
@@ -376,6 +451,21 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 		// }
 		// logrus.Println("11", uConn.Verified)
 		if !uConn.Verified {
+			// The server answered as the real website instead of proving
+			// itself, which means it rejected the REALITY authentication
+			// payload. Retry once with the other ClientHello shape, because the
+			// shape is what differs between server generations, then give up and
+			// act as cover traffic.
+			if !retryHybrid && (hybridHello || time.Now().Unix() >= x.pqRetryAfter.Load()) {
+				retryHybrid = true
+				hybridHello = !hybridHello
+				_ = c.Close()
+				if next, dialErr := x.nextDialer.DialContext(ctx, network, addr); dialErr == nil {
+					c = next
+					goto retryHandshake
+				}
+			}
+			x.pqRetryAfter.Store(time.Now().Add(realityBothShapesBackoff).Unix())
 			// Trigger spider. This goroutine lives as long as the process and
 			// nothing else owns it, so an unhandled panic here would take the
 			// whole process down; contain it and report it instead.
@@ -495,6 +585,8 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 			time.Sleep(time.Duration(randBetween(x.spiderY[8], x.spiderY[9])) * time.Millisecond) // return
 			return nil, errors.New("REALITY: processed invalid connection")
 		}
+		x.pqHybrid.Store(hybridHello)
+		x.pqRetryAfter.Store(0)
 		return uConn, nil
 
 	case "udp":
