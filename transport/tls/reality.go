@@ -37,7 +37,6 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/logger"
 	utls "github.com/refraction-networking/utls"
-	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
 )
@@ -48,8 +47,31 @@ var (
 	Reality_Version_z byte = 10
 )
 
-//go:linkname aesgcmPreferred github.com/refraction-networking/utls.aesgcmPreferred
-func aesgcmPreferred(ciphers []uint16) bool
+// realitySealAuth seals the REALITY authentication payload into the ClientHello
+// session ID and copies the ciphertext back into the raw ClientHello.
+//
+// REALITY always authenticates with AES-GCM keyed by the 32-byte REALITY auth
+// key (AES-256-GCM): Xray (crypto.NewAesGcm) and sing-box through
+// metacubex-utls both open the payload with AES-GCM no matter which cipher
+// suites the ClientHello offers. Deriving the AEAD from the
+// offered suites is therefore wrong: an earlier revision preferred
+// ChaCha20-Poly1305 whenever the first recognized suite was not AES-GCM, which
+// randomized fingerprints (fp=random, fp=randomized) hit on a fraction of
+// dials. The server then cannot open the payload, falls back to the handshake
+// target and the client reports "REALITY: processed invalid connection".
+func realitySealAuth(hello *utls.PubClientHelloMsg, authKey []byte) error {
+	block, err := aes.NewCipher(authKey)
+	if err != nil {
+		return fmt.Errorf("REALITY: build AES block: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("REALITY: build AES-GCM: %w", err)
+	}
+	aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
+	copy(hello.Raw[39:], hello.SessionId)
+	return nil
+}
 
 type RealityUConn struct {
 	*utls.UConn
@@ -323,18 +345,10 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c netp
 				_ = c.Close()
 				return nil, err
 			}
-			var aead cipher.AEAD
-			if aesgcmPreferred(hello.CipherSuites) {
-				block, _ := aes.NewCipher(uConn.AuthKey)
-				aead, _ = cipher.NewGCM(block)
-			} else {
-				aead, _ = chacha20poly1305.New(uConn.AuthKey)
+			if err := realitySealAuth(hello, uConn.AuthKey); err != nil {
+				_ = c.Close()
+				return nil, err
 			}
-			// if config.Show {
-			// logrus.Printf("REALITY uConn.AuthKey[:16]: %v\tAEAD: %T\n", uConn.AuthKey[:16], aead)
-			// }
-			aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
-			copy(hello.Raw[39:], hello.SessionId)
 		}
 		// logrus.Println("00")
 		if err := uConn.HandshakeContext(ctx); err != nil {
